@@ -21,8 +21,13 @@ voice interaction as first-class apps. It provides:
     as a push-to-talk voice interaction app with Noise protocol encrypted WebSocket transport.
   - **`hermes`** — wraps [HermesGadget](https://github.com/Franzferdinan51/HermesGadget)
     as an AI agent conversation app (WebSocket-based, with on-screen reply display and OTA).
-- **Standard smartwatch features** — clock face with hour/minute/second hands, battery status
-  display, touch-driven launcher UI.
+- **Standard smartwatch features**:
+  - Clock face with hour/minute/second hands (Bresenham line drawing on RGB565 framebuffer)
+  - Battery status display in a top status bar (AXP2101 fuel gauge readout)
+  - Touch-driven launcher UI with edge-swipe app switching and tap-to-launch grid
+  - Settings page: brightness/volume/DND toggle/theme/about-device, touch-adjustable controls optimized for finger-friendly targets on the 410×502 AMOLED
+  - Notifications display: multi-line message rendering with vertical scroll via touch-drag (bounded PSRAM buffer of max 16 notifications)
+  - Weather app: temperature/condition/humidity display centered on screen, no bitmaps to minimize memory usage
 
 ## Hardware
 
