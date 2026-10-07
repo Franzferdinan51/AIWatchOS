@@ -8,6 +8,9 @@ set(COMPONENT_SRCS
     src/launcher_ui.cpp
     src/clock_face.cpp
     src/battery_display.cpp
+    src/settings_page.cpp
+    src/notifications.cpp
+    src/weather_app.cpp
 )
 
 set(COMPONENT_ADD_INCLUDEDIRS include)

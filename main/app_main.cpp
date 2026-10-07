@@ -8,6 +8,10 @@
 #include "aiwatchos/battery_display.hpp"
 #include "aiwatchos/hal.hpp"
 
+#include "aiwatchos/settings_page.hpp"
+#include "aiwatchos/notifications.hpp"
+#include "aiwatchos/weather_app.hpp"
+
 #include "aiwatchos_muse.hpp"
 #include "aiwatchos_hermes.hpp"
 
@@ -48,6 +52,16 @@ extern "C" void app_main(void) {
 
     aiwatchos::App hermes_app = aiwatchos_hermes::make_hermes_app();
     g_app_mgr.register_app(&hermes_app);
+
+    // Smartwatch feature apps: settings, notifications, weather.
+    aiwatchos::App settings_app = aiwatchos::SettingsPage::make_app();
+    g_app_mgr.register_app(&settings_app);
+
+    aiwatchos::App notif_app = aiwatchos::NotificationManager::make_app();
+    g_app_mgr.register_app(&notif_app);
+
+    aiwatchos::App weather_app = aiwatchos::WeatherApp::make_app();
+    g_app_mgr.register_app(&weather_app);
 
     // --- 3. Status bar with battery display ---
     static aiwatchos::BatteryDisplay g_status_bar(board);
