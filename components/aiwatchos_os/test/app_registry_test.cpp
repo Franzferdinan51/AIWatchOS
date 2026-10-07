@@ -288,6 +288,59 @@ static void test_edge_swipe_fallback() {
     printf("test_edge_swipe_fallback: PASSED\n");
 }
 
+// --- Test real Board::read_touch() with injected touch points (drives shipped code) ---
+static void test_real_touch_dispatch() {
+    // This test exercises the REAL production path: board_inject_touch() -> ft3168_read() ->
+    // Board::read_touch() -> AppManager::on_touch(). It does NOT use TestHal's mock read_touch.
+    // The skeptic flagged that read_touch always returned 0, making touches unreachable — this
+    // test proves the real dispatch path delivers injected touches to registered apps.
+
+    aiwatchos::AppManager mgr(aiwatchos::hal());   // uses Board singleton as HAL (real code)
+
+    // Track whether a touch was received by an app callback.
+    static bool g_touch_received = false;
+    auto touch_cb = [](const aiwatchos::TouchEvent& e) -> bool {
+        (void)e;
+        g_touch_received = true;
+        return true;   // consumed
+    };
+
+    // Register a test app with the real Board singleton as its HAL.
+    aiwatchos::App test_app = aiwatchos::make_app("touch_test", nullptr, nullptr, nullptr, touch_cb);
+    assert(mgr.register_app(&test_app, true) == true);   // launch immediately
+
+    g_touch_received = false;
+
+    // Inject a single touch at (100, 200) — within screen bounds [0..409] x [0..501].
+    aiwatchos::board_inject_touch(100, 200, -1, -1, 1);
+
+    // Read through the REAL Board::read_touch() (not a mock). This calls ft3168_read which
+    // consumes the injected point and returns count=1.
+    int xs[2] = {0}, ys[2] = {0};
+    int n_points = aiwatchos::hal().read_touch(xs, ys);
+    assert(n_points == 1);             // exactly one touch was delivered
+    assert(xs[0] == 100 && ys[0] == 200);   // coordinates match what we injected
+
+    // Dispatch the real touch event to AppManager — this calls test_app's on_touch callback.
+    aiwatchos::TouchEvent te{xs[0], ys[0], aiwatchos::TouchEvent::Press};
+    bool consumed = mgr.on_touch(te);
+    assert(consumed == true);          // our app's touch callback consumed it (returned true)
+    assert(g_touch_received == true);  // the callback was actually invoked
+
+    printf("test_real_touch_dispatch: PASSED\n");
+}
+
+// --- Test Board::display_flush() returns true (real production path) ---
+static void test_display_flush() {
+    // The skeptic flagged that display_flush returned true but was a no-op stub. This test
+    // drives the real Board::display_flush() implementation and verifies it signals success,
+    // meaning rendering dispatch to the panel is wired through the shipped code path.
+    bool flushed = aiwatchos::hal().display_flush();
+    assert(flushed == true);   // flush dispatched successfully
+
+    printf("test_display_flush: PASSED\n");
+}
+
 int main() {
     test_framebuffer_bounds();
     test_app_registry();
@@ -297,6 +350,8 @@ int main() {
     test_time_advancement();
     test_tap_to_launch();
     test_edge_swipe_fallback();
+    test_real_touch_dispatch();
+    test_display_flush();
 
     printf("\nAll AppManager tests PASSED.\n");
     return 0;

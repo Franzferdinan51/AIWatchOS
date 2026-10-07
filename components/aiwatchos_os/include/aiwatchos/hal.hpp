@@ -90,4 +90,10 @@ Hal& hal();
 // returns a progressing value in unit tests (replaces PCF85063 RTC reads).
 void board_advance_test_time_ms(uint64_t ms);
 
+// Test-only: inject up to 2 touch points with screen-space coordinates. These are consumed
+// by the next Board::read_touch() call, simulating one IRQ-driven poll cycle from the FT3168.
+// This lets unit tests exercise the real touch dispatch path (Board -> AppManager -> LauncherUI)
+// without physical hardware or a mock that always returns 0.
+void board_inject_touch(int x0, int y0, int x1 = -1, int y1 = -1, int count = 1);
+
 }  // namespace aiwatchos

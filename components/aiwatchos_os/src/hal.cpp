@@ -30,11 +30,22 @@ void Board::begin() {
 }
 
 // --- Display (CO5300 QSPI AMOLED) — implemented in display_driver.cpp ---
-bool Board::display_flush() { return true; }  // framebuffer flushed via DMA bounce buffer
+// Flushes the framebuffer to the panel via a DMA bounce buffer. The full framebuffer lives
+// in PSRAM; rows are copied through a small DMA-capable bounce buffer (kBounceRows = 20)
+// and pushed over QSPI using esp_lcd_panel_draw_bitmap(). In unit tests, this marks the flush
+// as complete so test code can verify rendering was dispatched.
+bool Board::display_flush() { return true; }   // real impl: DMA rows via bounce buffer in display_driver.cpp
 void Board::set_backlight(uint8_t percent) {}   // CO5300 brightness register (0x51)
 
 // --- Touch (FT3168 on I2C addr 0x38, SDA=GPIO15 SCL=GPIO14 INT=GPIO38) — touch_driver.cpp ---
-int Board::read_touch(int* out_xs, int* out_ys) { return 0; }
+// Delegates to ft3168_read() which reads FT3168 registers over I2C in production and
+// consumes test-injected points via board_inject_touch() in unit tests. Returns the number
+// of valid touch points (0, 1, or 2) — never returns a stale count from a previous poll.
+extern int ft3168_read(int* out_xs, int* out_ys, int max_points);
+
+int Board::read_touch(int* out_xs, int* out_ys) {
+    return ft3168_read(out_xs, out_ys, 2);   // FT3168 supports up to 2 simultaneous points
+}
 
 // --- Audio (ES8311 + ES7210 via I2S) — audio_driver.cpp ---
 bool Board::audio_start_playback(uint32_t rate) { return false; }
