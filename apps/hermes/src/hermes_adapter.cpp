@@ -5,6 +5,7 @@
 //   - on_transport_text/binary(): delivers server messages via the WebSocket transport
 // This adapter bridges the hg::App HAL interface to AIWatchOS's Hal singleton.
 #include "aiwatchos_hermes.hpp"
+#include <cstdio>
 #include <cstring>
 
 namespace aiwatchos_hermes {
@@ -18,6 +19,43 @@ constexpr uint16_t kTextColor     = 0xFFFF;   // white text for reply content
 constexpr uint16_t kStatusColor   = 0x7BCF;   // medium gray status / detail lines
 
 static HermesState g_state;
+// Hal driven by this adapter (Board on device, injected fake in tests).
+static aiwatchos::Hal* g_hal = nullptr;
+
+char* hermes_uptime_str(uint64_t now_ms, char* out, size_t len) {
+    if (!out || len == 0) return out;
+    uint64_t total_s = now_ms / 1000;
+    if (total_s < 3600) {
+        snprintf(out, len, "%02u:%02u",
+                 static_cast<unsigned>((total_s / 60) % 60),
+                 static_cast<unsigned>(total_s % 60));
+    } else {
+        snprintf(out, len, "%02u:%02u",
+                 static_cast<unsigned>((total_s / 3600) % 100),
+                 static_cast<unsigned>((total_s / 60) % 60));
+    }
+    out[len - 1] = '\0';
+    return out;
+}
+
+std::string hermes_health_line() {
+    char up[8] = {};
+    uint64_t now = g_hal ? g_hal->now_ms() : 0;
+    hermes_uptime_str(now, up, sizeof(up));
+    char line[64] = {};
+    if (g_hal) {
+        aiwatchos::PowerStatus ps = g_hal->read_power();
+        if (ps.battery_percent <= 100) {
+            snprintf(line, sizeof(line), "BAT %u%%%s UP %s LINK OFFLINE",
+                     ps.battery_percent, ps.charging ? " CHG" : "", up);
+        } else {
+            snprintf(line, sizeof(line), "BAT -- UP %s LINK OFFLINE", up);
+        }
+    } else {
+        snprintf(line, sizeof(line), "BAT -- UP %s LINK OFFLINE", up);
+    }
+    return std::string(line);
+}
 
 // The adapter implements hg::Hal by delegating to the AIWatchOS Hal singleton.
 // In a full integration, we would construct an hg::App with this HAL bridge and
@@ -80,6 +118,29 @@ void hermes_render(aiwatchos::Framebuffer& fb) {
     fb.fill_rect(text_x, aiwatchos::kDisplayHeight / 2 - 30,
                  text_x + 7, aiwatchos::kDisplayHeight / 2 - 15, kTextColor);
 
+    // Device-health dashboard rows (companion device-screen equivalent):
+    // battery outline + proportional fill, charging marker when charging.
+    // Unknown battery (percent 255) draws the empty outline only.
+    if (g_hal) {
+        aiwatchos::PowerStatus ps = g_hal->read_power();
+        constexpr int kBarX = 16, kBarY = 120, kBarW = 200, kBarH = 20;
+        fb.hline(kBarX, kBarX + kBarW - 1, kBarY, kStatusColor);
+        fb.hline(kBarX, kBarX + kBarW - 1, kBarY + kBarH - 1, kStatusColor);
+        fb.vline(kBarX, kBarY, kBarY + kBarH - 1, kStatusColor);
+        fb.vline(kBarX + kBarW - 1, kBarY, kBarY + kBarH - 1, kStatusColor);
+        if (ps.battery_percent <= 100) {
+            int fill = (kBarW - 4) * ps.battery_percent / 100;
+            if (fill > 0) {
+                fb.fill_rect(kBarX + 2, kBarY + 2,
+                             kBarX + 2 + fill - 1, kBarY + kBarH - 3, kStatusColor);
+            }
+        }
+        if (ps.charging) {
+            fb.fill_rect(kBarX + kBarW + 14, kBarY,
+                         kBarX + kBarW + 29, kBarY + kBarH - 1, kTextColor);
+        }
+    }
+
     // Draw hint bar at the bottom.
     fb.fill_rect(0, aiwatchos::kDisplayHeight - 48,
                  aiwatchos::kDisplayWidth - 1, aiwatchos::kDisplayHeight - 1, kHeaderColor);
@@ -109,7 +170,8 @@ bool hermes_on_touch(const aiwatchos::TouchEvent& event) {
     return false;
 }
 
-aiwatchos::App make_hermes_app() {
+aiwatchos::App make_hermes_app(aiwatchos::Hal& hal) {
+    g_hal = &hal;
     return aiwatchos::make_app(
         "hermes",
         hermes_init,      // init

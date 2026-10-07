@@ -5,6 +5,7 @@
 // (ES8311 speaker). This adapter decomposes that into init/tick/render callbacks.
 #include "aiwatchos_muse.hpp"
 #include "minimp3.h"
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 
@@ -30,7 +31,47 @@ static aiwatchos::Hal* g_hal = nullptr;
 // when the next turn begins.
 static uint8_t* g_turn_buf = nullptr;
 
-size_t muse_pending_bytes() { return g_state.turn_bytes; }
+// Offline outbox (companion outbox pattern): completed turns keep their ADPCM
+// payloads until the transport drains them. Bounded: the oldest entry is
+// dropped when full, so memory never grows without a link.
+constexpr size_t kOutboxSize = 2;   // + the in-progress turn buffer
+struct OutboxSlot {
+    uint8_t* data = nullptr;
+    size_t len = 0;
+    uint64_t started_ms = 0;
+    uint32_t duration_ms = 0;
+};
+OutboxSlot g_outbox[kOutboxSize] = {};
+size_t g_outbox_count = 0;
+bool g_flushing = false;
+
+size_t muse_pending_bytes() {
+    size_t total = g_state.turn_bytes;
+    for (size_t i = 0; i < g_outbox_count; ++i) total += g_outbox[i].len;
+    return total;
+}
+
+size_t muse_outbox_depth() { return g_outbox_count; }
+
+bool muse_outbox_drain(bool (*send)(const uint8_t* data, size_t len, void* ctx),
+                       void* ctx) {
+    if (!send || g_flushing) return g_outbox_count == 0;
+    g_flushing = true;
+    while (g_outbox_count > 0) {
+        OutboxSlot& head = g_outbox[0];
+        if (!send(head.data, head.len, ctx)) break;   // stop, keep the rest
+        free(head.data);
+        for (size_t i = 1; i < g_outbox_count; ++i) g_outbox[i - 1] = g_outbox[i];
+        g_outbox[g_outbox_count - 1] = OutboxSlot{};
+        --g_outbox_count;
+    }
+    g_flushing = false;
+    return g_outbox_count == 0;
+}
+
+// Activity log ring: the last kTurnLogSize completed turns, newest first.
+MuseTurn g_turn_log[kTurnLogSize] = {};
+size_t g_turn_total = 0;
 
 namespace {
 // Allocate the turn buffer: PSRAM on device, plain heap on host/tests.
@@ -59,16 +100,54 @@ bool begin_listen() {
     }
     g_state.encoder = muse_adpcm_t{};
     g_state.turn_bytes = 0;
+    g_state.turn_start_ms = g_hal->now_ms();
     g_state.listening = true;
     return true;
 }
 
 void end_listen() {
     if (g_hal) g_hal->mic_stop();
+    if (g_state.listening && g_hal) {
+        const uint32_t dur =
+            static_cast<uint32_t>(g_hal->now_ms() - g_state.turn_start_ms);
+        // Log the completed turn for the activity log (newest first).
+        MuseTurn done{g_state.turn_start_ms, dur, g_state.turn_bytes};
+        for (size_t i = kTurnLogSize - 1; i > 0; --i) g_turn_log[i] = g_turn_log[i - 1];
+        g_turn_log[0] = done;
+        ++g_turn_total;
+        // Hand the payload to the outbox (drop oldest when full); the
+        // in-progress slot goes back to empty.
+        if (g_outbox_count == kOutboxSize) {
+            free(g_outbox[0].data);
+            for (size_t i = 1; i < kOutboxSize; ++i) g_outbox[i - 1] = g_outbox[i];
+            --g_outbox_count;
+        }
+        g_outbox[g_outbox_count++] =
+            OutboxSlot{g_turn_buf, g_state.turn_bytes, g_state.turn_start_ms, dur};
+        g_turn_buf = nullptr;
+        g_state.turn_bytes = 0;
+    }
     g_state.listening = false;
-    // turn_bytes stays buffered for the transport; freed at next begin_listen().
+    g_state.mic_level = 0.0f;   // mic muted while idle (companion live-mode rule)
 }
 }  // namespace
+
+float muse_mic_level() { return g_state.mic_level; }
+
+float muse_progress() {
+    if (!g_state.listening || kTurnMaxAdpcmBytes == 0) return 0.0f;
+    float p = static_cast<float>(g_state.turn_bytes) /
+              static_cast<float>(kTurnMaxAdpcmBytes);
+    return p > 1.0f ? 1.0f : p;
+}
+
+size_t muse_turn_count() { return g_turn_total; }
+
+bool muse_turn_at(size_t idx, MuseTurn* out) {
+    if (!out || idx >= kTurnLogSize || idx >= g_turn_total) return false;
+    *out = g_turn_log[idx];
+    return true;
+}
 
 void muse_init() {
     if (g_state.initialized) return;
@@ -120,6 +199,22 @@ void muse_tick(uint32_t elapsed_ms) {
         // buffer for the transport. Clamped at 30 s; the oldest audio is kept.
         int16_t pcm[256];
         size_t got = g_hal ? g_hal->mic_read(pcm, 256) : 0;
+        // Live level meter: RMS amplitude 0..1 with fast attack, slow release
+        // (mirrors the companion app's live-mode amplitude ballistics).
+        if (got > 0) {
+            double sum_sq = 0;
+            for (size_t i = 0; i < got; ++i) {
+                double s = static_cast<double>(pcm[i]) / 32768.0;
+                sum_sq += s * s;
+            }
+            float instant = static_cast<float>(sqrt(sum_sq / got));
+            if (instant > 1.0f) instant = 1.0f;
+            if (instant >= g_state.mic_level) {
+                g_state.mic_level = instant;                     // fast attack
+            } else {
+                g_state.mic_level += 0.2f * (instant - g_state.mic_level);  // release
+            }
+        }
         got &= ~1u;   // encoder needs even sample counts
         size_t room = g_state.turn_bytes < kTurnMaxAdpcmBytes
                           ? kTurnMaxAdpcmBytes - g_state.turn_bytes
@@ -140,8 +235,14 @@ void muse_render(aiwatchos::Framebuffer& fb) {
     // Clear to black (AMOLED native — saves power).
     fb.fill(kMuseBg);
 
-    // Draw a centered prompt: "HOLD TO TALK" while idle, or listening status.
-    const char* prompt = g_state.listening ? "LISTENING..." : "HOLD TO TALK";
+    // Phase prompt, mirroring the companion live session phases: idle,
+    // listening, or a buffered turn waiting for the transport ("READY").
+    const char* prompt = "HOLD TO TALK";
+    if (g_state.listening) {
+        prompt = "LISTENING";
+    } else if (g_state.turn_bytes > 0) {
+        prompt = "READY";
+    }
     int text_x = (aiwatchos::kDisplayWidth - static_cast<int>(strlen(prompt)) * 8) / 2;
 
     // Simple bitmap-style text rendering: draw each character as an 8x16 block.
@@ -150,6 +251,21 @@ void muse_render(aiwatchos::Framebuffer& fb) {
         int cy = aiwatchos::kDisplayHeight / 2 - 30;
         // Draw a placeholder rectangle for each character.
         fb.fill_rect(cx, cy, cx + 7, cy + 15, kPromptText);
+    }
+
+    // Live level meter: 24 bars across the lower half, heights from the
+    // smoothed mic RMS (flat while idle). Companion live-screen equivalent.
+    constexpr int kBars = 24;
+    constexpr int kBarW = 12;
+    constexpr int kGap = 4;
+    constexpr int kBaseY = 430;
+    constexpr int kMaxH = 120;
+    const int meter_x0 = (aiwatchos::kDisplayWidth - (kBars * (kBarW + kGap) - kGap)) / 2;
+    for (int b = 0; b < kBars; ++b) {
+        int h = 4 + static_cast<int>(g_state.mic_level * kMaxH);
+        if (h > kMaxH + 4) h = kMaxH + 4;
+        int bx = meter_x0 + b * (kBarW + kGap);
+        fb.fill_rect(bx, kBaseY - h, bx + kBarW - 1, kBaseY, kStatusColor);
     }
 
     // Status bar at top showing battery and connection state.

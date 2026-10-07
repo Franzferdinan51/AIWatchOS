@@ -9,6 +9,9 @@
 #include "aiwatchos/app.hpp"
 #include "aiwatchos/hal.hpp"
 
+#include <cstddef>
+#include <string>
+
 namespace aiwatchos_hermes {
 
 // Hermes app state — tracks the AI conversation lifecycle.
@@ -18,6 +21,16 @@ struct HermesState {
     // It manages: WebSocket connection, Noise protocol handshake, push-to-talk
     // voice capture (ES7210), reply audio playback (ES8311), on-screen text display.
 };
+
+// Device-health line for the dashboard, e.g. "BAT 85% CHG UP 12:34 LINK
+// OFFLINE". Battery reads "--" when the PMU reports unknown (percent 255);
+// the link stays OFFLINE until the gateway transport lands. Pure function of
+// the injected Hal, mirroring the companion device-health dashboard.
+std::string hermes_health_line();
+
+// Uptime as MM:SS below one hour, HH:MM above. Writes into out (always NUL-
+// terminated) and returns out.
+char* hermes_uptime_str(uint64_t now_ms, char* out, size_t len);
 
 // Initialize the Hermes app: creates a DeviceProfile for the 2.06" board and
 // constructs an hg::App with HAL callbacks wired to AIWatchOS drivers.
@@ -38,6 +51,8 @@ void hermes_render(aiwatchos::Framebuffer& fb);
 bool hermes_on_touch(const aiwatchos::TouchEvent& event);
 
 // Build an OS App descriptor wrapping all callbacks above (App ID "hermes").
-aiwatchos::App make_hermes_app();
+// Takes the Hal the adapter drives (Board on device, a fake in tests),
+// matching make_muse_app.
+aiwatchos::App make_hermes_app(aiwatchos::Hal& hal = aiwatchos::Board::instance());
 
 }  // namespace aiwatchos_hermes

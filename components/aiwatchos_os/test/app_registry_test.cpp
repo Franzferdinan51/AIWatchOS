@@ -21,6 +21,7 @@
 #include "aiwatchos/settings_page.hpp"   // for Settings volume wiring verification
 #include "aiwatchos/battery_display.hpp"   // for status-bar time rendering verification
 #include "aiwatchos/notifications.hpp"   // for notification wrap verification
+#include "aiwatchos_hermes.hpp"   // for device-health dashboard verification
 #include "aiwatchos_muse.hpp"   // for push-to-talk turn buffering verification
 #include "muse_adpcm.h"         // for IMA-ADPCM round-trip verification
 #include "minimp3.h"            // for MP3 reply decode verification
@@ -56,18 +57,24 @@ class TestHal : public Hal {
     uint8_t backlight() const { return backlight_; }
     bool mic_start(uint32_t r) override { mic_rate_ = r; return true; }
     size_t mic_read(int16_t* out, size_t frames) override {
-        for (size_t i = 0; i < frames; ++i) out[i] = 0;
-        return frames;   // silence: deterministic canned capture for tests
+        for (size_t i = 0; i < frames; ++i) out[i] = mic_fill_;
+        return frames;   // deterministic canned capture for tests
     }
+    int16_t mic_fill_ = 0;   // constant sample tests capture (0 = silence)
     void mic_stop() override {}
     PowerStatus read_power() override {
         PowerStatus ps{};
-        ps.battery_present = true;
-        ps.battery_percent = 85;
+        ps.battery_present = power_present_;
+        ps.battery_percent = power_percent_;
         ps.battery_mv = 3800;
-        ps.charging = false;
+        ps.charging = power_charging_;
         ps.external_power = false;
         return ps;
+    }
+    void set_power(bool present, uint8_t percent, bool charging) {
+        power_present_ = present;
+        power_percent_ = percent;
+        power_charging_ = charging;
     }
     uint64_t now_ms() override { return static_cast<uint64_t>(ms_); }
     uint32_t read_buttons() override { return 0; }
@@ -77,6 +84,9 @@ class TestHal : public Hal {
     uint8_t backlight_ = 100;
     uint8_t volume_ = 70;
     std::vector<int16_t> played_;
+    bool power_present_ = true;
+    uint8_t power_percent_ = 85;
+    bool power_charging_ = false;
     uint32_t rate_ = 16000, mic_rate_ = 16000;
     uint64_t ms_ = 0;
 };
@@ -768,6 +778,201 @@ static void test_notification_wrap() {
     printf("test_notification_wrap: PASSED\n");
 }
 
+// --- Test the live mic level meter (companion live-screen pattern) ---
+static void test_muse_level_meter() {
+    // Idle renders flat 4px bars: 24 bars x 12 wide x 5 rows = 1440 px in the
+    // meter band. With a hot mic the RMS level jumps (~0.3 for int16 10000)
+    // and the bars grow; release mutes back to flat.
+    aiwatchos::TestHal hal;
+    aiwatchos::App app = aiwatchos_muse::make_muse_app(hal);
+    app.init();
+
+    static uint16_t buf[aiwatchos::kDisplayWidth * aiwatchos::kDisplayHeight];
+    aiwatchos::Framebuffer fb{buf, aiwatchos::kDisplayWidth, aiwatchos::kDisplayHeight};
+    auto band_px = [&]() {
+        int n = 0;
+        for (int y = 300; y <= 435; ++y) {
+            for (int x = 0; x < aiwatchos::kDisplayWidth; ++x) {
+                if (buf[y * aiwatchos::kDisplayWidth + x] != 0x0000) ++n;
+            }
+        }
+        return n;
+    };
+
+    fb.fill(0x0000);
+    app.render(fb);
+    assert(aiwatchos_muse::muse_mic_level() == 0.0f);
+    assert(band_px() == 1440);   // flat idle bars
+
+    hal.mic_fill_ = 10000;
+    aiwatchos::TouchEvent press{205, 450, aiwatchos::TouchEvent::Press};
+    assert(app.on_touch(press) == true);
+    app.tick(40);
+    float level = aiwatchos_muse::muse_mic_level();
+    assert(level > 0.2f && level < 0.4f);   // RMS(10000) ~= 0.305
+    fb.fill(0x0000);
+    app.render(fb);
+    int hot = band_px();
+    assert(hot > 8000);   // bars tracked the live level
+
+    aiwatchos::TouchEvent release{205, 450, aiwatchos::TouchEvent::Release};
+    assert(app.on_touch(release) == true);
+    app.tick(40);
+    assert(aiwatchos_muse::muse_mic_level() == 0.0f);   // muted while idle
+    fb.fill(0x0000);
+    app.render(fb);
+    assert(band_px() == 1440);
+
+    printf("test_muse_level_meter: PASSED (level %.3f, hot %d px)\n", level, hot);
+}
+
+// --- Test the Hermes device-health dashboard (companion device-screen pattern) ---
+static void test_hermes_vitals() {
+    // Health line reflects battery, charging, uptime and the offline link.
+    aiwatchos::TestHal hal;
+    aiwatchos::App app = aiwatchos_hermes::make_hermes_app(hal);
+    app.init();
+
+    hal.set_power(true, 85, true);
+    hal.advance_ms(754000);   // 12:34 uptime
+    assert(aiwatchos_hermes::hermes_health_line() == "BAT 85% CHG UP 12:34 LINK OFFLINE");
+
+    // Unknown battery (PMU percent 255) renders as "--", not garbage.
+    hal.set_power(false, 255, false);
+    assert(aiwatchos_hermes::hermes_health_line() == "BAT -- UP 12:34 LINK OFFLINE");
+
+    // Uptime rolls to HH:MM past the hour; tiny buffer stays terminated.
+    char up[8] = {};
+    assert(std::string(aiwatchos_hermes::hermes_uptime_str(3723000, up, sizeof(up))) == "01:02");
+    char tiny[4] = {};
+    aiwatchos_hermes::hermes_uptime_str(754000, tiny, sizeof(tiny));
+    assert(tiny[3] == '\0');
+
+    // Rendered battery bar tracks the level: 85% fills deep into the bar,
+    // 0% leaves only the outline.
+    static uint16_t buf[aiwatchos::kDisplayWidth * aiwatchos::kDisplayHeight];
+    aiwatchos::Framebuffer fb{buf, aiwatchos::kDisplayWidth, aiwatchos::kDisplayHeight};
+    hal.set_power(true, 85, true);
+    fb.fill(0x0000);
+    app.render(fb);
+    assert(buf[129 * aiwatchos::kDisplayWidth + 150] == 0x7BCF);   // deep fill
+    assert(buf[129 * aiwatchos::kDisplayWidth + 230] == 0xFFFF);   // charging marker
+    hal.set_power(true, 0, false);
+    fb.fill(0x0000);
+    app.render(fb);
+    assert(buf[129 * aiwatchos::kDisplayWidth + 150] == 0x0000);   // empty bar
+    assert(buf[129 * aiwatchos::kDisplayWidth + 230] == 0x0000);   // no marker
+
+    printf("test_hermes_vitals: PASSED\n");
+}
+
+// --- Test the muse voice turn activity log (companion activity-log pattern) ---
+static void test_muse_turn_log() {
+    // Two press-hold-release turns with wall-clock gaps land newest-first in
+    // the ring with matching start/duration/bytes.
+    aiwatchos::TestHal hal;
+    aiwatchos::App app = aiwatchos_muse::make_muse_app(hal);
+    app.init();
+    size_t base = aiwatchos_muse::muse_turn_count();
+
+    aiwatchos::TouchEvent press{205, 450, aiwatchos::TouchEvent::Press};
+    aiwatchos::TouchEvent release{205, 450, aiwatchos::TouchEvent::Release};
+    assert(app.on_touch(press) == true);
+    app.tick(40);
+    hal.advance_ms(2000);
+    assert(app.on_touch(release) == true);
+
+    hal.advance_ms(5000);
+    assert(app.on_touch(press) == true);
+    app.tick(40);
+    app.tick(40);
+    hal.advance_ms(1000);
+    assert(app.on_touch(release) == true);
+
+    assert(aiwatchos_muse::muse_turn_count() == base + 2);
+    aiwatchos_muse::MuseTurn latest{}, older{};
+    assert(aiwatchos_muse::muse_turn_at(0, &latest) == true);
+    assert(aiwatchos_muse::muse_turn_at(1, &older) == true);
+    assert(latest.started_ms == 7000 && latest.duration_ms == 1000);
+    assert(latest.bytes == 2 * 128);   // 2 ticks x 256 silent frames
+    assert(older.started_ms == 0 && older.duration_ms == 2000);
+    assert(older.bytes == 128);
+    aiwatchos_muse::MuseTurn none{};
+    assert(aiwatchos_muse::muse_turn_at(4, &none) == false);   // ring holds 4
+    assert(aiwatchos_muse::muse_turn_at(99, &none) == false);
+
+    printf("test_muse_turn_log: PASSED\n");
+}
+
+// --- Test the offline turn outbox (companion outbox pattern) ---
+namespace {
+size_t g_drained_bytes = 0;
+size_t g_drained_entries = 0;
+bool drain_accept(const uint8_t* data, size_t len, void* ctx) {
+    (void)data;
+    (void)ctx;
+    g_drained_bytes += len;
+    ++g_drained_entries;
+    return true;
+}
+bool drain_reject(const uint8_t* data, size_t len, void* ctx) {
+    (void)data;
+    (void)len;
+    (void)ctx;
+    return false;   // transport down: nothing leaves the queue
+}
+}  // namespace
+
+static void test_muse_outbox() {
+    // Completed turns queue instead of vanishing: overfill drops the oldest,
+    // drain sends FIFO and stops at the first failure with the rest kept.
+    aiwatchos::TestHal hal;
+    aiwatchos::App app = aiwatchos_muse::make_muse_app(hal);
+    app.init();
+
+    aiwatchos::TouchEvent press{205, 450, aiwatchos::TouchEvent::Press};
+    aiwatchos::TouchEvent release{205, 450, aiwatchos::TouchEvent::Release};
+    for (int t = 0; t < 3; ++t) {
+        assert(app.on_touch(press) == true);
+        app.tick(40);   // 128 ADPCM bytes per turn
+        assert(app.on_touch(release) == true);
+    }
+    // Cap is 2 payloads: the third turn evicted the oldest.
+    assert(aiwatchos_muse::muse_outbox_depth() == 2);
+
+    size_t pending = aiwatchos_muse::muse_pending_bytes();
+    assert(pending == 2 * 128);
+    g_drained_bytes = 0;
+    g_drained_entries = 0;
+    assert(aiwatchos_muse::muse_outbox_drain(drain_accept, nullptr) == true);
+    assert(aiwatchos_muse::muse_outbox_depth() == 0);
+    assert(g_drained_entries == 2 && g_drained_bytes == pending);
+    assert(aiwatchos_muse::muse_pending_bytes() == 0);
+
+    // Phase progress: a fraction of the max turn buffer while held, 0 idle.
+    assert(app.on_touch(press) == true);
+    app.tick(40);
+    {
+        float p = aiwatchos_muse::muse_progress();
+        assert(p > 0.0f && p < 1.0f);
+    }
+    assert(app.on_touch(release) == true);
+    assert(aiwatchos_muse::muse_progress() == 0.0f);
+    assert(aiwatchos_muse::muse_outbox_drain(drain_accept, nullptr) == true);
+
+    // A failed send keeps the entry for the next flush.
+    assert(app.on_touch(press) == true);
+    app.tick(40);
+    assert(app.on_touch(release) == true);
+    assert(aiwatchos_muse::muse_outbox_depth() == 1);
+    assert(aiwatchos_muse::muse_outbox_drain(drain_reject, nullptr) == false);
+    assert(aiwatchos_muse::muse_outbox_depth() == 1);
+    assert(aiwatchos_muse::muse_outbox_drain(drain_accept, nullptr) == true);
+    assert(aiwatchos_muse::muse_outbox_depth() == 0);
+
+    printf("test_muse_outbox: PASSED\n");
+}
+
 int main() {
     test_framebuffer_bounds();
     test_app_registry();
@@ -789,6 +994,10 @@ int main() {
     test_muse_play_reply();              // plays the fixture through the reply path
     test_launcher_hit_testing();         // drives real LauncherUI gap/icon taps
     test_notification_wrap();            // drives real multi-line body render
+    test_muse_level_meter();             // drives the live mic RMS meter
+    test_hermes_vitals();                // drives the Hermes health dashboard
+    test_muse_turn_log();                // drives the voice turn activity log
+    test_muse_outbox();                  // drives the offline turn outbox
 
     printf("\nAll AppManager tests PASSED.\n");
     return 0;

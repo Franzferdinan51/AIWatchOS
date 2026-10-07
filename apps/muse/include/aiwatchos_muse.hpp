@@ -23,11 +23,49 @@ struct MuseState {
     uint32_t last_tick_ms = 0;  // for rate limiting
     muse_adpcm_t encoder = {};  // IMA-ADPCM encoder state for the live turn
     size_t turn_bytes = 0;      // ADPCM bytes buffered for the in-progress turn
+    float mic_level = 0.0f;     // smoothed RMS mic amplitude 0..1 (0 when idle)
+    uint64_t turn_start_ms = 0;  // wall-clock start of the in-progress turn
 };
 
-// ADPCM bytes buffered for the current turn (0 when idle). The Noise
-// transport drains this when it lands; the UI can show a recording level.
+// One completed voice turn for the activity log (companion activity-log
+// equivalent): when it started, how long it ran, and its encoded size.
+struct MuseTurn {
+    uint64_t started_ms = 0;
+    uint32_t duration_ms = 0;
+    size_t bytes = 0;
+};
+
+constexpr size_t kTurnLogSize = 4;   // ring keeps the last 4 completed turns
+
+// ADPCM bytes buffered and awaiting the transport: the in-progress turn plus
+// everything queued in the outbox. The UI can show a recording level.
 size_t muse_pending_bytes();
+
+// Number of completed turns queued in the outbox (payloads retained).
+size_t muse_outbox_depth();
+
+// Drain the outbox FIFO through `send`, oldest first, stopping at the first
+// failure so ordering is preserved; entries stay queued for the next flush.
+// Re-entrant calls are no-ops. Returns true when fully drained. This is the
+// seam the Noise transport calls once the link is up (companion outbox rule).
+// `send` receives (data, len, ctx) and returns true when accepted.
+bool muse_outbox_drain(bool (*send)(const uint8_t* data, size_t len, void* ctx),
+                       void* ctx);
+
+// Latest smoothed mic level for the level meter (0 when not listening).
+float muse_mic_level();
+
+// Progress of the current phase, 0..1 (Meta muse_state progress pattern):
+// fraction of the max turn buffer while listening, 0 when idle, so the UI can
+// drive a recording progress bar.
+float muse_progress();
+
+// Total completed push-to-talk turns since init.
+size_t muse_turn_count();
+
+// Details of a completed turn, idx 0 = latest. Returns false when idx is out
+// of range of the retained ring.
+bool muse_turn_at(size_t idx, MuseTurn* out);
 
 // Play an MP3 reply (e.g. a spoken response fetched by the transport):
 // decodes via minimp3, resamples to the 16 kHz voice rate, and streams to
