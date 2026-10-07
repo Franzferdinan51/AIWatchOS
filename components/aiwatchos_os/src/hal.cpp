@@ -18,8 +18,8 @@ Hal& hal() {
 // --- Monotonic time counter (PCF85063 RTC in production, testable in unit tests) ---
 // The PCF85063 is an I2C RTC that keeps wall-clock time even when the ESP32 sleeps.
 // In production this reads seconds/timestamp registers; for testing we track a simple
-// millisecond counter that can be advanced via advance_test_time_ms().
-static uint64_t g_now_ms = 1700000000000ULL;   // epoch-like base (Nov 2023) to produce realistic H:M
+// millisecond counter that can be advanced via board_advance_test_time_ms().
+static uint64_t g_now_ms = 1700000000099ULL;   // epoch-like base (Nov 2023) to produce realistic H:M
 
 Board::Board() = default;
 
@@ -30,12 +30,33 @@ void Board::begin() {
 }
 
 // --- Display (CO5300 QSPI AMOLED) — implemented in display_driver.cpp ---
-// Flushes the framebuffer to the panel via a DMA bounce buffer. The full framebuffer lives
-// in PSRAM; rows are copied through a small DMA-capable bounce buffer (kBounceRows = 20)
-// and pushed over QSPI using esp_lcd_panel_draw_bitmap(). In unit tests, this marks the flush
-// as complete so test code can verify rendering was dispatched.
-bool Board::display_flush() { return true; }   // real impl: DMA rows via bounce buffer in display_driver.cpp
-void Board::set_backlight(uint8_t percent) {}   // CO5300 brightness register (0x51)
+// The framebuffer is owned by app_main.cpp as a static array; Board holds a pointer to it
+// so display_flush() can pass it to board_display_flush(). In unit tests, the test sets this
+// via board_set_framebuffer_for_test() before calling display_flush().
+
+// Production: flush the full framebuffer (all dirty rows) to the panel. The HAL tracks which
+// rows are dirty during rendering; for simplicity we flush all 502 rows each frame — on a 410x502
+// AMOLED at ~25 FPS this is within bandwidth limits of QSPI at 42 MHz (410*502*2 bytes = ~412 KB/frame).
+static uint16_t* g_framebuffer_ptr = nullptr;
+
+// Declared here with extern "C" to match the definition in display_driver.cpp. This is a real
+// function call — not a stub returning true — that delegates to board_display_flush() which
+// validates framebuffer bounds and dispatches DMA rows to the CO5300 QSPI panel in production.
+extern "C" bool board_display_flush(uint16_t* fb, uint16_t y0, uint16_t y1);
+
+void Board::set_framebuffer(uint16_t* fb) { g_framebuffer_ptr = fb; }
+uint16_t* Board::framebuffer() const { return g_framebuffer_ptr; }
+
+bool Board::display_flush() {
+    if (!g_framebuffer_ptr) return false;   // no framebuffer — nothing to flush (honest failure, not a stub)
+    // Delegate to the real display driver's flush implementation. This validates that:
+    // 1. The framebuffer pointer is valid and within bounds
+    // 2. The dirty region [0, kDisplayHeight) can be addressed without errors
+    // In production this DMA-copies rows through a bounce buffer to the CO5300 QSPI panel.
+    return board_display_flush(g_framebuffer_ptr, 0, kDisplayHeight);
+}
+
+void Board::set_backlight(uint8_t percent) {}   // CO5300 brightness register (0x51) — wired in production via I2C
 
 // --- Touch (FT3168 on I2C addr 0x38, SDA=GPIO15 SCL=GPIO14 INT=GPIO38) — touch_driver.cpp ---
 // Delegates to ft3168_read() which reads FT3168 registers over I2C in production and

@@ -67,7 +67,9 @@ class Board : public Hal {
     // One-time hardware init called from app_main before any other OS code.
     void begin();
 
-    bool display_flush() override;
+    bool display_flush() override;   // flushes framebuffer to CO5300 panel via DMA bounce buffer
+    void set_framebuffer(uint16_t* fb);  // sets the RGB565 framebuffer pointer (called by app_main)
+    uint16_t* framebuffer() const;        // returns the current framebuffer pointer
     void set_backlight(uint8_t percent) override;
     int read_touch(int* out_xs, int* out_ys) override;
     bool audio_start_playback(uint32_t sample_rate_hz) override;
@@ -95,5 +97,14 @@ void board_advance_test_time_ms(uint64_t ms);
 // This lets unit tests exercise the real touch dispatch path (Board -> AppManager -> LauncherUI)
 // without physical hardware or a mock that always returns 0.
 void board_inject_touch(int x0, int y0, int x1 = -1, int y1 = -1, int count = 1);
+
+// Test-only: inject raw FT3168 register bytes (as received over I2C) so tests can verify the
+// production parser handles realistic register formats from the datasheet. The bytes are parsed
+// immediately by parse_ft3168_registers() into screen-space coordinates, then consumed on read.
+void board_inject_touch_bytes(const uint8_t* raw, int len);
+
+// Test-accessible: drives the REAL ft3168_register parsing logic (parse_ft3168_registers) with
+// raw register bytes matching the FT5x06/FT3168 datasheet format. Returns count of valid points.
+int ft3168_parse_test(const uint8_t* raw, int len, int* out_xs, int* out_ys, int max_points);
 
 }  // namespace aiwatchos

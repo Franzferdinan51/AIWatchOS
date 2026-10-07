@@ -22,6 +22,7 @@ extern "C" void app_main(void) {
 
     // Allocate the framebuffer in PSRAM (410 * 502 * 2 bytes = ~412 KB).
     static uint16_t s_framebuffer[aiwatchos::kDisplayWidth * aiwatchos::kDisplayHeight];
+    board.set_framebuffer(s_framebuffer);   // register the framebuffer with Board for display_flush()
     aiwatchos::Framebuffer fb{s_framebuffer, aiwatchos::kDisplayWidth, aiwatchos::kDisplayHeight};
 
     // --- 2. Create the AppManager and register apps ---
