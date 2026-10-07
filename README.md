@@ -51,21 +51,34 @@ esp32-watch-os/
 ├── components/aiwatchos_os/    # OS core: HAL drivers, AppManager, clock face, launcher UI
 │   ├── include/aiwatchos/      # Public headers (app.hpp, hal.hpp, app_manager.hpp)
 │   ├── src/                    # Driver implementations + UI renderers
-│   └── test/app_registry_test.cpp  # Unit tests for AppManager dispatch logic
-├── apps/muse/                  # Muse voice interaction app adapter
+│   ├── idf_component.yml       # Managed deps (touch, CO5300, codecs)
+│   └── test/app_registry_test.cpp  # Host unit tests (see below)
+├── components/noise_core/      # Vendored Noise crypto core (upstream muse-gadget-206)
+├── components/minimp3/         # Vendored MP3 decoder for spoken replies
+├── apps/muse/                  # Muse voice app: PTT capture, ADPCM turn buffer, reply playback
+│   ├── src/muse_adpcm.c        # Ported IMA-ADPCM encoder (upstream muse-gadget-206)
+│   └── test_data/test_reply.mp3  # Bench reply fixture for host tests
 └── apps/hermes/                # Hermes AI agent app adapter
 ```
 
 ## Building
 
-Requires the [ESP-IDF toolchain](https://docs.espressif.com/projects/esp-idf/en/latest/get-started/).
+Requires the [ESP-IDF toolchain](https://docs.espressif.com/projects/esp-idf/en/latest/get-started/)
+(IDF 5.x; the first build downloads managed components, so it needs network).
 
 ```bash
 . $IDF_PATH/export.sh
-cd ~/Documents/esp32-watch-os
 idf.py set-target esp32s3
 idf.py build
 ```
+
+## Host tests
+
+`components/aiwatchos_os/test/app_registry_test.cpp` runs on any C++17 host and
+drives the real shipped code (AppManager, drivers, voice pipeline, Noise
+crypto, MP3 decode). The exact command is documented at the top of the file;
+the Noise test needs PSA headers (e.g. `brew install mbedtls`) and reports
+SKIPPED without them. Run it from the repo root.
 
 ## License
 

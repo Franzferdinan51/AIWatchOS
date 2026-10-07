@@ -5,6 +5,7 @@
 // generously (>= 48dp equivalent) per accessibility guidelines adapted for embedded.
 #include "aiwatchos/settings_page.hpp"
 #include "aiwatchos/hal.hpp"
+#include <cstdio>
 
 namespace aiwatchos {
 
@@ -112,14 +113,15 @@ bool SettingsPage::on_touch(const TouchEvent& event) {
 
             // Toggle/adjust the selected setting immediately on tap.
             switch (item_index) {
-                case 0:  // Brightness — cycle through levels
-                    if (state_.brightness > 80) state_.brightness = 50;
-                    else if (state_.brightness > 30) state_.brightness = 100;
+                case 0:  // Brightness — cycle 100 -> 50 -> 80 -> 100
+                    if (state_.brightness >= 100) state_.brightness = 50;
+                    else if (state_.brightness >= 80) state_.brightness = 100;
                     else state_.brightness = 80;
                     board_.set_backlight(state_.brightness);
                     break;
                 case 1:  // Volume — cycle mute/on
                     state_.volume = (state_.volume == 0) ? 70 : 0;
+                    board_.set_volume(state_.volume);
                     break;
                 case 2:  // Do Not Disturb toggle
                     state_.do_not_disturb = !state_.do_not_disturb;

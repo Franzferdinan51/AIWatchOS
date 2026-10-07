@@ -4,10 +4,15 @@ build/
 
 # ESP-IDF generated files
 sdkconfig
+sdkconfig.old
 *.bin
 *.elf
 partitions_singleapp.csv
 partition_table/
+
+# IDF component manager downloads (recreated by `idf.py build`; the lock file
+# stays tracked for reproducible dependency resolution)
+managed_components/
 
 # IDE
 .vscode/

@@ -1,17 +1,41 @@
-// AppManager unit test — verifies register/launch/tick/render dispatch logic.
-// This test is pure C++ (no ESP-IDF dependencies) and can be compiled with any
-// standard compiler: g++ -std=c++17 app_registry_test.cpp ...
-// It exercises the real shipped AppManager code from src/app_manager.cpp and
-// the framebuffer helpers from src/app.cpp.
+// AIWatchOS host unit tests — AppManager dispatch, drivers, voice pipeline,
+// and Noise transport crypto. Pure C++ (no ESP-IDF) plus the vendored
+// noise_core PSA backend; build from the repo root, e.g.:
+//   MBEDTLS=$(brew --prefix mbedtls)   # provides <psa/crypto.h> + libtfpsacrypto
+//   g++ -std=c++17 -fno-exceptions -fno-rtti \
+//     -I components/aiwatchos_os/include -I apps/muse/include \
+//     -I apps/hermes/include -I components/noise_core/include \
+//     -I components/minimp3/include -I $MBEDTLS/include \
+//     components/aiwatchos_os/test/app_registry_test.cpp \
+//     components/aiwatchos_os/src/*.cpp apps/muse/src/muse_adapter.cpp \
+//     apps/muse/src/muse_adpcm.c apps/hermes/src/hermes_adapter.cpp \
+//     components/noise_core/src/PsaCryptoBackend.cpp \
+//     components/noise_core/src/Status.cpp components/minimp3/src/minimp3.c \
+//     -L $MBEDTLS/lib -ltfpsacrypto -o /tmp/aiwatchos_test && /tmp/aiwatchos_test
+// Without PSA headers the noise test reports SKIPPED and the rest still runs.
+// The MP3 test needs apps/muse/test_data/test_reply.mp3 (skips if missing).
 #include "aiwatchos/app.hpp"
 #include "aiwatchos/hal.hpp"      // for hal(), board_advance_test_time_ms, kDisplayWidth/Height
 #include "aiwatchos/app_manager.hpp"
 #include "aiwatchos/launcher_ui.hpp"   // for LauncherUI tap-to-launch verification
+#include "aiwatchos/settings_page.hpp"   // for Settings volume wiring verification
+#include "aiwatchos/battery_display.hpp"   // for status-bar time rendering verification
+#include "aiwatchos/notifications.hpp"   // for notification wrap verification
+#include "aiwatchos_muse.hpp"   // for push-to-talk turn buffering verification
+#include "muse_adpcm.h"         // for IMA-ADPCM round-trip verification
+#include "minimp3.h"            // for MP3 reply decode verification
+// Noise transport crypto (vendored upstream component). Host builds need the
+// PSA headers/lib (e.g. brew mbedtls); the test skips itself without them.
+#if __has_include(<psa/crypto.h>)
+#include <xplat/noise/core/PsaCryptoBackend.h>
+#define AIWATCHOS_HAS_NOISE_CORE 1
+#endif
 
 #include <cassert>
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
+#include <vector>
 
 namespace aiwatchos {
 
@@ -22,9 +46,19 @@ class TestHal : public Hal {
     void set_backlight(uint8_t p) override { backlight_ = p; }
     int read_touch(int* xs, int* ys) override { *xs = 0; *ys = 0; return 0; }
     bool audio_start_playback(uint32_t r) override { rate_ = r; return true; }
-    void audio_write(const int16_t*, size_t) override {}
+    void audio_write(const int16_t* s, size_t n) override {
+        for (size_t i = 0; i < n; ++i) played_.push_back(s[i]);
+    }
     void audio_stop_playback() override {}
+    const std::vector<int16_t>& played() const { return played_; }
+    void set_volume(uint8_t v) override { volume_ = v; }
+    uint8_t volume() const { return volume_; }
+    uint8_t backlight() const { return backlight_; }
     bool mic_start(uint32_t r) override { mic_rate_ = r; return true; }
+    size_t mic_read(int16_t* out, size_t frames) override {
+        for (size_t i = 0; i < frames; ++i) out[i] = 0;
+        return frames;   // silence: deterministic canned capture for tests
+    }
     void mic_stop() override {}
     PowerStatus read_power() override {
         PowerStatus ps{};
@@ -41,6 +75,8 @@ class TestHal : public Hal {
     void advance_ms(uint64_t ms) { ms_ += ms; }
  private:
     uint8_t backlight_ = 100;
+    uint8_t volume_ = 70;
+    std::vector<int16_t> played_;
     uint32_t rate_ = 16000, mic_rate_ = 16000;
     uint64_t ms_ = 0;
 };
@@ -298,9 +334,10 @@ static void test_ft3168_register_parsing() {
     int xs[2] = {0}, ys[2] = {0};
 
     // Construct raw register bytes for ONE touch point at (150, 300) in FT5x06 format:
-    //   byte [0]: touch_points count = 1; per-point block of {xh, yh, xl, yl} starts at offset 1.
+    //   byte [0]: touch_points count = 1; per-point 6-byte block {xh, xl, yh, yl, weight, misc}
+    //   per the FT5x06 register map (registers 0x03..0x08 for point 1).
     //   For X=150: xh_high_nibble=(150>>8)&0x0F=0, xl=150&0xFF=0x96; for Y=300: yh=(300>>8)&0x0F=1, yl=0x2C
-    uint8_t raw_one_point[] = {0x01, 0x00, 0x01, 0x96, 0x2C};   // touch at (150, 300)
+    uint8_t raw_one_point[] = {0x01, 0x00, 0x96, 0x01, 0x2C, 0x00, 0x00};   // touch at (150, 300)
 
     int parsed = aiwatchos::ft3168_parse_test(raw_one_point, sizeof(raw_one_point), xs, ys, 2);
     assert(parsed == 1);                    // exactly one valid point extracted from raw bytes
@@ -309,9 +346,9 @@ static void test_ft3168_register_parsing() {
     // Construct raw bytes for TWO touch points: (80, 200) and (320, 450).
     // Formula per point: X = ((xh & 0x0F) << 8) | xl; Y = ((yh & 0x0F) << 8) | yl
     uint8_t raw_two_correct[] = {
-        0x02,                       // touch_points count = 2
-        0x00, 0x00, 0x50, static_cast<uint8_t>(200),    // point 0: xh=0,yh=0,xl=80(0x50),yl=200(0xC8) -> (80, 200)
-        0x01, 0x01, 0x40, static_cast<uint8_t>(194)     // point 1: xh=1,yh=1,xl=64(0x40),yl=194(0xC2) -> (320, 450)
+        0x02,                                               // touch_points count = 2
+        0x00, 0x50, 0x00, static_cast<uint8_t>(200), 0x00, 0x00,   // point 0: {xh,xl,yh,yl,w,m} -> (80, 200)
+        0x01, 0x40, 0x01, static_cast<uint8_t>(194), 0x00, 0x00    // point 1: {xh,xl,yh,yl,w,m} -> (320, 450)
     };
 
     int xs2[2] = {0}, ys2[2] = {0};
@@ -345,7 +382,8 @@ static void test_real_touch_dispatch() {
 
     // Inject raw FT3168 register bytes for a single touch at (100, 250). This feeds realistic I2C data
     // through the production parser rather than injecting coordinates directly.
-    uint8_t raw[] = {0x01, 0x00, 0x00, 0x64, static_cast<uint8_t>(250)};   // touch_points=1; (xh,yh,xl,yl)=(0,0,100,250)
+    // FT5x06 6-byte point format: {xh, xl, yh, yl, weight, misc}; X=100 -> xh=0,xl=0x64; Y=250 -> yh=0,yl=0xFA.
+    uint8_t raw[] = {0x01, 0x00, 0x64, 0x00, 0xFA, 0x00, 0x00};   // touch_points=1; (100, 250)
     aiwatchos::board_inject_touch_bytes(raw, sizeof(raw));
 
     int xs[2] = {0}, ys[2] = {0};
@@ -385,6 +423,351 @@ static void test_display_flush_honest() {
     printf("test_display_flush_honest: PASSED\n");
 }
 
+// --- Test status bar renders the time string (drives shipped BatteryDisplay) ---
+static void test_status_bar_time() {
+    // BatteryDisplay::render used to ignore time_str entirely, so the status bar
+    // never showed the clock even though app_main formats and passes it every frame.
+    aiwatchos::TestHal hal;
+    aiwatchos::BatteryDisplay status(hal);
+
+    static uint16_t buf[aiwatchos::kDisplayWidth * aiwatchos::kDisplayHeight];
+    aiwatchos::Framebuffer fb{buf, aiwatchos::kDisplayWidth, aiwatchos::kDisplayHeight};
+    fb.fill(0x0000);
+
+    status.render(fb, "12:34");
+
+    // At least one clock pixel (white text) must appear in the left half of the bar.
+    bool found_clock_pixel = false;
+    for (int y = 0; y < 36 && !found_clock_pixel; ++y) {
+        for (int x = 0; x < aiwatchos::kDisplayWidth / 2; ++x) {
+            if (buf[y * aiwatchos::kDisplayWidth + x] == 0xFFFF) {
+                found_clock_pixel = true;
+                break;
+            }
+        }
+    }
+    assert(found_clock_pixel);   // time glyphs were actually drawn
+
+    // Battery outline must still be drawn at the top-right.
+    const int bat_x = aiwatchos::kDisplayWidth - 48 - 8;
+    assert(buf[8 * aiwatchos::kDisplayWidth + bat_x] == 0x7BCF);
+
+    // Null time string must not crash and must still draw the battery icon.
+    fb.fill(0x0000);
+    status.render(fb, nullptr);
+    assert(buf[8 * aiwatchos::kDisplayWidth + bat_x] == 0x7BCF);
+
+    printf("test_status_bar_time: PASSED\n");
+}
+
+// --- Test the ported IMA-ADPCM codec (drives muse_adpcm.c both directions) ---
+static void test_adpcm_roundtrip() {
+    // Silence must round-trip exactly: encoder and decoder share step state.
+    int16_t silence[256] = {0};
+    uint8_t packed[128] = {0};
+    muse_adpcm_t enc = {};
+    muse_adpcm_encode_block(&enc, silence, 256, packed);
+
+    int16_t back[256];
+    for (int i = 0; i < 256; ++i) back[i] = 1234;   // poison: decode must overwrite
+    muse_adpcm_t dec = {};
+    // NOTE: n is the sample count (256 samples <-> 128 bytes), not bytes.
+    muse_adpcm_decode_block(&dec, packed, 256, back);
+    for (int i = 0; i < 256; ++i) {
+        assert(back[i] == 0);   // silence in, silence out
+    }
+
+    // A smooth ramp must survive with bounded lossy error (4 bits/sample).
+    int16_t ramp[256];
+    for (int i = 0; i < 256; ++i) ramp[i] = static_cast<int16_t>(i * 64 - 8192);
+    muse_adpcm_t enc2 = {};
+    muse_adpcm_encode_block(&enc2, ramp, 256, packed);
+    muse_adpcm_t dec2 = {};
+    muse_adpcm_decode_block(&dec2, packed, 256, back);
+    int worst = 0;
+    for (int i = 8; i < 256; ++i) {   // skip adaptation transient
+        int err = abs(static_cast<int>(back[i]) - static_cast<int>(ramp[i]));
+        if (err > worst) worst = err;
+    }
+    assert(worst < 3000);   // bounded quantization noise, not garbage
+
+    printf("test_adpcm_roundtrip: PASSED (worst ramp err %d)\n", worst);
+}
+
+// --- Test muse push-to-talk turn buffering (drives the real adapter) ---
+static void test_muse_turn_buffering() {
+    // Press-hold-release through the real muse callbacks with the TestHal mic
+    // returning silence: pending bytes must grow while held and survive release
+    // for the (not yet landed) Noise transport to drain.
+    aiwatchos::TestHal hal;   // mic_start true, mic_read silence
+    aiwatchos::App app = aiwatchos_muse::make_muse_app(hal);
+    assert(std::string(app.id) == "muse");
+    app.init();
+    assert(aiwatchos_muse::muse_pending_bytes() == 0);   // idle: nothing buffered
+
+    aiwatchos::TouchEvent press{205, 450, aiwatchos::TouchEvent::Press};
+    assert(app.on_touch(press) == true);                 // bottom press = PTT
+    app.tick(40);
+    app.tick(40);
+    app.tick(40);
+    size_t held = aiwatchos_muse::muse_pending_bytes();
+    assert(held == 3 * 128);   // 3 ticks x 256 silent frames -> 128 ADPCM bytes each
+
+    aiwatchos::TouchEvent release{205, 450, aiwatchos::TouchEvent::Release};
+    assert(app.on_touch(release) == true);
+    app.tick(40);
+    assert(aiwatchos_muse::muse_pending_bytes() == held);   // retained for transport
+
+    printf("test_muse_turn_buffering: PASSED (%zu bytes)\n", held);
+}
+
+// --- Test the vendored Noise crypto backend (AES-GCM/SHA256/X25519) ---
+static void test_noise_crypto() {
+#ifdef AIWATCHOS_HAS_NOISE_CORE
+    // These are the primitives the encrypted transport is built on: the same
+    // PsaCryptoBackend the firmware links, driven here on host with fixed
+    // vectors plus a live DH symmetry check.
+    namespace tn = musegadgets::noise::core;
+    tn::PsaCryptoBackend crypto;
+
+    // SHA-256 known answer ("abc" -> NIST vector).
+    const uint8_t abc[] = {'a', 'b', 'c'};
+    uint8_t digest[32] = {0};
+    assert(crypto.Sha256(tn::ConstByteSpan(abc, 3),
+                         tn::ByteSpan(digest, 32)).ok());
+    const uint8_t kShaAbc[32] = {0xba, 0x78, 0x16, 0xbf, 0x8f, 0x01, 0xcf, 0xea,
+                                 0x41, 0x41, 0x40, 0xde, 0x5d, 0xae, 0x22, 0x23,
+                                 0xb0, 0x03, 0x61, 0xa3, 0x96, 0x17, 0x7a, 0x9c,
+                                 0xb4, 0x10, 0xff, 0x61, 0xf2, 0x00, 0x15, 0xad};
+    assert(memcmp(digest, kShaAbc, 32) == 0);
+
+    // AES-256-GCM seal/open round-trip with fixed key/nonce.
+    uint8_t key[32], nonce[12];
+    for (int i = 0; i < 32; ++i) key[i] = static_cast<uint8_t>(i);
+    for (int i = 0; i < 12; ++i) nonce[i] = static_cast<uint8_t>(0xA0 + i);
+    const auto* msg = reinterpret_cast<const uint8_t*>("watch turn payload");
+    const size_t msg_len = strlen(reinterpret_cast<const char*>(msg));
+    uint8_t sealed[64] = {0};
+    assert(crypto.Aes256GcmSeal(tn::ConstByteSpan(key, 32),
+                               tn::ConstByteSpan(nonce, 12),
+                               tn::ConstByteSpan(nullptr, 0),
+                               tn::ConstByteSpan(msg, msg_len),
+                               tn::ByteSpan(sealed, msg_len + 16)).ok());
+    assert(memcmp(sealed, msg, msg_len) != 0);   // actually encrypted
+    uint8_t opened[64] = {0};
+    assert(crypto.Aes256GcmOpen(tn::ConstByteSpan(key, 32),
+                               tn::ConstByteSpan(nonce, 12),
+                               tn::ConstByteSpan(nullptr, 0),
+                               tn::ConstByteSpan(sealed, msg_len + 16),
+                               tn::ByteSpan(opened, msg_len)).ok());
+    assert(memcmp(opened, msg, msg_len) == 0);
+
+    // Tampered tag must be rejected, not decrypted.
+    sealed[msg_len + 15] ^= 0x01;
+    uint8_t tampered[64] = {0};
+    assert(!crypto.Aes256GcmOpen(tn::ConstByteSpan(key, 32),
+                                tn::ConstByteSpan(nonce, 12),
+                                tn::ConstByteSpan(nullptr, 0),
+                                tn::ConstByteSpan(sealed, msg_len + 16),
+                                tn::ByteSpan(tampered, msg_len)).ok());
+
+    // X25519 DH symmetry with live keypairs.
+    uint8_t a_priv[32], a_pub[32], b_priv[32], b_pub[32];
+    assert(crypto.X25519GenerateKeypair(tn::ByteSpan(a_priv, 32),
+                                       tn::ByteSpan(a_pub, 32)).ok());
+    assert(crypto.X25519GenerateKeypair(tn::ByteSpan(b_priv, 32),
+                                       tn::ByteSpan(b_pub, 32)).ok());
+    uint8_t ab[32], ba[32];
+    assert(crypto.X25519Dh(tn::ConstByteSpan(a_priv, 32),
+                           tn::ConstByteSpan(b_pub, 32),
+                           tn::ByteSpan(ab, 32)).ok());
+    assert(crypto.X25519Dh(tn::ConstByteSpan(b_priv, 32),
+                           tn::ConstByteSpan(a_pub, 32),
+                           tn::ByteSpan(ba, 32)).ok());
+    assert(memcmp(ab, ba, 32) == 0);
+
+    printf("test_noise_crypto: PASSED\n");
+#else
+    printf("test_noise_crypto: SKIPPED (no <psa/crypto.h> on host)\n");
+#endif
+}
+
+// --- Test Settings volume tap drives the Hal (real settings_page.cpp) ---
+static void test_settings_volume() {
+    // Volume toggles mute/on in state AND forwards to the Hal. Default volume
+    // is 70, so the first tap on item 1 (y in [120, 192)) must mute.
+    aiwatchos::TestHal hal;
+    aiwatchos::SettingsPage settings(hal);
+
+    aiwatchos::TouchEvent vol{100, 156, aiwatchos::TouchEvent::Press};
+    assert(settings.on_touch(vol) == true);
+    assert(hal.volume() == 0);   // muted through the Hal, not just in state
+
+    assert(settings.on_touch(vol) == true);
+    assert(hal.volume() == 70);  // back on
+
+    // Brightness item 0 (y in [48, 120)) cycles 100 -> 50 -> 80 -> 100,
+    // driving the Hal each step. The old thresholds left 80 unreachable.
+    aiwatchos::TouchEvent bri{100, 84, aiwatchos::TouchEvent::Press};
+    assert(settings.on_touch(bri) == true);
+    assert(hal.backlight() == 50);
+    assert(settings.on_touch(bri) == true);
+    assert(hal.backlight() == 80);   // was skipped by the old cycle
+    assert(settings.on_touch(bri) == true);
+    assert(hal.backlight() == 100);
+
+    printf("test_settings_volume: PASSED\n");
+}
+
+// --- Test MP3 reply decoding (drives the vendored minimp3 on a fixture) ---
+static void test_minimp3_reply() {
+    // Spoken replies arrive as MP3 and must decode to playable PCM. The
+    // fixture is the upstream bench-test reply; run from the repo root.
+    FILE* f = fopen("apps/muse/test_data/test_reply.mp3", "rb");
+    if (!f) {
+        printf("test_minimp3_reply: SKIPPED (fixture missing)\n");
+        return;
+    }
+    fseek(f, 0, SEEK_END);
+    long size = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    assert(size > 1024);   // a real reply file, not a stub
+    uint8_t* mp3 = static_cast<uint8_t*>(malloc(size));
+    assert(mp3 != nullptr);
+    assert(fread(mp3, 1, size, f) == static_cast<size_t>(size));
+    fclose(f);
+
+    mp3dec_t dec;
+    mp3dec_init(&dec);
+    static int16_t pcm[MINIMP3_MAX_SAMPLES_PER_FRAME];
+    mp3dec_frame_info_t info = {};
+    int offset = 0, frames = 0, total_samples = 0, peak = 0;
+    int first_hz = 0, first_ch = 0;
+    while (offset < size) {
+        // Returns samples per channel (1152 MPEG-1, 576 MPEG-2); 0 = skip.
+        int samples = mp3dec_decode_frame(&dec, mp3 + offset, size - offset,
+                                          pcm, &info);
+        if (info.frame_bytes <= 0) break;   // out of data
+        offset += info.frame_bytes;
+        if (samples <= 0) continue;         // ID3/header skip
+        ++frames;
+        if (frames == 1) { first_hz = info.hz; first_ch = info.channels; }
+        int total = samples * info.channels;
+        assert(total <= MINIMP3_MAX_SAMPLES_PER_FRAME);
+        total_samples += total;
+        for (int i = 0; i < total; ++i) {
+            int v = abs(static_cast<int>(pcm[i]));
+            if (v > peak) peak = v;
+        }
+    }
+    free(mp3);
+    assert(frames > 0);                        // at least one audio frame
+    assert(first_ch == 1 || first_ch == 2);    // sane channel count
+    assert(first_hz == 16000 || first_hz == 22050 || first_hz == 24000 ||
+           first_hz == 32000 || first_hz == 44100 || first_hz == 48000);
+    assert(total_samples > 0 && peak > 100);   // audible content, not silence
+
+    printf("test_minimp3_reply: PASSED (%d frames, %d Hz x%d, peak %d)\n",
+           frames, first_hz, first_ch, peak);
+}
+
+// --- Test the MP3 reply playback path (decode + resample + speaker) ---
+static void test_muse_play_reply() {
+    // Guards: null/empty input plays nothing and never touches audio.
+    aiwatchos::TestHal hal;
+    aiwatchos::App app = aiwatchos_muse::make_muse_app(hal);
+    app.init();
+    assert(aiwatchos_muse::muse_play_reply(nullptr, 0) == 0);
+    assert(hal.played().empty());
+
+    // Full path on the upstream bench reply: 24 kHz mono MP3 in, 16 kHz mono
+    // PCM frames out through Hal::audio_write.
+    FILE* f = fopen("apps/muse/test_data/test_reply.mp3", "rb");
+    if (!f) {
+        printf("test_muse_play_reply: SKIPPED (fixture missing)\n");
+        return;
+    }
+    fseek(f, 0, SEEK_END);
+    long size = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    std::vector<uint8_t> mp3(static_cast<size_t>(size));
+    assert(fread(mp3.data(), 1, mp3.size(), f) == mp3.size());
+    fclose(f);
+
+    size_t played = aiwatchos_muse::muse_play_reply(mp3.data(), mp3.size());
+    // Fixture is MPEG-2 (24 kHz -> 576 samples/frame): 153 frames x 576 =
+    // 88128 input samples -> x(16/24) = 58752 output frames. Allow slack for
+    // header/skip variance.
+    assert(played > 55000 && played < 62000);
+    assert(hal.played().size() == played);
+    int peak = 0;
+    for (int16_t s : hal.played()) {
+        int v = abs(static_cast<int>(s));
+        if (v > peak) peak = v;
+    }
+    assert(peak > 100);   // audible reply reached the speaker path
+
+    printf("test_muse_play_reply: PASSED (%zu frames, peak %d)\n", played, peak);
+}
+
+// --- Test launcher hit-testing (drives the real LauncherUI::on_touch) ---
+static void test_launcher_hit_testing() {
+    // Grid: status 36 + 24 pad, 64px icons, gap_x = (410-3*64)/4 = 54.
+    // Icon (0,0) spans x in [54,118), y in [60,124).
+    aiwatchos::TestHal hal;
+    aiwatchos::AppManager mgr(hal);
+    aiwatchos::App app_a = aiwatchos::make_app("appA");
+    aiwatchos::App app_b = aiwatchos::make_app("appB");
+    assert(mgr.register_app(&app_a, true) == true);
+    mgr.register_app(&app_b);
+    aiwatchos::LauncherUI launcher(mgr);
+
+    // Tap in the left gap (x=40, between edge-swipe zone and icon 0) must
+    // NOT launch appA: integer truncation used to round it into column 0.
+    aiwatchos::TouchEvent gap{40, 92, aiwatchos::TouchEvent::Press};
+    assert(launcher.on_touch(gap) == false);
+    assert(std::string(mgr.current_app_id()) == "appA");
+
+    // Tap in the gutter between icon 0 and icon 1 must not launch either.
+    aiwatchos::TouchEvent gutter{140, 92, aiwatchos::TouchEvent::Press};
+    assert(launcher.on_touch(gutter) == false);
+    assert(std::string(mgr.current_app_id()) == "appA");
+
+    // Tap inside icon 1 (x in [172,236)) launches appB.
+    aiwatchos::TouchEvent icon{200, 92, aiwatchos::TouchEvent::Press};
+    assert(launcher.on_touch(icon) == true);
+    assert(std::string(mgr.current_app_id()) == "appB");
+
+    printf("test_launcher_hit_testing: PASSED\n");
+}
+
+// --- Test notification body wrapping (drives the real render path) ---
+static void test_notification_wrap() {
+    // A two-word body must render on TWO lines. The old loop broke after the
+    // first word, so the second band stayed background.
+    aiwatchos::TestHal hal;
+    aiwatchos::NotificationManager mgr(hal);
+    mgr.add_notification("T", std::string(30, 'a') + " " + std::string(30, 'b'));
+
+    static uint16_t buf[aiwatchos::kDisplayWidth * aiwatchos::kDisplayHeight];
+    aiwatchos::Framebuffer fb{buf, aiwatchos::kDisplayWidth, aiwatchos::kDisplayHeight};
+    fb.fill(0x0000);
+    mgr.render(fb);
+
+    auto band_has_body = [&](int y0, int y1) {
+        for (int y = y0; y <= y1; ++y) {
+            for (int x = 0; x < aiwatchos::kDisplayWidth; ++x) {
+                if (buf[y * aiwatchos::kDisplayWidth + x] == 0xBDEF) return true;
+            }
+        }
+        return false;
+    };
+    assert(band_has_body(84, 99));    // first word, line 1
+    assert(band_has_body(104, 119));  // second word, line 2 (was dropped)
+
+    printf("test_notification_wrap: PASSED\n");
+}
+
 int main() {
     test_framebuffer_bounds();
     test_app_registry();
@@ -397,6 +780,15 @@ int main() {
     test_ft3168_register_parsing();   // drives real parse_ft3168_registers with datasheet-format bytes
     test_real_touch_dispatch();        // drives REAL Board::read_touch -> AppManager dispatch path
     test_display_flush_honest();
+    test_status_bar_time();              // drives REAL BatteryDisplay::render with a time string
+    test_adpcm_roundtrip();              // drives the ported IMA-ADPCM codec both directions
+    test_muse_turn_buffering();          // drives the REAL muse PTT pipeline into the turn buffer
+    test_noise_crypto();                 // drives the vendored Noise crypto backend (or skips)
+    test_settings_volume();              // drives Settings volume tap into the Hal
+    test_minimp3_reply();                // decodes the MP3 reply fixture (or skips)
+    test_muse_play_reply();              // plays the fixture through the reply path
+    test_launcher_hit_testing();         // drives real LauncherUI gap/icon taps
+    test_notification_wrap();            // drives real multi-line body render
 
     printf("\nAll AppManager tests PASSED.\n");
     return 0;

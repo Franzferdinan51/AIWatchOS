@@ -65,6 +65,15 @@ bool LauncherUI::on_touch(const TouchEvent& event) {
         int col = (event.x - gap_x) / (icon_size + gap_x);
 
         if (col >= 0 && col < cols && row >= 0) {
+            // Reject taps landing in the gaps: integer division truncates
+            // toward zero, so without this a tap left of the grid (or in a
+            // gutter) would round into a neighboring icon and launch it.
+            int icon_x = gap_x + col * (icon_size + gap_x);
+            int icon_y = status_bar_h + 24 + row * (icon_size + 36);
+            if (event.x < icon_x || event.x >= icon_x + icon_size ||
+                event.y < icon_y || event.y >= icon_y + icon_size) {
+                return false;
+            }
             size_t target_idx = static_cast<size_t>(row * cols + col);
             App* target = mgr_.app_at_index(target_idx);
             if (target && target->id) {

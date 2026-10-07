@@ -5,5 +5,7 @@ set(COMPONENT_ADD_INCLUDEDIRS .)
 idf_component_register(
     SRCS ${COMPONENT_SRCS}
     INCLUDE_DIRS .
-    REQUIRES aiwatchos_os aiwatchos_muse aiwatchos_hermes
+    # Component names come from their directory names: apps/muse -> muse,
+    # apps/hermes -> hermes (not aiwatchos_muse / aiwatchos_hermes).
+    REQUIRES aiwatchos_os muse hermes
 )

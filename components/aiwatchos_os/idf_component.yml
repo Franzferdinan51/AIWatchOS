@@ -1,0 +1,13 @@
+## IDF Component Manager manifest for aiwatchos_os.
+dependencies:
+  # FT3168 is register-compatible with FT5x06; this provides
+  # esp_lcd_touch_ft5x06.h used by src/touch_driver.cpp.
+  espressif/esp_lcd_touch_ft5x06: "^1.1.1"
+  # CO5300 QSPI AMOLED driver (esp_lcd_new_panel_co5300 + QSPI bus/IO macros
+  # + init-command list) used by src/display_driver.cpp. Same component the
+  # upstream muse-gadget-206 board file builds on. Capped below 2.0.0 because
+  # every 2.x release needs IDF >= 5.4 and this project builds on IDF 5.3.
+  espressif/esp_lcd_co5300: ">=1.0.0,<2.0.0"
+  # Audio: codec-device framework (bundles the ES8311 speaker + ES7210 mic
+  # drivers), mirroring the upstream muse-gadget-206 audio_init().
+  espressif/esp_codec_dev: "<2.0.0"

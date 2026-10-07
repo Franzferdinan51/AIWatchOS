@@ -3,6 +3,7 @@
 // hardware constraints: uses std::vector (heap-allocated in PSRAM via ESP-IDF config)
 // but limits notifications to a bounded deque-style buffer (max 16 entries).
 #include "aiwatchos/notifications.hpp"
+#include <cstring>
 
 namespace aiwatchos {
 
@@ -59,35 +60,29 @@ void NotificationManager::render(Framebuffer& fb) {
     int line_y = body_start_y - scroll_offset_;
 
     while (!remaining.empty() && line_y < kDisplayHeight - 36) {
-        if (line_y >= body_start_y) {   // only draw lines in the visible area
-            size_t break_pos = remaining.find_first_of(" \n");
-            std::string word;
-            if (break_pos != std::string::npos && static_cast<int>(break_pos) < chars_per_line) {
-                word = remaining.substr(0, break_pos);
-                remaining = remaining.substr(break_pos + 1);   // skip the space/newline
-            } else if (remaining.length() > static_cast<size_t>(chars_per_line)) {
-                word = remaining.substr(0, chars_per_line);
-                remaining = remaining.substr(chars_per_line);
-            } else {
-                word = remaining;
-                remaining.clear();
-            }
+        // Consume exactly one line per iteration so every line is reached;
+        // draw only the lines inside the visible area (scrolling just shifts
+        // line_y). The old code broke out after the first word here.
+        size_t break_pos = remaining.find_first_of(" \n");
+        std::string word;
+        if (break_pos != std::string::npos && static_cast<int>(break_pos) < chars_per_line) {
+            word = remaining.substr(0, break_pos);
+            remaining = remaining.substr(break_pos + 1);   // skip the space/newline
+        } else if (remaining.length() > static_cast<size_t>(chars_per_line)) {
+            word = remaining.substr(0, chars_per_line);
+            remaining = remaining.substr(chars_per_line);
+        } else {
+            word = remaining;
+            remaining.clear();
+        }
 
+        if (line_y >= body_start_y) {   // only draw lines in the visible area
             for (size_t c = 0; c < word.length() && c < static_cast<size_t>(chars_per_line); ++c) {
                 int cx = body_start_x + static_cast<int>(c) * 9;
                 if (cx < kDisplayWidth - 16) {
                     fb.fill_rect(cx, line_y, cx + 7, line_y + 15, kBodiesColor);
                 }
             }
-        }
-
-        // Advance to next potential line — estimate body height for scroll bounds.
-        remaining = remaining.substr(0, remaining.length());   // no-op: just advance
-        size_t nl = remaining.find_first_of("\n");
-        if (nl != std::string::npos) {
-            remaining = remaining.substr(nl + 1);
-        } else if (!remaining.empty()) {
-            break;   // avoid infinite loop on single long line without spaces
         }
 
         line_y += 20;   // ~8px font height + line spacing
@@ -118,8 +113,8 @@ bool NotificationManager::on_touch(const TouchEvent& event) {
     }
 
     if (event.type == TouchEvent::Release) {
-        // Tap to reset scroll position on the latest notification.
-        if (abs(event.y - last_y) < 10 && abs(event.x - event.x) < 10) {
+        // Tap (press and release near each other) resets the scroll position.
+        if (abs(event.y - last_y) < 10) {
             scroll_offset_ = 0;
         }
         return true;

@@ -6,6 +6,20 @@
 // for the 2.06" rectangular (non-round) layout per board_waveshare_s3_206.c config.
 #include "aiwatchos/hal.hpp"
 
+// NOTE: IDF headers must be included BEFORE the namespace opens. Including
+// them inside `namespace aiwatchos {}` breaks FreeRTOS headers (they reference
+// ::_reent, which would resolve to aiwatchos::_reent and fail to compile).
+#ifdef __ESPRESSIF_IDF__
+#include "driver/gpio.h"
+#include "driver/i2c_master.h"
+#include "esp_check.h"
+#include "esp_lcd_panel_io.h"
+#include "esp_lcd_touch_ft5x06.h"
+#include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#endif
+
 namespace aiwatchos {
 
 // Touch pin assignments from board_waveshare_s3_206.c / HermesGadget board.cpp.
@@ -19,12 +33,16 @@ constexpr uint8_t kTouchAddr = 0x38;
 // the device at register 0x02 contain: [touch_points][reserved][event_x_high...].
 constexpr uint8_t kRegTouchPoints = 0x02;   // number of active touch points
 
-// --- Production I2C read (ESP-IDF specific, not testable without toolchain) ---
+// --- Production state (ESP-IDF only) ---
 #ifdef __ESPRESSIF_IDF__
-#include "driver/i2c.h"
-#include "esp_lcd_touch_ft5x06.h"
-
+static const char* kTouchTag = "ft3168";
 static esp_lcd_touch_handle_t s_touch = nullptr;
+static esp_lcd_panel_io_handle_t s_touch_io = nullptr;
+static i2c_master_bus_handle_t s_touch_bus = nullptr;
+
+// Shared I2C bus for PMU/codec clients (declared in hal.hpp). Null until
+// ft3168_init() has created it.
+i2c_master_bus_handle_t aiwatchos_i2c_bus() { return s_touch_bus; }
 #endif
 
 // --- Test injection support ---
@@ -36,12 +54,14 @@ static esp_lcd_touch_handle_t s_touch = nullptr;
 // --- Register parsing logic (pure C++, testable without ESP-IDF) ---
 // The FT3168/FT5x06 returns bytes starting at register 0x02 in this format:
 //   [0]: touch points count (0, 1, or 2)
-//   For each point, a 4-byte block of coordinate data (weight/misc are not read):
-//     xh = byte[1 + i*4]      // event flag bits [7:6], X high nibble [3:0]
-//     yh = byte[2 + i*4]      // Y high nibble [3:0] (reserved bits masked)
-//     xl = byte[3 + i*4]      // X low byte (8 bits, full LSB)
-//     yl = byte[4 + i*4]      // Y low byte (8 bits, full LSB)
-// The full 12-bit coordinate is ((xh & 0x0F) << 8) | xl for X and similarly for Y..
+//   For each point, a 6-byte block per the register map (regs 0x03..0x08, 0x09..0x0E):
+//     xh     = byte[1 + i*6]  // event flag bits [7:6], X high nibble [3:0]
+//     xl     = byte[2 + i*6]  // X low byte (8 bits, full LSB)
+//     yh     = byte[3 + i*6]  // touch ID [7:4], Y high nibble [3:0]
+//     yl     = byte[4 + i*6]  // Y low byte (8 bits, full LSB)
+//     weight = byte[5 + i*6]  // pressure (ignored)
+//     misc   = byte[6 + i*6]  // area (ignored)
+// The full 12-bit coordinate is ((xh & 0x0F) << 8) | xl for X and similarly for Y.
 
 namespace {
     struct InjectedPoint { int x, y; };
@@ -59,17 +79,19 @@ namespace {
         if (len < 2 || !raw) return 0;   // need at least: touch_points + first coordinate byte
 
         int num_report = static_cast<int>(raw[0]);   // byte [0]: number of active touch points
-        // Each point uses a 4-byte block: xh, yh, xl, yl starting at offset (1 + i*4).
-        if (num_report <= 0 || len < 1 + 4 * num_report) {
+        // FT5x06/FT3168 register map: each point occupies 6 bytes — XH, XL, YH, YL,
+        // WEIGHT, MISC — starting at register 0x03, i.e. offset (1 + i*6) in a buffer
+        // read starting from register 0x02.
+        if (num_report <= 0 || len < 1 + 6 * num_report) {
             return 0;   // no touches, or buffer too short for claimed point count
         }
 
         int parsed = 0;
         for (int i = 0; i < num_report && parsed < max_points; ++i) {
-            const uint8_t* p = &raw[1 + i * 4];   // skip touch_points byte, read coordinate block
+            const uint8_t* p = &raw[1 + i * 6];   // skip touch_points byte, read 6-byte point block
             int xh = static_cast<int>(p[0]);      // event flag [7:6] + X high nibble [3:0]
-            int yh = static_cast<int>(p[1]);      // Y high nibble [3:0] (reserved bits masked)
-            int xl = static_cast<int>(p[2]);      // X low byte (8 bits)
+            int xl = static_cast<int>(p[1]);      // X low byte (8 bits)
+            int yh = static_cast<int>(p[2]);      // touch ID [7:4] + Y high nibble [3:0]
             int yl = static_cast<int>(p[3]);      // Y low byte (8 bits)
 
             // Extract 12-bit coordinates and clamp to display bounds.
@@ -95,12 +117,12 @@ void board_inject_touch_bytes(const uint8_t* raw, int len) {
 
     int num_report = static_cast<int>(raw[0]);
     for (int i = 0; i < num_report && g_injected_count < 2; ++i) {
-        const uint8_t* p = &raw[1 + i * 4];   // skip touch_points byte, read coordinate block
-        if (len < 1 + i * 4 + 4) break;       // not enough bytes for this point
+        const uint8_t* p = &raw[1 + i * 6];   // skip touch_points byte, read 6-byte point block
+        if (len < 1 + i * 6 + 6) break;       // not enough bytes for this point
 
         int xh = static_cast<int>(p[0]);      // event flag [7:6] + X high nibble [3:0]
-        int yh = static_cast<int>(p[1]);      // Y high nibble [3:0]
-        int xl = static_cast<int>(p[2]);      // X low byte (8 bits)
+        int xl = static_cast<int>(p[1]);      // X low byte (8 bits)
+        int yh = static_cast<int>(p[2]);      // touch ID [7:4] + Y high nibble [3:0]
         int yl = static_cast<int>(p[3]);      // Y low byte (8 bits)
 
         int x = ((xh & 0x0F) << 8) | xl;   // extract 12-bit coordinate, clamp to display bounds
@@ -131,16 +153,27 @@ void board_inject_touch(int x0, int y0, int x1, int y1, int count) {
 // injected points or raw register bytes.
 int ft3168_read(int* out_xs, int* out_ys, int max_points) {
 #ifdef __ESPRESSIF_IDF__
-    // Production path: read touch data via the esp_lcd_touch_ft5x06 driver (register-compatible).
+    // Production path: poll the FT3168 through esp_lcd_touch_ft5x06 and pull
+    // processed coordinates out of the driver.
     if (!s_touch) return 0;
+    if (esp_lcd_touch_read_data(s_touch) != ESP_OK) return 0;
 
-    uint8_t raw[14] = {0};   // FT3168 sends up to 2 points × 6 bytes + 2 header bytes = 14
-    uint8_t num_read = 0;
-    esp_err_t err = esp_lcd_touch_read_data(s_touch, &raw[0], sizeof(raw), &num_read);
-    if (err != ESP_OK || num_read == 0) return 0;
-
-    // Parse the raw register bytes into coordinates. This is the SAME parsing logic used in tests.
-    return parse_ft3168_registers(raw, num_read, out_xs, out_ys, max_points);
+    uint16_t xs[2] = {0}, ys[2] = {0}, strengths[2] = {0};
+    uint8_t point_num = 0;
+    if (!esp_lcd_touch_get_coordinates(s_touch, xs, ys, strengths, &point_num, 2)) {
+        return 0;
+    }
+    int n = 0;
+    for (int i = 0; i < point_num && n < max_points; ++i) {
+        int x = static_cast<int>(xs[i]);
+        int y = static_cast<int>(ys[i]);
+        if (is_valid_point(x, y)) {
+            out_xs[n] = x;
+            out_ys[n] = y;
+            ++n;
+        }
+    }
+    return n;
 #else
     // Test path: consume injected points (from board_inject_touch or board_inject_touch_bytes).
     int available = g_injected_count;
@@ -160,17 +193,64 @@ int ft3168_read(int* out_xs, int* out_ys, int max_points) {
 #endif
 }
 
-// Production init: create and configure the FT5x06-compatible touch driver instance.
+// Production init: reset the panel, bring up the shared I2C bus, and create the
+// FT5x06-compatible touch driver instance. Mirrors the upstream
+// board_waveshare_s3_206.c touch bring-up (RST pulse, 400 kHz bus, x/y max).
+// Returns ESP_OK when the driver is ready; Board::begin() logs failures.
 #ifdef __ESPRESSIF_IDF__
-void ft3168_init(esp_lcd_touch_handle_t* out_handle) {
-    if (!out_handle || s_touch) return;
+esp_err_t ft3168_init(void) {
+    if (s_touch) return ESP_OK;
 
-    const esp_lcd_touch_config_t cfg = {
-        .read_data = nullptr,   // provided by the driver internally
-        .get_coordinates = nullptr,  // handled via read_data + parse_ft3168_registers above
-    };
-    ESP_ERROR_CHECK(esp_lcd_touch_new_i2c(&cfg, out_handle));
-    s_touch = *out_handle;
+    // Touch reset: HIGH -> 1ms -> LOW -> 20ms -> HIGH -> 50ms (Waveshare init).
+    gpio_config_t tp_rst = {};
+    tp_rst.pin_bit_mask = 1ULL << kTouchRst;
+    tp_rst.mode = GPIO_MODE_OUTPUT;
+    ESP_RETURN_ON_ERROR(gpio_config(&tp_rst), kTouchTag, "touch RST gpio");
+    gpio_set_level(static_cast<gpio_num_t>(kTouchRst), 1);
+    vTaskDelay(pdMS_TO_TICKS(1));
+    gpio_set_level(static_cast<gpio_num_t>(kTouchRst), 0);
+    vTaskDelay(pdMS_TO_TICKS(20));
+    gpio_set_level(static_cast<gpio_num_t>(kTouchRst), 1);
+    vTaskDelay(pdMS_TO_TICKS(50));
+
+    // I2C bus shared with IMU, PMU, RTC and codecs (same bus as upstream).
+    i2c_master_bus_config_t bus_cfg = {};
+    bus_cfg.clk_source = I2C_CLK_SRC_DEFAULT;
+    bus_cfg.i2c_port = I2C_NUM_0;
+    bus_cfg.scl_io_num = static_cast<gpio_num_t>(kTouchScl);
+    bus_cfg.sda_io_num = static_cast<gpio_num_t>(kTouchSda);
+    bus_cfg.glitch_ignore_cnt = 7;
+    bus_cfg.flags.enable_internal_pullup = true;
+    ESP_RETURN_ON_ERROR(i2c_new_master_bus(&bus_cfg, &s_touch_bus), kTouchTag, "i2c bus");
+
+    // Same values as ESP_LCD_TOUCH_IO_I2C_FT5x06_CONFIG(), assigned
+    // field-by-field because that macro's designators are out of order for C++.
+    esp_lcd_panel_io_i2c_config_t tp_io_cfg = {};
+    tp_io_cfg.dev_addr = kTouchAddr;
+    tp_io_cfg.on_color_trans_done = nullptr;
+    tp_io_cfg.control_phase_bytes = 1;
+    tp_io_cfg.dc_bit_offset = 0;
+    tp_io_cfg.lcd_cmd_bits = 8;
+    tp_io_cfg.lcd_param_bits = 8;
+    tp_io_cfg.flags.disable_control_phase = 1;
+    tp_io_cfg.scl_speed_hz = 400000;
+    tp_io_cfg.transaction_timeout_ms = -1;
+    ESP_RETURN_ON_ERROR(esp_lcd_new_panel_io_i2c(s_touch_bus, &tp_io_cfg, &s_touch_io),
+                        kTouchTag, "touch IO");
+
+    esp_lcd_touch_config_t tp_cfg = {};
+    tp_cfg.x_max = kDisplayWidth;
+    tp_cfg.y_max = kDisplayHeight;
+    tp_cfg.rst_gpio_num = static_cast<gpio_num_t>(kTouchRst);
+    tp_cfg.int_gpio_num = static_cast<gpio_num_t>(kTouchInt);
+    tp_cfg.levels.reset = 0;
+    tp_cfg.levels.interrupt = 0;
+    tp_cfg.flags.swap_xy = 0;
+    tp_cfg.flags.mirror_x = 0;
+    tp_cfg.flags.mirror_y = 0;
+    ESP_RETURN_ON_ERROR(esp_lcd_touch_new_i2c_ft5x06(s_touch_io, &tp_cfg, &s_touch),
+                        kTouchTag, "FT3168 touch");
+    return ESP_OK;
 }
 
 // Test-accessible: returns the raw register buffer pointer for verification. This is used by

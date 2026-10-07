@@ -1,0 +1,1 @@
+PROVENANCE: vendored from https://github.com/Franzferdinan51/muse-gadget-206 esp32/components/noise_core (Apache 2.0, Meta Platforms). Unchanged upstream files; AIWatchOS integrates it as the Noise transport crypto core.

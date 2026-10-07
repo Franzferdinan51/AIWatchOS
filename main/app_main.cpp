@@ -14,6 +14,13 @@
 
 #include "aiwatchos_muse.hpp"
 #include "aiwatchos_hermes.hpp"
+#include <cstdio>
+
+#ifdef __ESPRESSIF_IDF__
+#include "esp_heap_caps.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#endif
 
 extern "C" void app_main(void) {
     // --- 1. Hardware initialization via HAL ---
@@ -21,8 +28,24 @@ extern "C" void app_main(void) {
     board.begin();   // CO5300 display, FT3168 touch, ES8311/ES7210 audio, AXP2101 PMU
 
     // Allocate the framebuffer in PSRAM (410 * 502 * 2 bytes = ~412 KB).
-    static uint16_t s_framebuffer[aiwatchos::kDisplayWidth * aiwatchos::kDisplayHeight];
+    // It must NOT be a plain static array: 412 KB far exceeds the ESP32-S3's
+    // internal DRAM, so a static array would overflow DRAM at boot.
+#ifdef __ESPRESSIF_IDF__
+    uint16_t* s_framebuffer = static_cast<uint16_t*>(heap_caps_malloc(
+        aiwatchos::kDisplayWidth * aiwatchos::kDisplayHeight * sizeof(uint16_t),
+        MALLOC_CAP_SPIRAM));
+#else
+    static uint16_t s_host_framebuffer[aiwatchos::kDisplayWidth * aiwatchos::kDisplayHeight];
+    uint16_t* s_framebuffer = s_host_framebuffer;
+#endif
     board.set_framebuffer(s_framebuffer);   // register the framebuffer with Board for display_flush()
+#ifdef __ESPRESSIF_IDF__
+    if (!s_framebuffer) {
+        // PSRAM allocation failed (PSRAM not enabled in sdkconfig?). Idle with
+        // periodic yields instead of dereferencing null and crashing.
+        while (true) { vTaskDelay(pdMS_TO_TICKS(1000)); }
+    }
+#endif
     aiwatchos::Framebuffer fb{s_framebuffer, aiwatchos::kDisplayWidth, aiwatchos::kDisplayHeight};
 
     // --- 2. Create the AppManager and register apps ---
@@ -109,7 +132,10 @@ extern "C" void app_main(void) {
         // Flush the framebuffer to the CO5300 AMOLED panel via DMA.
         board.display_flush();
 
-        // Delay for one frame (~40 ms). In ESP-IDF this uses vTaskDelay.
-        // (The real implementation uses esp_timer or FreeRTOS tick count.)
+        // Delay for one frame (~40 ms). Without this yield the loop would
+        // starve the IDLE task and trip the task watchdog.
+#ifdef __ESPRESSIF_IDF__
+        vTaskDelay(pdMS_TO_TICKS(kFrameMs));
+#endif
     }
 }

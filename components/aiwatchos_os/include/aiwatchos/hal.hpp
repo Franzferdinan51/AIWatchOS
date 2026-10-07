@@ -3,8 +3,22 @@
 // for CO5300 display, FT3168 touch, ES8311/ES7210 audio, AXP2101 power.
 #pragma once
 
+// ESP-IDF defines ESP_PLATFORM (not __ESPRESSIF_IDF__) for all component
+// compiles. Map it so the driver guards below select production code paths in
+// firmware builds and test doubles in host builds. Without this, firmware
+// builds silently compiled the test paths (injected touches, stub power,
+// 412 KB DRAM framebuffer) — the hardware build overflowed DRAM by ~127 KB.
+#if defined(ESP_PLATFORM) && !defined(__ESPRESSIF_IDF__)
+#define __ESPRESSIF_IDF__ 1
+#endif
+
 #include <cstdint>
+#include <cstddef>
 #include <string>
+
+#ifdef __ESPRESSIF_IDF__
+#include "driver/i2c_master.h"
+#endif
 
 namespace aiwatchos {
 
@@ -40,7 +54,11 @@ class Hal {
     virtual bool audio_start_playback(uint32_t sample_rate_hz) = 0;
     virtual void audio_write(const int16_t* samples, size_t count) = 0;
     virtual void audio_stop_playback() = 0;
+    // Speaker volume 0..100 (0 = mute). Takes effect on the next playback.
+    virtual void set_volume(uint8_t percent_0_to_100) = 0;
     virtual bool mic_start(uint32_t sample_rate_hz) = 0;
+    // Capture up to `frames` PCM16 mono frames into `out`; returns frames read.
+    virtual size_t mic_read(int16_t* out, size_t frames) = 0;
     virtual void mic_stop() = 0;
 
     // --- Power (AXP2101 PMU) ---
@@ -56,6 +74,13 @@ class Hal {
  protected:
     ~Hal() = default;
 };
+
+#ifdef __ESPRESSIF_IDF__
+// Shared I2C bus (I2C_NUM_0, SDA=GPIO15/SCL=GPIO14) brought up by the FT3168
+// touch init. PMU, codecs and other bus clients attach devices to this bus
+// instead of creating their own. Null until ft3168_init() has run.
+i2c_master_bus_handle_t aiwatchos_i2c_bus();
+#endif
 
 // The concrete board implementation for the Waveshare ESP32-S3-Touch-AMOLED-2.06.
 // Implemented in src/hal.cpp and the driver source files. This is a singleton
@@ -75,7 +100,9 @@ class Board : public Hal {
     bool audio_start_playback(uint32_t sample_rate_hz) override;
     void audio_write(const int16_t* samples, size_t count) override;
     void audio_stop_playback() override;
+    void set_volume(uint8_t percent_0_to_100) override;
     bool mic_start(uint32_t sample_rate_hz) override;
+    size_t mic_read(int16_t* out, size_t frames) override;
     void mic_stop() override;
     PowerStatus read_power() override;
     uint64_t now_ms() override;

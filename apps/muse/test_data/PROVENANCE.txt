@@ -1,0 +1,1 @@
+PROVENANCE: minimp3 decoder vendored from https://github.com/Franzferdinan51/muse-gadget-206 esp32/components/minimp3 (CC0/public-domain, see component README); test_reply.mp3 fixture from the same repo's muse component.

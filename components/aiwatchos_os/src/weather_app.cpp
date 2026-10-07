@@ -3,6 +3,8 @@
 // humidity percentage at bottom. All geometry is hand-computed for the portrait format;
 // no dynamic allocation during render() to ensure deterministic frame times.
 #include "aiwatchos/weather_app.hpp"
+#include <cstdio>
+#include <cstring>
 
 namespace aiwatchos {
 

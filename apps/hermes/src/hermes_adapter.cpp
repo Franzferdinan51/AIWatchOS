@@ -5,6 +5,7 @@
 //   - on_transport_text/binary(): delivers server messages via the WebSocket transport
 // This adapter bridges the hg::App HAL interface to AIWatchOS's Hal singleton.
 #include "aiwatchos_hermes.hpp"
+#include <cstring>
 
 namespace aiwatchos_hermes {
 

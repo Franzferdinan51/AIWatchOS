@@ -1,17 +1,23 @@
 // CO5300 QSPI display driver for the Waveshare ESP32-S3-Touch-AMOLED-2.06.
-// Pin map (from board_waveshare_s3_206.c):
+// Pin map and init sequence mirror the upstream muse-gadget-206 board file
+// (esp32/components/muse/boards/board_waveshare_s3_206.c):
 //   QSPI: CS=GPIO12, SCK=GPIO11, D0-D3=GPIO4-7, RST=GPIO8, EN=GPIO13
-// Resolution: 410x502 RGB565 (byte-swapped big-endian for CO5300).
-// The framebuffer lives in PSRAM; rows are flushed through a small DMA-capable bounce buffer
-// to avoid contention with Wi-Fi/BLE. This implements the production flush path that was
-// previously missing — Board::display_flush() delegates here.
+// Resolution: 410x502 RGB565.
+// The framebuffer lives in PSRAM (owned by app_main); rows are flushed through
+// a small DMA-capable bounce buffer to avoid contention with Wi-Fi/BLE.
 #include "aiwatchos/hal.hpp"
+
+#include <cstring>
 
 #ifdef __ESPRESSIF_IDF__
 #include "driver/gpio.h"
 #include "driver/spi_master.h"
+#include "esp_check.h"
+#include "esp_lcd_co5300.h"
 #include "esp_lcd_panel_io.h"
-#include "esp_lcd_panel_st7789.h"   // CO5300 uses ST7789-compatible command set over QSPI
+#include "esp_lcd_panel_ops.h"
+#include "esp_log.h"
+#include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #endif
 
@@ -27,99 +33,113 @@ constexpr int kLcdD3    = 7;
 constexpr int kLcdRst   = 8;
 constexpr int kLcdEn    = 13;
 
-// --- CO5300 init command sequence (from Waveshare BSP v3.0.0, board_waveshare_s3_206.c) ---
-struct Co5300InitCmd {
-    uint8_t reg;
-    const uint8_t* data;
-    size_t len;
-    uint16_t delay_ms;
-};
-
-// Column address: cols 0-409 (410px wide). Little-endian half-words.
-static const uint8_t kColAddr[] = { 0x00, 0x00, 0x01, 0x99 };  // 0..409
-// Page address: rows 0-501 (502px tall).
-static const uint8_t kRowAddr[]  = { 0x00, 0x00, 0x01, 0xF5 };  // 0..501
-
 #ifdef __ESPRESSIF_IDF__
-// Production state: QSPI panel handle and DMA bounce buffer.
+// Production state: QSPI panel handle, panel IO (also used for brightness),
+// and DMA bounce buffer.
+static const char* kTag = "co5300";
 static esp_lcd_panel_handle_t s_panel = nullptr;
-static spi_bus_config_t s_buscfg{};
 static esp_lcd_panel_io_handle_t s_io = nullptr;
 constexpr int kBounceRows = 20;   // rows copied through DMA at a time to limit PSRAM contention
+constexpr int kBounceBytes = kBounceRows * kDisplayWidth * 2;
 static uint16_t* s_bounce_buf = nullptr;
 
+// CO5300 init sequence for the 410x502 panel, taken from the upstream
+// board_waveshare_s3_206.c s_lcd_init[] (Waveshare BSP-derived, page
+// selects + QSPI enable + RGB565 + brightness block + address windows).
+static const co5300_lcd_init_cmd_t s_lcd_init[] = {
+    { 0xFE, (uint8_t[]){ 0x20 }, 1, 0 },
+    { 0x19, (uint8_t[]){ 0x10 }, 1, 0 },
+    { 0x1C, (uint8_t[]){ 0xA0 }, 1, 0 },
+    { 0xFE, (uint8_t[]){ 0x00 }, 1, 0 },
+    { 0xC4, (uint8_t[]){ 0x80 }, 1, 0 },
+    { 0x3A, (uint8_t[]){ 0x55 }, 1, 0 },
+    { 0x35, (uint8_t[]){ 0x00 }, 1, 0 },
+    { 0x53, (uint8_t[]){ 0x20 }, 1, 0 },
+    { 0x51, (uint8_t[]){ 0xFF }, 1, 0 },
+    { 0x63, (uint8_t[]){ 0xFF }, 1, 0 },
+    { 0x2A, (uint8_t[]){ 0x00, 0x00, 0x01, 0x99 }, 4, 0 },
+    { 0x2B, (uint8_t[]){ 0x00, 0x00, 0x01, 0xF5 }, 4, 600 },
+    { 0x11, nullptr, 0, 600 },
+    { 0x29, nullptr, 0, 0 },
+};
+
 esp_err_t co5300_init(void) {
-    // Configure the QSPI bus for the CO5300 AMOLED.
-    s_buscfg = (spi_bus_config_t){
-        .miso_io_num = GPIO_NUM_NC,   // write-only from MCU to display
-        .mosi_io_num = kLcdD0,        // D0-D3 used as QSPI data lines
-        .sclk_io_num = kLcdSck,
-        .quadwp_io_num = kLcdD1,      // WP/QSPI D1
-        .quadhd_io_num = kLcdD2,      // HD/QSPI D2
-        .max_transfer_sz = kBounceRows * kDisplayWidth * 2,   // 2 bytes per RGB565 pixel
-    };
+    // Display enable pin: power the panel before any traffic.
+    gpio_config_t en = {};
+    en.pin_bit_mask = 1ULL << kLcdEn;
+    en.mode = GPIO_MODE_OUTPUT;
+    ESP_RETURN_ON_ERROR(gpio_config(&en), kTag, "display EN gpio");
+    gpio_set_level(static_cast<gpio_num_t>(kLcdEn), 1);
+    vTaskDelay(pdMS_TO_TICKS(50));
 
-    ESP_ERROR_CHECK(spi_bus_initialize(SPI2_HOST, &s_buscfg, SPI_DMA_CHANNEL));
+    // QSPI bus for CO5300. Assigned field-by-field (not via the vendor
+    // CO5300_PANEL_BUS_QSPI_CONFIG macro) because that macro's designators are
+    // out of order, which C++ rejects. Values match the macro: D0-D3 on the
+    // data unions, 40 MHz-class transfer size for the bounce buffer.
+    spi_bus_config_t bus_cfg = {};
+    bus_cfg.mosi_io_num = kLcdD0;     // union: data0
+    bus_cfg.miso_io_num = kLcdD1;     // union: data1
+    bus_cfg.sclk_io_num = kLcdSck;
+    bus_cfg.quadwp_io_num = kLcdD2;   // union: data2
+    bus_cfg.quadhd_io_num = kLcdD3;   // union: data3
+    bus_cfg.data4_io_num = -1;
+    bus_cfg.data5_io_num = -1;
+    bus_cfg.data6_io_num = -1;
+    bus_cfg.data7_io_num = -1;
+    bus_cfg.max_transfer_sz = kBounceBytes;
+    ESP_RETURN_ON_ERROR(spi_bus_initialize(SPI2_HOST, &bus_cfg, SPI_DMA_CH_AUTO), kTag, "QSPI bus");
 
-    // Create the panel I/O using QSPI (4-line) mode.
-    const esp_lcd_panel_io_spi_config_t io_cfg = {
-        .cs_gpio_num = kLcdCs,
-        .pclk_hz = 42 * 1000 * 1000,   // 42 MHz QSPI clock (CO5300 max)
-        .lcd_cmd_bits = 2,             // CO5300 uses 9-bit command encoding over QSPI
-        .lcd_param_bits = 8,
-        .dc_gpio_num = GPIO_NUM_NC,    // not used in pure QSPI mode (command embedded)
-        .ds_gpio_num = kLcdEn,         // TE/EN line for page flip sync
-    };
+    // Panel IO: same values as CO5300_PANEL_IO_QSPI_CONFIG (40 MHz, 32-bit
+    // QSPI-framed commands, quad mode), assigned in declaration order.
+    esp_lcd_panel_io_spi_config_t io_cfg = {};
+    io_cfg.cs_gpio_num = kLcdCs;
+    io_cfg.dc_gpio_num = -1;
+    io_cfg.spi_mode = 0;
+    io_cfg.pclk_hz = 40 * 1000 * 1000;
+    io_cfg.trans_queue_depth = 10;
+    io_cfg.on_color_trans_done = nullptr;
+    io_cfg.user_ctx = nullptr;
+    io_cfg.lcd_cmd_bits = 32;
+    io_cfg.lcd_param_bits = 8;
+    io_cfg.flags.quad_mode = true;
+    ESP_RETURN_ON_ERROR(esp_lcd_new_panel_io_spi(SPI2_HOST, &io_cfg, &s_io), kTag, "panel IO");
 
-    ESP_ERROR_CHECK(esp_lcd_new_panel_io_spi(SPI2_HOST, &io_cfg, &s_io));
+    co5300_vendor_config_t vendor_cfg = {};
+    vendor_cfg.init_cmds = s_lcd_init;
+    vendor_cfg.init_cmds_size = sizeof(s_lcd_init) / sizeof(s_lcd_init[0]);
+    vendor_cfg.flags.use_qspi_interface = 1;
+    esp_lcd_panel_dev_config_t panel_cfg = {};
+    panel_cfg.reset_gpio_num = kLcdRst;
+    panel_cfg.rgb_ele_order = LCD_RGB_ELEMENT_ORDER_RGB;
+    panel_cfg.bits_per_pixel = 16;
+    panel_cfg.vendor_config = &vendor_cfg;
+    ESP_RETURN_ON_ERROR(esp_lcd_new_panel_co5300(s_io, &panel_cfg, &s_panel), kTag, "CO5300 panel");
+    ESP_RETURN_ON_ERROR(esp_lcd_panel_set_gap(s_panel, 0, 0), kTag, "set gap");
+    ESP_RETURN_ON_ERROR(esp_lcd_panel_reset(s_panel), kTag, "panel reset");
+    ESP_RETURN_ON_ERROR(esp_lcd_panel_init(s_panel), kTag, "panel init");
+    ESP_RETURN_ON_ERROR(esp_lcd_panel_disp_on_off(s_panel, true), kTag, "display on");
 
-    const esp_lcd_panel_dev_config_t dev_cfg = {
-        .reset_gpio_num = kLcdRst,
-        .rgb_endian_color_order = 0,   // RGB order (CO5300 native)
-        .bits_per_pixel = 16,          // RGB565
-    };
-
-    ESP_ERROR_CHECK(esp_lcd_new_panel_st7789(s_io, &dev_cfg, &s_panel));
-
-    // Allocate the DMA bounce buffer in internal RAM (must be DMA-capable).
-    s_bounce_buf = static_cast<uint16_t*>(heap_caps_malloc(kBounceRows * kDisplayWidth * sizeof(uint16_t), MALLOC_CAP_DMA));
+    s_bounce_buf = static_cast<uint16_t*>(heap_caps_malloc(kBounceBytes, MALLOC_CAP_DMA));
     if (!s_bounce_buf) {
         return ESP_ERR_NO_MEM;
     }
-
-    // Initialize the panel with the CO5300 command sequence.
-    ESP_ERROR_CHECK(esp_lcd_panel_reset(s_panel));
-    vTaskDelay(pdMS_TO_TICKS(100));   // wait for reset to complete
-    ESP_ERROR_CHECK(esp_lcd_panel_init(s_panel));
-
     return ESP_OK;
 }
 
-// Flush a rectangular region [y0, y1) of the framebuffer to the CO5300 panel. This is called by
-// Board::display_flush() via the HAL interface. Rows are copied through the DMA bounce buffer
-// in chunks of kBounceRows to avoid PSRAM contention with Wi-Fi/BLE — each chunk waits for the
-// previous transfer's done signal before reusing the buffer.
-esp_err_t co5300_flush_rows(uint16_t y0, uint16_t y1) {
-    if (!s_panel || !s_bounce_buf || y0 >= y1) return ESP_ERR_INVALID_STATE;
-
-    // Set the column and page (row) address window for this flush region.
-    esp_lcd_panel_set_column(s_panel, 0, kDisplayWidth - 1);   // full width: cols [0, 409]
-    esp_lcd_panel_set_row(s_panel, y0, y1 - 1);                // rows [y0, y1-1]
-
-    for (uint16_t y = y0; y < y1; y += kBounceRows) {
-        uint16_t rows = std::min(static_cast<uint16_t>(kBounceRows), static_cast<uint16_t>(y1 - y));
-        // Copy this chunk from the framebuffer (PSRAM) to the bounce buffer (DMA-capable RAM).
-        // The framebuffer is owned by Board and accessed via hal().framebuffer() in production.
-        extern uint16_t* g_framebuffer;   // defined in app_main.cpp as s_framebuffer
-        memcpy(s_bounce_buf, &g_framebuffer[y * kDisplayWidth], rows * kDisplayWidth * sizeof(uint16_t));
-
-        // Push the chunk to the panel over QSPI. The CO5300 expects big-endian RGB565 (byte-swapped).
-        esp_lcd_panel_draw_bitmap(s_panel, 0, y, kDisplayWidth, y + rows, s_bounce_buf);
-
-        // Wait for this DMA transfer to complete before reusing the bounce buffer.
-        vTaskDelay(pdMS_TO_TICKS(1));   // brief yield; real impl uses a binary semaphore from ISR
+// Flush rows [y0, y1) of the given PSRAM framebuffer through the DMA bounce
+// buffer. Called by Board::display_flush() via board_display_flush() below.
+static esp_err_t co5300_flush_rows(uint16_t* fb, uint16_t y0, uint16_t y1) {
+    if (!s_panel || !s_bounce_buf || !fb || y0 >= y1 || y1 > kDisplayHeight) {
+        return ESP_ERR_INVALID_STATE;
     }
-
+    for (uint16_t y = y0; y < y1; y += kBounceRows) {
+        uint16_t rows = (y + kBounceRows <= y1) ? kBounceRows : static_cast<uint16_t>(y1 - y);
+        memcpy(s_bounce_buf, &fb[y * kDisplayWidth], rows * kDisplayWidth * sizeof(uint16_t));
+        // draw_bitmap sets the address window internally; the CO5300 flush is
+        // dispatched per chunk so the bounce buffer can be reused immediately.
+        esp_err_t err = esp_lcd_panel_draw_bitmap(s_panel, 0, y, kDisplayWidth, y + rows, s_bounce_buf);
+        if (err != ESP_OK) return err;
+    }
     return ESP_OK;
 }
 
@@ -127,7 +147,7 @@ esp_err_t co5300_flush_rows(uint16_t y0, uint16_t y1) {
 
 // Test-only: flush verification state. When display_flush is called in unit tests (which use
 // the Board singleton), this marks that a flush was dispatched so test code can verify rendering
-// reached the panel layer. In production, co5300_flush_rows handles actual DMA transfers.
+// reached the panel layer. In production, display_flush_impl below handles the DMA transfer.
 static bool g_last_flush_success = false;
 
 bool co5300_display_flushed() { return g_last_flush_success; }
@@ -141,20 +161,7 @@ bool display_flush_impl(uint16_t* framebuffer, uint16_t y0, uint16_t y1) {
 
 #ifdef __ESPRESSIF_IDF__
     // Production: flush the specified rows to the CO5300 panel via DMA bounce buffer.
-    extern esp_lcd_panel_handle_t s_panel;   // managed above in co5300_init()
-    if (!s_panel) return false;
-
-    // Set address window and draw the bitmap region. This is the real flush path — rows are
-    // copied from PSRAM framebuffer through a DMA-capable bounce buffer to the QSPI panel.
-    esp_lcd_panel_set_column(s_panel, 0, kDisplayWidth - 1);
-    esp_lcd_panel_set_row(s_panel, y0, y1 - 1);
-
-    for (uint16_t y = y0; y < y1; ++y) {
-        // For each row, push pixels to the panel. Real impl uses kBounceRows chunked DMA copy.
-        esp_lcd_panel_draw_bitmap(s_panel, 0, y, kDisplayWidth, y + 1, &framebuffer[y * kDisplayWidth]);
-    }
-
-    return true;   // flush dispatched successfully
+    return co5300_flush_rows(framebuffer, y0, y1) == ESP_OK;
 #else
     // Test build: no real panel hardware — verify the framebuffer region was non-null and valid.
     // This is NOT a trivial assertion of display_flush()==true; it validates that a specific
@@ -172,5 +179,16 @@ bool display_flush_impl(uint16_t* framebuffer, uint16_t y0, uint16_t y1) {
 extern "C" bool board_display_flush(uint16_t* fb, uint16_t y0, uint16_t y1) {
     return display_flush_impl(fb, y0, y1);
 }
+
+#ifdef __ESPRESSIF_IDF__
+// Set panel brightness 0-100 via CO5300 "write display brightness" (0x51),
+// QSPI-framed exactly as the upstream board file does.
+void co5300_set_brightness(uint8_t percent_0_to_100) {
+    if (!s_io) return;
+    if (percent_0_to_100 > 100) percent_0_to_100 = 100;
+    uint8_t level = static_cast<uint8_t>(percent_0_to_100 * 255 / 100);
+    esp_lcd_panel_io_tx_param(s_io, (0x02 << 24) | (0x51 << 8), &level, 1);
+}
+#endif
 
 }  // namespace aiwatchos

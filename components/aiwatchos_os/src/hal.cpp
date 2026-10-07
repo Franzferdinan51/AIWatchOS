@@ -4,6 +4,13 @@
 //   - HermesGadget firmware/esp32/main/board.cpp (CONFIG_HG_BOARD_AMOLED_206)
 #include "aiwatchos/hal.hpp"
 
+#ifdef __ESPRESSIF_IDF__
+#include "driver/gpio.h"
+#include "esp_err.h"
+#include "esp_log.h"
+#include "esp_timer.h"
+#endif
+
 namespace aiwatchos {
 
 Board& Board::instance() {
@@ -24,9 +31,38 @@ static uint64_t g_now_ms = 1700000000099ULL;   // epoch-like base (Nov 2023) to 
 Board::Board() = default;
 
 void Board::begin() {
-    // One-time hardware init: QSPI bus, I2C, PMU rails, codecs.
-    // Full ESP-IDF driver implementation is in display_driver.cpp, touch_driver.cpp,
-    // audio_driver.cpp, power_manager.cpp. This method coordinates the sequence.
+    // One-time hardware init, ordered by dependency: CO5300 display, FT3168
+    // touch (brings up the shared I2C bus), then AXP2101 PMU and audio codecs
+    // which attach to that bus.
+#ifdef __ESPRESSIF_IDF__
+    extern esp_err_t co5300_init();
+    extern esp_err_t ft3168_init();
+    extern esp_err_t axp2101_init();
+    extern esp_err_t audio_codecs_init();
+    extern void co5300_set_brightness(uint8_t);
+    if (co5300_init() != ESP_OK) {
+        ESP_LOGE("aiwatchos", "display init failed; screen will stay blank");
+    } else {
+        co5300_set_brightness(100);   // full brightness until Settings takes over
+    }
+    if (ft3168_init() != ESP_OK) {
+        ESP_LOGE("aiwatchos", "touch init failed; touch input unavailable");
+    }
+    if (axp2101_init() != ESP_OK) {
+        ESP_LOGE("aiwatchos", "PMU init failed; battery state unknown");
+    }
+    if (audio_codecs_init() != ESP_OK) {
+        ESP_LOGE("aiwatchos", "audio init failed; voice pipeline silent");
+    }
+    // BOOT button (GPIO0, active low with internal pull-up).
+    gpio_config_t boot = {};
+    boot.pin_bit_mask = 1ULL << 0;
+    boot.mode = GPIO_MODE_INPUT;
+    boot.pull_up_en = GPIO_PULLUP_ENABLE;
+    if (gpio_config(&boot) != ESP_OK) {
+        ESP_LOGE("aiwatchos", "BOOT button gpio failed");
+    }
+#endif
 }
 
 // --- Display (CO5300 QSPI AMOLED) — implemented in display_driver.cpp ---
@@ -56,7 +92,14 @@ bool Board::display_flush() {
     return board_display_flush(g_framebuffer_ptr, 0, kDisplayHeight);
 }
 
-void Board::set_backlight(uint8_t percent) {}   // CO5300 brightness register (0x51) — wired in production via I2C
+void Board::set_backlight(uint8_t percent) {
+#ifdef __ESPRESSIF_IDF__
+    extern void co5300_set_brightness(uint8_t);
+    co5300_set_brightness(percent);   // CO5300 register 0x51, QSPI-framed
+#else
+    (void)percent;
+#endif
+}
 
 // --- Touch (FT3168 on I2C addr 0x38, SDA=GPIO15 SCL=GPIO14 INT=GPIO38) — touch_driver.cpp ---
 // Delegates to ft3168_read() which reads FT3168 registers over I2C in production and
@@ -69,32 +112,100 @@ int Board::read_touch(int* out_xs, int* out_ys) {
 }
 
 // --- Audio (ES8311 + ES7210 via I2S) — audio_driver.cpp ---
-bool Board::audio_start_playback(uint32_t rate) { return false; }
-void Board::audio_write(const int16_t*, size_t) {}
-void Board::audio_stop_playback() {}
-bool Board::mic_start(uint32_t rate) { return false; }
-void Board::mic_stop() {}
-
-// --- Power (AXP2101 PMU) — power_manager.cpp ---
-PowerStatus Board::read_power() {
-    PowerStatus ps{};
-    ps.battery_present = true;
-    ps.battery_percent = 85;   // AXP2101 fuel gauge reads actual percentage in production
-    ps.battery_mv = 3800;      // 3.7V nominal LiPo (MX1.25 connector)
-    ps.charging = false;
-    ps.external_power = false;
-    return ps;
+bool Board::audio_start_playback(uint32_t rate) {
+#ifdef __ESPRESSIF_IDF__
+    extern bool aiwatchos_audio_start_playback(uint32_t);
+    return aiwatchos_audio_start_playback(rate);
+#else
+    (void)rate;
+    return false;
+#endif
+}
+void Board::audio_write(const int16_t* samples, size_t count) {
+#ifdef __ESPRESSIF_IDF__
+    extern void aiwatchos_audio_write(const int16_t*, size_t);
+    aiwatchos_audio_write(samples, count);
+#else
+    (void)samples;
+    (void)count;
+#endif
+}
+void Board::audio_stop_playback() {
+#ifdef __ESPRESSIF_IDF__
+    extern void aiwatchos_audio_stop();
+    aiwatchos_audio_stop();
+#endif
+}
+void Board::set_volume(uint8_t percent) {
+#ifdef __ESPRESSIF_IDF__
+    extern void aiwatchos_audio_set_volume(uint8_t);
+    aiwatchos_audio_set_volume(percent);
+#else
+    (void)percent;
+#endif
+}
+bool Board::mic_start(uint32_t rate) {
+#ifdef __ESPRESSIF_IDF__
+    extern bool aiwatchos_mic_start(uint32_t);
+    return aiwatchos_mic_start(rate);
+#else
+    (void)rate;
+    return false;
+#endif
+}
+size_t Board::mic_read(int16_t* out, size_t frames) {
+#ifdef __ESPRESSIF_IDF__
+    extern size_t aiwatchos_mic_read(int16_t*, size_t);
+    return aiwatchos_mic_read(out, frames);
+#else
+    (void)out;
+    (void)frames;
+    return 0;
+#endif
+}
+void Board::mic_stop() {
+#ifdef __ESPRESSIF_IDF__
+    extern void aiwatchos_mic_stop();
+    aiwatchos_mic_stop();
+#endif
 }
 
-// --- Time (PCF85063 RTC via I2C) ---
-uint64_t Board::now_ms() { return g_now_ms; }
+// --- Power (AXP2101 PMU) — power_manager.cpp ---
+// Single source of truth for fuel-gauge state lives in axp2101_read_power()
+// (I2C fuel-gauge registers in production, nominal LiPo values in test builds).
+extern PowerStatus axp2101_read_power();
+
+PowerStatus Board::read_power() {
+    return axp2101_read_power();
+}
+
+// --- Time (PCF85063 RTC via I2C once its driver lands; until then the
+// ESP32's microsecond timer advances the clock from the fixed base) ---
+uint64_t Board::now_ms() {
+#ifdef __ESPRESSIF_IDF__
+    return g_now_ms + static_cast<uint64_t>(esp_timer_get_time() / 1000);
+#else
+    return g_now_ms;
+#endif
+}
 
 // Test helper: advance the monotonic clock by elapsed milliseconds. This lets unit tests
 // simulate time passing without real hardware, so clock_face.cpp can be verified to sync
 // to wall-clock time rather than counting from a fixed starting point.
 void board_advance_test_time_ms(uint64_t ms) { g_now_ms += ms; }
 
-// --- Buttons (BOOT=GPIO0, PWR side key via AXP2101) */
-uint32_t Board::read_buttons() { return 0; }
+// --- Buttons (BOOT=GPIO0 active-low, PWR side key via AXP2101 PWRON) ---
+// Bitmask: bit 0 = BOOT held, bit 1 = PWR held.
+uint32_t Board::read_buttons() {
+#ifdef __ESPRESSIF_IDF__
+    extern unsigned axp2101_poll_key();   // bit1 set while PWR is held
+    uint32_t mask = 0;
+    if (gpio_get_level(GPIO_NUM_0) == 0) mask |= 0x01;   // BOOT pressed
+    if (axp2101_poll_key() & 0x02) mask |= 0x02;         // PWR held
+    return mask;
+#else
+    return 0;
+#endif
+}
 
 }  // namespace aiwatchos

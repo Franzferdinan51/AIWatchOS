@@ -1,4 +1,4 @@
-set(COMPONENT_SRCS src/muse_adapter.cpp)
+set(COMPONENT_SRCS src/muse_adapter.cpp src/muse_adpcm.c)
 
 set(COMPONENT_ADD_INCLUDEDIRS include)
 
@@ -6,6 +6,7 @@ idf_component_register(
     SRCS ${COMPONENT_SRCS}
     INCLUDE_DIRS include
     REQUIRES aiwatchos_os
+    PRIV_REQUIRES minimp3
 )
 
 # The muse-gadget-206 project is integrated as a submodule. Its components
