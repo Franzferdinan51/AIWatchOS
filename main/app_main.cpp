@@ -23,17 +23,30 @@ extern "C" void app_main(void) {
     // --- 2. Create the AppManager and register apps ---
     static aiwatchos::AppManager g_app_mgr(board);
 
-    // System UI apps: clock face (always first for quick access), launcher.
+    // System UI: clock face (launched on boot) and launcher for app switching.
     aiwatchos::App clock_app = aiwatchos::ClockFace::make_app();
     g_app_mgr.register_app(&clock_app, true);   // launch the clock face on boot
 
-    // AI voice agent apps — integrated from external repos.
-    aiwatchos::muse::MuseState muse_state;      // (state managed in adapter)
-    aiwatchos_muse::App muse_app = aiwatchos_muse::make_muse_app();
+    // Launcher app — wraps AppManager switch_next/switch_prev behind touch input.
+    // Registered as a regular app so it can be switched to from the clock face.
+    static aiwatchos::LauncherUI g_launcher(g_app_mgr);
+    aiwatchos::App launcher_app = aiwatchos::make_app(
+        "launcher",
+        nullptr,  // init: no one-time setup needed (stateless UI over AppManager)
+        nullptr,  // tick: the main loop handles touch dispatch directly
+        [](aiwatchos::Framebuffer& fb) { g_launcher.render(fb); },
+        [](const aiwatchos::TouchEvent& event) -> bool { return g_launcher.on_touch(event); }
+    );
+    g_app_mgr.register_app(&launcher_app);
+
+    // AI voice agent apps — integrated from external repos. The adapter functions
+    // (make_muse_app, make_hermes_app) return aiwatchos::App descriptors with all
+    // callbacks set; no separate state variable is needed since the adapters manage
+    // their own internal static state.
+    aiwatchos::App muse_app = aiwatchos_muse::make_muse_app();
     g_app_mgr.register_app(&muse_app);
 
-    aiwatchos_hermes::HermesState hermes_state;  // (state managed in adapter)
-    aiwatchos_hermes::App hermes_app = aiwatchos_hermes::make_hermes_app();
+    aiwatchos::App hermes_app = aiwatchos_hermes::make_hermes_app();
     g_app_mgr.register_app(&hermes_app);
 
     // --- 3. Status bar with battery display ---
@@ -62,10 +75,11 @@ extern "C" void app_main(void) {
         fb.fill(0x0000);   // black background for AMOLED power saving
 
         // Status bar renders time and battery at the top of every screen.
-        uint64_t now = board.now_ms();
+        uint64_t now_ms = board.now_ms();
         char time_str[16];
-        snprintf(time_str, sizeof(time_str), "%llu:%02u",
-                 (now / 3600000) % 24, (now / 60000) % 60);
+        unsigned hours = static_cast<unsigned>((now_ms / 3600000) % 24);
+        unsigned minutes = static_cast<unsigned>((now_ms / 60000) % 60);
+        snprintf(time_str, sizeof(time_str), "%u:%02u", hours, minutes);
         g_status_bar.render(fb, time_str);
 
         // App renders its content below the status bar.

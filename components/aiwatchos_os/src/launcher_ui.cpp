@@ -2,6 +2,7 @@
 // Renders on the 410x502 portrait AMOLED, below a status bar. Touch coordinates
 // from FT3168 map to screen space: x in [0, 409], y in [0, 501].
 #include "aiwatchos/launcher_ui.hpp"
+#include "aiwatchos/app_manager.hpp"
 
 namespace aiwatchos {
 

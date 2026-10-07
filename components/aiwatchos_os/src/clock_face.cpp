@@ -3,6 +3,7 @@
 // [0, 410) x [0, 502). The clock is centered in the available area below the
 // status bar (which occupies the top ~36 px), so center_x = 205, center_y = 290.
 #include "aiwatchos/clock_face.hpp"
+#include "aiwatchos/hal.hpp"   // for kDisplayWidth/kDisplayHeight constants
 #include <cmath>
 
 namespace aiwatchos {
@@ -91,7 +92,8 @@ namespace {
 }
 
 App ClockFace::make_app() {
-    return make_app("clock", clock_init, clock_tick, clock_render, clock_touch);
+    // Fully qualify to avoid resolving as a recursive call to this member function.
+    return aiwatchos::make_app("clock", clock_init, clock_tick, clock_render, clock_touch);
 }
 
 }  // namespace aiwatchos

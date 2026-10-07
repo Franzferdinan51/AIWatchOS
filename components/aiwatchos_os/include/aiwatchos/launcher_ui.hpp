@@ -5,10 +5,11 @@
 
 #include <cstdint>
 #include "aiwatchos/app.hpp"
+#include "aiwatchos/hal.hpp"   // for kDisplayWidth/kDisplayHeight constants
 
 namespace aiwatchos {
 
-class AppManager;
+class AppManager;   // forward declaration (full definition in app_manager.hpp)
 
 struct LauncherConfig {
     int icon_size = 64;   // pixels per app icon (square)
