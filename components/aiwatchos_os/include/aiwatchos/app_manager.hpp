@@ -37,6 +37,9 @@ class AppManager {
     // Number of registered apps.
     size_t count() const { return apps_.size(); }
 
+    // Access an app by index for launcher tap-to-launch (returns nullptr if out of range).
+    App* app_at_index(size_t idx) const;
+
     // --- Event dispatch (called from the main loop) ---
     void tick(uint32_t elapsed_ms);
     void render(Framebuffer& fb);

@@ -71,6 +71,11 @@ const char* AppManager::current_app_id() const {
     return foreground_ ? foreground_->id : nullptr;
 }
 
+App* AppManager::app_at_index(size_t idx) const {
+    if (idx >= apps_.size()) return nullptr;
+    return apps_[idx];
+}
+
 void AppManager::tick(uint32_t elapsed_ms) {
     if (foreground_ && foreground_->tick) {
         foreground_->tick(elapsed_ms);

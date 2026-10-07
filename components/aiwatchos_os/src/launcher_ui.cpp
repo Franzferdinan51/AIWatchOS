@@ -31,9 +31,7 @@ void LauncherUI::render(Framebuffer& fb) {
             int total_rows = static_cast<int>(mgr_.count() / cols) + 1;
             if (row >= total_rows || idx >= mgr_.count()) break;
 
-            App* app = nullptr;
-            // Access the registry via the manager — find by index through a helper.
-            // We iterate using switch logic since apps_ is private.
+            // Icon placeholder (rounded square). Real impl would render app icon from assets/
             int x = gap_x + col * (icon_size + gap_x);
 
             // Draw icon placeholder (rounded square).
@@ -68,10 +66,10 @@ bool LauncherUI::on_touch(const TouchEvent& event) {
 
         if (col >= 0 && col < cols && row >= 0) {
             size_t target_idx = static_cast<size_t>(row * cols + col);
-            // We can't directly index into the private apps_ vector, so we use
-            // switch_next to navigate. In a full implementation, AppManager would
-            // expose an app-by-index accessor for the launcher.
-            (void)target_idx;  // placeholder: real impl calls mgr_.switch_to(app_id)
+            App* target = mgr_.app_at_index(target_idx);
+            if (target && target->id) {
+                return mgr_.switch_to(target->id);   // true: consumed and switched
+            }
         }
     }
 

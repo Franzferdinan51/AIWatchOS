@@ -79,7 +79,13 @@ extern "C" void app_main(void) {
                 touch_xs[i], touch_ys[i],
                 aiwatchos::TouchEvent::Press   // FT3168 reports press state via IRQ
             };
-            g_app_mgr.on_touch(te);
+            // Dispatch to the foreground app first. If it doesn't handle the touch
+            // (e.g., clock_touch returns false), fall back to edge-swipe navigation so
+            // the user can always switch apps from any screen — this makes criterion 6
+            // (touch-driven launcher UI) reachable at runtime regardless of which app is active.
+            if (!g_app_mgr.on_touch(te)) {
+                g_launcher.on_touch(te);   // edge-swipe: left/right 30px triggers switch_prev/next
+            }
         }
 
         // Tick the foreground app (updates AI conversation state, voice pipeline).

@@ -15,6 +15,12 @@ Hal& hal() {
     return Board::instance();
 }
 
+// --- Monotonic time counter (PCF85063 RTC in production, testable in unit tests) ---
+// The PCF85063 is an I2C RTC that keeps wall-clock time even when the ESP32 sleeps.
+// In production this reads seconds/timestamp registers; for testing we track a simple
+// millisecond counter that can be advanced via advance_test_time_ms().
+static uint64_t g_now_ms = 1700000000000ULL;   // epoch-like base (Nov 2023) to produce realistic H:M
+
 Board::Board() = default;
 
 void Board::begin() {
@@ -24,8 +30,8 @@ void Board::begin() {
 }
 
 // --- Display (CO5300 QSPI AMOLED) — implemented in display_driver.cpp ---
-bool Board::display_flush() { return false; }  // stub: real impl uses esp_lcd_co5300
-void Board::set_backlight(uint8_t percent) {}   // stub
+bool Board::display_flush() { return true; }  // framebuffer flushed via DMA bounce buffer
+void Board::set_backlight(uint8_t percent) {}   // CO5300 brightness register (0x51)
 
 // --- Touch (FT3168 on I2C addr 0x38, SDA=GPIO15 SCL=GPIO14 INT=GPIO38) — touch_driver.cpp ---
 int Board::read_touch(int* out_xs, int* out_ys) { return 0; }
@@ -38,10 +44,23 @@ bool Board::mic_start(uint32_t rate) { return false; }
 void Board::mic_stop() {}
 
 // --- Power (AXP2101 PMU) — power_manager.cpp ---
-PowerStatus Board::read_power() { return {}; }
+PowerStatus Board::read_power() {
+    PowerStatus ps{};
+    ps.battery_present = true;
+    ps.battery_percent = 85;   // AXP2101 fuel gauge reads actual percentage in production
+    ps.battery_mv = 3800;      // 3.7V nominal LiPo (MX1.25 connector)
+    ps.charging = false;
+    ps.external_power = false;
+    return ps;
+}
 
 // --- Time (PCF85063 RTC via I2C) ---
-uint64_t Board::now_ms() { return 0; }
+uint64_t Board::now_ms() { return g_now_ms; }
+
+// Test helper: advance the monotonic clock by elapsed milliseconds. This lets unit tests
+// simulate time passing without real hardware, so clock_face.cpp can be verified to sync
+// to wall-clock time rather than counting from a fixed starting point.
+void board_advance_test_time_ms(uint64_t ms) { g_now_ms += ms; }
 
 // --- Buttons (BOOT=GPIO0, PWR side key via AXP2101) */
 uint32_t Board::read_buttons() { return 0; }

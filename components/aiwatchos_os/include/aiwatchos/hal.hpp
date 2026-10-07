@@ -86,4 +86,8 @@ class Board : public Hal {
 // Global accessor for the board singleton.
 Hal& hal();
 
+// Test-only: advance the monotonic clock by `ms` milliseconds so that now_ms()
+// returns a progressing value in unit tests (replaces PCF85063 RTC reads).
+void board_advance_test_time_ms(uint64_t ms);
+
 }  // namespace aiwatchos

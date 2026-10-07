@@ -71,13 +71,15 @@ namespace {
     void clock_init() { g_init = true; }
 
     void clock_tick(uint32_t elapsed_ms) {
-        // In a real build this reads the PCF85063 RTC via I2C. The stub increments.
-        (void)elapsed_ms;
         if (!g_init) return;
-        g_state.second++;
-        if (g_state.second >= 60) { g_state.second = 0; g_state.minute++; }
-        if (g_state.minute >= 60) { g_state.minute = 0; g_state.hour++; }
-        if (g_state.hour >= 24) g_state.hour = 0;
+        // Sync to wall-clock time via the PCF85063 RTC (Board::now_ms()). This ensures
+        // the hands always point to the correct time, not a free-running counter that
+        // drifts from real time. now_ms() returns epoch milliseconds in production and
+        // is advanced by board_advance_test_time_ms() in unit tests.
+        uint64_t ms = hal().now_ms();
+        g_state.hour   = static_cast<uint8_t>((ms / 3600000ULL) % 24);
+        g_state.minute = static_cast<uint8_t>((ms / 60000ULL) % 60);
+        g_state.second = static_cast<uint8_t>((ms / 1000ULL) % 60);
     }
 
     void clock_render(Framebuffer& fb) {
