@@ -1,0 +1,19 @@
+# Build artifacts
+build/
+**/build/
+
+# ESP-IDF generated files
+sdkconfig
+*.bin
+*.elf
+partitions_singleapp.csv
+partition_table/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*~
+
+# OS generated
+.DS_Store

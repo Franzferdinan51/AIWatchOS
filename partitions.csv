@@ -1,0 +1,24 @@
+# AIWatchOS partition table — ESP32-S3 with 32 MB flash (Waveshare 2.06")
+# Format: Name, Type, SubType, Offset, Size, Flags
+
+# Bootloader (first 128 KB)
+bootloader,                             , 0x00, 0x10000,  0x10000,
+
+# Partition table (at 0x8000, per sdkconfig.defaults)
+partitions,                            data, table, 0x8000,      0x4000,
+
+# Factory app (main firmware image, ~2 MB for full OS + apps)
+factory,                               app,  factory, ,          0x200000,
+
+# OTA slots (two slots for A/B updates via HermesGadget protocol)
+ota_0,                                ota,  0,    ,          0x1C0000,
+ota_1,                                ota,  1,    ,          0x1C0000,
+
+# OTA data (2 KB — tells bootloader which slot to boot)
+ota_data,                              data, ota,   ,          0x2000,
+
+# Filesystem for assets (fonts, images, app bundles) — ~5 MB
+aiwatchos_assets,                      data, fat,    ,          0x4E0000,
+
+# NVS for settings / device keys / pairing state (persistent storage)
+nvs,                                   data, nvs,    ,          0x10000,
