@@ -595,6 +595,26 @@ void HermesClient::cancel(uint64_t now_ms) {
     }
 }
 
+bool HermesClient::new_session(uint64_t now_ms) {
+    (void)now_ms;
+    if (!welcomed_ || !view_.paired) return false;   // can_talk gate
+    if (capturing_) talk_cancel();
+    if (play_stream_ >= 0) {
+        if (sinks_.audio_abort) sinks_.audio_abort(sinks_.ctx);
+        play_stream_ = -1;
+    }
+    view_.prompt_active = false;
+    dismiss_card();
+    cJSON* root = cJSON_CreateObject();
+    cJSON_AddStringToObject(root, "type", "session.new");
+    send_json(root);
+    view_.transcript[0] = '\0';
+    view_.reply[0] = '\0';
+    copy_capped(view_.status, sizeof(view_.status), "Starting a new session");
+    view_.busy = true;
+    return true;
+}
+
 bool HermesClient::talk_start(uint64_t now_ms) {
     (void)now_ms;
     if (capturing_ || !welcomed_ || !view_.paired) return false;

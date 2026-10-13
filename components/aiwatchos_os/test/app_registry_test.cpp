@@ -2055,6 +2055,71 @@ static void test_hermes_notifications_bridge() {
     printf("test_hermes_notifications_bridge: PASSED\n");
 }
 
+// --- Hermes session.new (H5) ---
+class ButtonTestHal : public aiwatchos::TestHal {
+ public:
+    uint32_t buttons = 0;
+    uint32_t read_buttons() override { return buttons; }
+};
+
+static void test_hermes_new_session() {
+    using namespace aiwatchos_hermes;
+    // Gate: unpaired/unwelcomed -> nothing sent, honest false.
+    {
+        aiwatchos::TestHal hal;
+        aiwatchos::App app = make_hermes_app(hal);
+        app.init();
+        uint8_t key[32];
+        for (int i = 0; i < 32; ++i) key[i] = static_cast<uint8_t>(i);
+        hermes_test_reset(key);
+        assert(!hermes_new_session());
+        assert(hermes_test_outbound_count() == 0);
+    }
+
+    ButtonTestHal hal;
+    hermes_linked(hal);
+    aiwatchos::App app = make_hermes_app(hal);
+
+    // Seed conversation state the reset must clear.
+    hermes_test_inject_text("{\"type\":\"turn.start\",\"turn\":\"t1\"}");
+    hermes_test_inject_text("{\"type\":\"transcript\",\"text\":\"hi there\"}");
+    hermes_test_inject_text(
+        "{\"type\":\"reply\",\"turn\":\"t1\",\"text\":\"hello\"}");
+    hermes_test_inject_text(
+        "{\"type\":\"turn.end\",\"turn\":\"t1\",\"outcome\":\"success\"}");
+    assert(hermes_view().transcript[0] != '\0');
+    assert(hermes_view().reply[0] != '\0');
+    hermes_test_clear_outbound();
+
+    // The wire message is exactly the hub's session.new; local state
+    // resets on send (the hub sends no ack frame).
+    assert(hermes_new_session());
+    assert(outbound_has("\"type\":\"session.new\""));
+    assert(hermes_view().transcript[0] == '\0');
+    assert(hermes_view().reply[0] == '\0');
+    assert(std::string(hermes_view().status) == "Starting a new session");
+    assert(hermes_view().busy);
+
+    // BOOT long-press: the 600 ms hint window passes silently, the
+    // press fires once at 2000 ms, holding longer does not refire.
+    hermes_test_clear_outbound();
+    hal.buttons = 1;
+    app.tick(16);
+    hal.advance_ms(700);
+    app.tick(16);
+    assert(hermes_test_outbound_count() == 0);
+    hal.advance_ms(1400);
+    app.tick(16);
+    assert(outbound_has("\"type\":\"session.new\""));
+    hermes_test_clear_outbound();
+    hal.advance_ms(3000);
+    app.tick(16);
+    assert(hermes_test_outbound_count() == 0);
+    hal.buttons = 0;
+    app.tick(16);
+    printf("test_hermes_new_session: PASSED\n");
+}
+
 int main() {
     test_aa_text();                      // baked Inter AA renderer against real assets
     test_touch_synth();                  // Press/Move/Release from the point stream
@@ -2101,6 +2166,7 @@ int main() {
     test_hermes_ota();                   // Hermes OTA offer/begin/stream/verify
     test_hermes_auth_failure();          // Hermes auth lockout + heartbeat death
     test_hermes_notifications_bridge();  // H10: prompts/cards/notices -> OS notifications
+    test_hermes_new_session();           // H5: session.new wire + BOOT long-press
 
     printf("\nAll AppManager tests PASSED.\n");
     return 0;

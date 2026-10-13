@@ -170,6 +170,12 @@ class HermesClient {
     bool send_chat_text(const char* text);   // sends now, or queues 1 while unpaired/connecting
     bool answer_prompt(bool yes);            // false when no prompt is active
     void dismiss_card();
+    // session.new: ask the hub for a fresh agent session (hub injects
+    // /new). Reference-firmware semantics (start_new_session): gated on
+    // paired+welcomed, stops capture/playback, clears prompt/card and
+    // the local transcript, then sends. No ack frame exists — the next
+    // turn belongs to the new session.
+    bool new_session(uint64_t now_ms);
     void cancel(uint64_t now_ms);            // cancel capture, else cancel the running turn
     bool talk_start(uint64_t now_ms);
     void talk_feed(const int16_t* pcm, size_t frames);

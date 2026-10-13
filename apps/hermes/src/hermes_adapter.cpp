@@ -375,6 +375,12 @@ bool hermes_answer_prompt(bool yes) {
     return g_client->answer_prompt(yes);
 }
 
+bool hermes_new_session() {
+    if (!g_client) return false;
+    LockGuard lock;
+    return g_client->new_session(now_ms());
+}
+
 // --- H10: Hermes events -> OS Notifications ---------------------------------
 // Runs inside hermes_pump (the link task's cadence on device) so events
 // post even while another app is foregrounded. Edge-detected against
@@ -549,9 +555,36 @@ void hermes_init() {
     hermes_link_start();   // device: WS link task (WiFi owned by aiwatchos_net); host: stub
 }
 
+// H5 gesture state: BOOT held in the Hermes app. Hint at 600 ms,
+// session.new fires once at 2000 ms (the reference firmware's
+// long-press thresholds).
+bool g_boot_held = false;
+bool g_boot_fired = false;
+uint64_t g_boot_since_ms = 0;
+uint32_t g_boot_hint_ms = 0;
+
 void hermes_tick(uint32_t elapsed_ms) {
     (void)elapsed_ms;
-    hermes_pump(now_ms());
+    const uint64_t now = now_ms();
+    if (g_hal) {
+        const bool down = (g_hal->read_buttons() & 1u) != 0;   // BOOT
+        if (down) {
+            if (!g_boot_held) {
+                g_boot_held = true;
+                g_boot_fired = false;
+                g_boot_since_ms = now;
+            }
+            g_boot_hint_ms = static_cast<uint32_t>(now - g_boot_since_ms);
+            if (!g_boot_fired && g_boot_hint_ms >= 2000) {
+                g_boot_fired = true;
+                hermes_new_session();
+            }
+        } else {
+            g_boot_held = false;
+            g_boot_hint_ms = 0;
+        }
+    }
+    hermes_pump(now);
 }
 
 void hermes_render(aiwatchos::Framebuffer& fb) {
@@ -753,6 +786,15 @@ void hermes_render(aiwatchos::Framebuffer& fb) {
 
     // Hint floats over the background (no band — the shell owns the
     // only chrome at the top; the bottom stays clean).
+    // H5: while BOOT is held past the hint threshold, count the hold
+    // down over the bottom hint line.
+    if (g_boot_hint_ms >= 600 && !g_boot_fired) {
+        const uint32_t left_ms = 2000 - g_boot_hint_ms;
+        char hold[48];
+        std::snprintf(hold, sizeof(hold), "KEEP HOLDING: NEW SESSION IN %u.%us",
+                      left_ms / 1000, (left_ms % 1000) / 100);
+        draw_text(fb, 16, aiwatchos::kDisplayHeight - 60, hold, 2, kAmberColor);
+    }
     const char* hint = "HOLD BOTTOM: TALK";
     if (v.prompt_active) hint = "TAP YES OR NO";
     else if (v.card_active || v.image_active) hint = "TAP: DISMISS";

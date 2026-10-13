@@ -50,6 +50,9 @@ bool hermes_send_text(const char* text);
 
 // Answer the active yes/no prompt (false when none is active).
 bool hermes_answer_prompt(bool yes);
+// H5: start a fresh Hermes session (sends session.new; see
+// HermesClient::new_session). False when not paired+linked.
+bool hermes_new_session();
 
 // Borrowed reference to everything the renderer draws. The view lives
 // inside the client (PSRAM on device); callers must not copy it (it is
