@@ -1,15 +1,16 @@
-set(COMPONENT_SRCS src/hermes_adapter.cpp)
-
-set(COMPONENT_ADD_INCLUDEDIRS include)
-
+# Hermes Gadget Protocol v1 client app.
+#
+# Sources:
+#   hermes_adapter.cpp — OS app surface (render/touch/health) + client owner
+#   hermes_proto.cpp   — portable protocol state machine (host-testable)
+#   hermes_crypto.cpp  — portable SHA-256/HMAC/base64 (published vectors)
+#   hermes_link.cpp    — ESP-IDF transport: NVS identity, WiFi, WebSocket,
+#                        OTA flash backend, pump task (host: stubs)
+#   cJSON.c            — vendored JSON parser (see PROVENANCE.txt)
 idf_component_register(
-    SRCS ${COMPONENT_SRCS}
+    SRCS src/hermes_adapter.cpp src/hermes_proto.cpp src/hermes_crypto.cpp
+         src/hermes_link.cpp src/cJSON.c
     INCLUDE_DIRS include
-    REQUIRES aiwatchos_os
+    REQUIRES aiwatchos_os esp_wifi esp_netif esp_event nvs_flash app_update
+             esp_websocket_client
 )
-
-# The HermesGadget project is integrated as a submodule. Its core (hg::App,
-# hg::Hal interfaces) lives in firmware/core/. This adapter wraps the App lifecycle:
-#   - begin(): generates device key, loads settings, starts connection phase
-#   - tick(): processes WebSocket I/O, audio streaming, display updates
-# The HAL bridge is implemented above via delegation to aiwatchos::hal().

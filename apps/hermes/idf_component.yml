@@ -1,0 +1,5 @@
+## Hermes app component manifest.
+dependencies:
+  # WebSocket client for the gadget hub link (same pin HermesGadget's own
+  # ESP32 port uses; compatible with this project's ESP-IDF 5.3).
+  espressif/esp_websocket_client: "^1.2.3"

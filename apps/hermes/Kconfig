@@ -1,0 +1,35 @@
+menu "Hermes Gadget Client"
+
+config HERMES_WIFI_SSID
+    string "WiFi SSID for the Hermes link"
+    default ""
+    help
+        Network the watch joins to reach the Hermes hub. Empty (the
+        default) keeps the Hermes app fully offline, as before.
+
+config HERMES_WIFI_PASSWORD
+    string "WiFi password"
+    default ""
+    help
+        WPA2-PSK password for HERMES_WIFI_SSID. Stored in the firmware
+        image / NVS config only; never sent anywhere except the AP join.
+
+config HERMES_HOST
+    string "Hermes hub host"
+    default "192.168.1.96"
+    help
+        Host running the Hermes gadget plugin hub. The client connects
+        to ws://<host>:<port>/gadget.
+
+config HERMES_PORT
+    int "Hermes hub port"
+    default 8765
+    range 1 65535
+
+config HERMES_DEVICE_NAME
+    string "Device name announced to Hermes"
+    default "AIWatchOS"
+    help
+        Shown in the Hermes host's device list after enrollment.
+
+endmenu

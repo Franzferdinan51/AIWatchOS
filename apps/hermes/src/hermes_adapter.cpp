@@ -1,38 +1,283 @@
-// HermesGadget app adapter — wraps the hg::App conversation lifecycle as an OS App.
-// The original project's entry point is in firmware/core/src/app.cpp:
-//   - App::begin(): generates device key, loads settings, registers actions (volume/brightness), starts phases
-//   - App::tick(): processes network I/O, audio streaming, display updates, timeouts
-//   - on_transport_text/binary(): delivers server messages via the WebSocket transport
-// This adapter bridges the hg::App HAL interface to AIWatchOS's Hal singleton.
+// Hermes Gadget app adapter — a real Hermes Gadget Protocol v1 client
+// (hermes_proto.cpp) presented as an AIWatchOS OS app.
+//
+// The adapter owns the single HermesClient instance (heap-allocated once —
+// PSRAM on device, so its multi-KB view buffers never touch internal SRAM)
+// and the render/touch/health surface. The link layer (hermes_link.cpp)
+// owns WiFi + the WebSocket and feeds frames into the client from its own
+// task, so the session stays alive while other apps are foregrounded.
 #include "aiwatchos_hermes.hpp"
+#include "hermes_internal.hpp"
+
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <string>
+#include <utility>
+#include <vector>
+
+#ifdef __ESPRESSIF_IDF__
+#include "esp_heap_caps.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
+#include "sdkconfig.h"
+#endif
 
 namespace aiwatchos_hermes {
+namespace {
 
-constexpr uint32_t kTickRateMs = 40;   // match LVGL frame rate (board.frame_ms=40)
+// RGB565 colours for the Hermes conversation UI.
+constexpr uint16_t kHermesBg = 0x0000;      // black AMOLED background
+constexpr uint16_t kHeaderColor = 0x294A;   // dark blue header band
+constexpr uint16_t kTextColor = 0xFFFF;     // white text
+constexpr uint16_t kDimColor = 0xBDEF;      // light gray body text
+constexpr uint16_t kStatusColor = 0x7BCF;   // medium gray status lines
+constexpr uint16_t kAmberColor = 0xFEA0;    // notices / pairing
+constexpr uint16_t kGreenColor = 0x07E0;    // YES / online
+constexpr uint16_t kRedColor = 0xF800;      // NO / errors
 
-// RGB565 colours for the Hermes conversation UI (matches hg::Ui rendering style).
-constexpr uint16_t kHermesBg      = 0x0000;   // black AMOLED background
-constexpr uint16_t kHeaderColor   = 0x294A;   // dark blue header band
-constexpr uint16_t kTextColor     = 0xFFFF;   // white text for reply content
-constexpr uint16_t kStatusColor   = 0x7BCF;   // medium gray status / detail lines
+aiwatchos::Hal* g_hal = nullptr;
+HermesClient* g_client = nullptr;
+bool g_initialized = false;
 
-static HermesState g_state;
-// Hal driven by this adapter (Board on device, injected fake in tests).
-static aiwatchos::Hal* g_hal = nullptr;
+#ifdef __ESPRESSIF_IDF__
+SemaphoreHandle_t g_lock = nullptr;
+struct LockGuard {
+    LockGuard() { if (g_lock) xSemaphoreTake(g_lock, portMAX_DELAY); }
+    ~LockGuard() { if (g_lock) xSemaphoreGive(g_lock); }
+    LockGuard(const LockGuard&) = delete;
+    LockGuard& operator=(const LockGuard&) = delete;
+};
+#else
+struct LockGuard { LockGuard() = default; };
+#endif
+
+// --- outbound capture (host tests only; device sends via the link layer) --
+#ifndef __ESPRESSIF_IDF__
+struct CapturedFrame { bool binary; std::vector<uint8_t> bytes; };
+std::vector<CapturedFrame> g_outbound;
+#endif
+
+bool sink_send_text(void*, const char* json, size_t len) {
+#ifdef __ESPRESSIF_IDF__
+    return hermes_link_send_text(json, len);
+#else
+    CapturedFrame f;
+    f.binary = false;
+    f.bytes.assign(json, json + len);
+    g_outbound.push_back(std::move(f));
+    return true;
+#endif
+}
+
+bool sink_send_binary(void*, const uint8_t* data, size_t len) {
+#ifdef __ESPRESSIF_IDF__
+    return hermes_link_send_binary(data, len);
+#else
+    CapturedFrame f;
+    f.binary = true;
+    f.bytes.assign(data, data + len);
+    g_outbound.push_back(std::move(f));
+    return true;
+#endif
+}
+
+// --- audio sinks: spoken replies play through the OS HAL (Board on device,
+// TestHal in host tests, which captures the samples) -------------------------
+void sink_audio_begin(void*, uint32_t rate) {
+    if (g_hal) g_hal->audio_start_playback(rate);
+}
+void sink_audio_write(void*, const int16_t* samples, size_t count) {
+    if (g_hal) g_hal->audio_write(samples, count);
+}
+void sink_audio_end(void*) {
+    if (g_hal) g_hal->audio_stop_playback();
+}
+void sink_audio_abort(void*) {
+    if (g_hal) g_hal->audio_stop_playback();
+}
+
+// --- OTA / identity / memory sinks delegate to the link layer --------------
+bool sink_ota_begin(void*, uint32_t size) { return hermes_link_ota_begin(size); }
+bool sink_ota_write(void*, const uint8_t* data, size_t len) { return hermes_link_ota_write(data, len); }
+bool sink_ota_finish(void*) { return hermes_link_ota_finish(); }
+void sink_ota_abort(void*) { hermes_link_ota_abort(); }
+void sink_fill_random(void*, uint8_t* out, size_t len) { hermes_link_fill_random(out, len); }
+void* sink_alloc_big(void*, size_t len) { return hermes_link_alloc_big(len); }
+void sink_free_big(void*, void* ptr) { hermes_link_free_big(ptr); }
+
+uint64_t now_ms() { return g_hal ? g_hal->now_ms() : 0; }
+
+HermesClient* ensure_client() {
+    if (g_client) return g_client;
+#ifdef __ESPRESSIF_IDF__
+    void* mem = heap_caps_malloc(sizeof(HermesClient), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!mem) return nullptr;   // fail closed: no client, app shows OFFLINE
+    g_client = new (mem) HermesClient();
+#else
+    g_client = new HermesClient();
+#endif
+    HermesSinks sinks{};
+    sinks.send_text = &sink_send_text;
+    sinks.send_binary = &sink_send_binary;
+    sinks.audio_begin = &sink_audio_begin;
+    sinks.audio_write = &sink_audio_write;
+    sinks.audio_end = &sink_audio_end;
+    sinks.audio_abort = &sink_audio_abort;
+    sinks.ota_begin = &sink_ota_begin;
+    sinks.ota_write = &sink_ota_write;
+    sinks.ota_finish = &sink_ota_finish;
+    sinks.ota_abort = &sink_ota_abort;
+    sinks.fill_random = &sink_fill_random;
+    sinks.alloc_big = &sink_alloc_big;
+    sinks.free_big = &sink_free_big;
+    HermesConfig cfg{};
+#ifdef __ESPRESSIF_IDF__
+#ifdef CONFIG_HERMES_DEVICE_NAME
+    std::snprintf(cfg.name, sizeof(cfg.name), "%s", CONFIG_HERMES_DEVICE_NAME);
+#endif
+#endif
+    g_client->init(sinks, cfg);
+    // Identity: stored key wins; otherwise generate once and persist it
+    // (device). Host builds get whatever the stub provides — tests install
+    // their own key with hermes_test_reset().
+    uint8_t key[32];
+    if (hermes_link_load_key(key)) {
+        g_client->set_key(key);
+    } else {
+        hermes_link_fill_random(key, sizeof(key));
+        g_client->set_key(key);
+        hermes_link_store_key(key);
+    }
+    return g_client;
+}
+
+const char* link_word(HermesLinkState s) {
+    switch (s) {
+        case HermesLinkState::Offline: return "OFFLINE";
+        case HermesLinkState::Connecting: return "CONNECTING";
+        case HermesLinkState::Pairing: return "PAIRING";
+        case HermesLinkState::Linked: return "ONLINE";
+        case HermesLinkState::AuthFailed: return "AUTH FAIL";
+    }
+    return "OFFLINE";
+}
+
+// --- 3x5 micro font (A-Z, 0-9, basic punctuation; lowercase folds up) -----
+// Each glyph is 5 rows of 3 bits, MSB = left pixel. This is a stopgap until
+// the OS-wide font lands; it keeps every Hermes string — pairing code
+// included — actually readable, unlike the placeholder block renderer.
+const uint8_t* glyph3x5(char c) {
+    struct Glyph { char c; uint8_t rows[5]; };
+    static const Glyph kGlyphs[] = {
+        {'A', {0x2, 0x5, 0x7, 0x5, 0x5}}, {'B', {0x6, 0x5, 0x6, 0x5, 0x6}},
+        {'C', {0x3, 0x4, 0x4, 0x4, 0x3}}, {'D', {0x6, 0x5, 0x5, 0x5, 0x6}},
+        {'E', {0x7, 0x4, 0x6, 0x4, 0x7}}, {'F', {0x7, 0x4, 0x6, 0x4, 0x4}},
+        {'G', {0x3, 0x4, 0x5, 0x5, 0x3}}, {'H', {0x5, 0x5, 0x7, 0x5, 0x5}},
+        {'I', {0x7, 0x2, 0x2, 0x2, 0x7}}, {'J', {0x1, 0x1, 0x1, 0x5, 0x2}},
+        {'K', {0x5, 0x5, 0x6, 0x5, 0x5}}, {'L', {0x4, 0x4, 0x4, 0x4, 0x7}},
+        {'M', {0x5, 0x7, 0x5, 0x5, 0x5}}, {'N', {0x5, 0x7, 0x7, 0x5, 0x5}},
+        {'O', {0x2, 0x5, 0x5, 0x5, 0x2}}, {'P', {0x6, 0x5, 0x6, 0x4, 0x4}},
+        {'Q', {0x2, 0x5, 0x5, 0x2, 0x1}}, {'R', {0x6, 0x5, 0x6, 0x5, 0x5}},
+        {'S', {0x3, 0x4, 0x2, 0x1, 0x6}}, {'T', {0x7, 0x2, 0x2, 0x2, 0x2}},
+        {'U', {0x5, 0x5, 0x5, 0x5, 0x7}}, {'V', {0x5, 0x5, 0x5, 0x5, 0x2}},
+        {'W', {0x5, 0x5, 0x5, 0x7, 0x5}}, {'X', {0x5, 0x5, 0x2, 0x5, 0x5}},
+        {'Y', {0x5, 0x5, 0x2, 0x2, 0x2}}, {'Z', {0x7, 0x1, 0x2, 0x4, 0x7}},
+        {'0', {0x7, 0x5, 0x5, 0x5, 0x7}}, {'1', {0x2, 0x6, 0x2, 0x2, 0x7}},
+        {'2', {0x6, 0x1, 0x2, 0x4, 0x7}}, {'3', {0x6, 0x1, 0x2, 0x1, 0x6}},
+        {'4', {0x5, 0x5, 0x7, 0x1, 0x1}}, {'5', {0x7, 0x4, 0x6, 0x1, 0x6}},
+        {'6', {0x3, 0x4, 0x6, 0x5, 0x2}}, {'7', {0x7, 0x1, 0x1, 0x2, 0x2}},
+        {'8', {0x2, 0x5, 0x2, 0x5, 0x2}}, {'9', {0x2, 0x5, 0x3, 0x1, 0x6}},
+        {'.', {0x0, 0x0, 0x0, 0x0, 0x2}}, {',', {0x0, 0x0, 0x0, 0x2, 0x4}},
+        {':', {0x0, 0x2, 0x0, 0x2, 0x0}}, {'!', {0x2, 0x2, 0x2, 0x0, 0x2}},
+        {'?', {0x6, 0x1, 0x2, 0x0, 0x2}}, {'\'', {0x2, 0x2, 0x0, 0x0, 0x0}},
+        {'"', {0x5, 0x5, 0x0, 0x0, 0x0}}, {'-', {0x0, 0x0, 0x7, 0x0, 0x0}},
+        {'+', {0x0, 0x2, 0x7, 0x2, 0x0}}, {'/', {0x1, 0x1, 0x2, 0x4, 0x4}},
+        {'(', {0x1, 0x2, 0x2, 0x2, 0x1}}, {')', {0x4, 0x2, 0x2, 0x2, 0x4}},
+        {'%', {0x5, 0x1, 0x2, 0x4, 0x5}}, {'<', {0x1, 0x2, 0x4, 0x2, 0x1}},
+        {'>', {0x4, 0x2, 0x1, 0x2, 0x4}}, {'=', {0x0, 0x7, 0x0, 0x7, 0x0}},
+        {'*', {0x0, 0x5, 0x2, 0x5, 0x0}}, {'#', {0x5, 0x7, 0x5, 0x7, 0x5}},
+        {'@', {0x2, 0x5, 0x7, 0x4, 0x3}}, {'_', {0x0, 0x0, 0x0, 0x0, 0x7}},
+    };
+    if (c >= 'a' && c <= 'z') c = static_cast<char>(c - 'a' + 'A');
+    for (const Glyph& g : kGlyphs) {
+        if (g.c == c) return g.rows;
+    }
+    return nullptr;   // blank for anything else (server folds to ASCII)
+}
+
+void draw_char(aiwatchos::Framebuffer& fb, int x, int y, char c, int scale, uint16_t color) {
+    const uint8_t* rows = glyph3x5(c);
+    if (!rows) return;
+    for (int r = 0; r < 5; ++r) {
+        for (int col = 0; col < 3; ++col) {
+            if (rows[r] & (0x4 >> col)) {
+                fb.fill_rect(x + col * scale, y + r * scale,
+                             x + col * scale + scale - 1, y + r * scale + scale - 1, color);
+            }
+        }
+    }
+}
+
+int text_w(const char* s, int scale) {
+    return static_cast<int>(std::strlen(s)) * 4 * scale;
+}
+
+void draw_text(aiwatchos::Framebuffer& fb, int x, int y, const char* s, int scale, uint16_t color) {
+    int pen = x;
+    for (const char* p = s; *p; ++p) {
+        draw_char(fb, pen, y, *p, scale, color);
+        pen += 4 * scale;
+    }
+}
+
+// Word-wrapped text block; returns the y just past the last drawn line.
+int draw_wrapped(aiwatchos::Framebuffer& fb, int x, int y, int max_w, const char* s,
+                 int scale, uint16_t color, int max_lines) {
+    const int advance = 4 * scale;
+    const int line_step = 6 * scale + 2;
+    const int chars_per_line = max_w / advance;
+    if (chars_per_line <= 0 || !s) return y;
+    int lines = 0;
+    const char* p = s;
+    while (*p && lines < max_lines) {
+        // Take one line: greedy word wrap over the remaining text.
+        int len = 0, last_space = -1;
+        while (p[len] && len < chars_per_line) {
+            if (p[len] == ' ') last_space = len;
+            if (p[len] == '\n') break;
+            ++len;
+        }
+        int take = len;
+        if (p[len] && p[len] != '\n' && last_space > 0) take = last_space;
+        for (int i = 0; i < take; ++i) {
+            draw_char(fb, x + i * advance, y, p[i], scale, color);
+        }
+        y += line_step;
+        ++lines;
+        p += take;
+        while (*p == ' ' || *p == '\n') ++p;
+    }
+    return y;
+}
+
+}  // namespace
+
+// ---------------------------------------------------------------------------
+// Health line / uptime (public, unchanged semantics + REAL link state)
+// ---------------------------------------------------------------------------
 
 char* hermes_uptime_str(uint64_t now_ms, char* out, size_t len) {
     if (!out || len == 0) return out;
     uint64_t total_s = now_ms / 1000;
     if (total_s < 3600) {
-        snprintf(out, len, "%02u:%02u",
-                 static_cast<unsigned>((total_s / 60) % 60),
-                 static_cast<unsigned>(total_s % 60));
+        std::snprintf(out, len, "%02u:%02u",
+                      static_cast<unsigned>((total_s / 60) % 60),
+                      static_cast<unsigned>(total_s % 60));
     } else {
-        snprintf(out, len, "%02u:%02u",
-                 static_cast<unsigned>((total_s / 3600) % 100),
-                 static_cast<unsigned>((total_s / 60) % 60));
+        std::snprintf(out, len, "%02u:%02u",
+                      static_cast<unsigned>((total_s / 3600) % 100),
+                      static_cast<unsigned>((total_s / 60) % 60));
     }
     out[len - 1] = '\0';
     return out;
@@ -42,86 +287,197 @@ std::string hermes_health_line() {
     char up[8] = {};
     uint64_t now = g_hal ? g_hal->now_ms() : 0;
     hermes_uptime_str(now, up, sizeof(up));
+    HermesLinkState st = HermesLinkState::Offline;
+    if (g_client) {
+        LockGuard lock;
+        st = g_client->state();
+    }
     char line[64] = {};
     if (g_hal) {
         aiwatchos::PowerStatus ps = g_hal->read_power();
         if (ps.battery_percent <= 100) {
-            snprintf(line, sizeof(line), "BAT %u%%%s UP %s LINK OFFLINE",
-                     ps.battery_percent, ps.charging ? " CHG" : "", up);
+            std::snprintf(line, sizeof(line), "BAT %u%%%s UP %s LINK %s",
+                          ps.battery_percent, ps.charging ? " CHG" : "", up, link_word(st));
         } else {
-            snprintf(line, sizeof(line), "BAT -- UP %s LINK OFFLINE", up);
+            std::snprintf(line, sizeof(line), "BAT -- UP %s LINK %s", up, link_word(st));
         }
     } else {
-        snprintf(line, sizeof(line), "BAT -- UP %s LINK OFFLINE", up);
+        std::snprintf(line, sizeof(line), "BAT -- UP %s LINK %s", up, link_word(st));
     }
     return std::string(line);
 }
 
-// The adapter implements hg::Hal by delegating to the AIWatchOS Hal singleton.
-// In a full integration, we would construct an hg::App with this HAL bridge and
-// call its begin()/tick() methods from our callbacks below. Since HermesGadget's
-// core is C++ but requires ESP-IDF headers (freertos, esp_lcd, etc.), the adapter
-// provides the structural bridge and lifecycle mapping here; the actual hg::App
-// instance is created when building against the full firmware tree.
+// ---------------------------------------------------------------------------
+// Live client API
+// ---------------------------------------------------------------------------
+
+HermesLinkState hermes_link_state() {
+    if (!g_client) return HermesLinkState::Offline;
+    LockGuard lock;
+    return g_client->state();
+}
+
+bool hermes_paired() {
+    if (!g_client) return false;
+    LockGuard lock;
+    return g_client->paired();
+}
+
+namespace {
+// Borrowed-view access: the view lives inside the client (PSRAM on
+// device). Callers get a reference, never a copy — the struct is ~7 KB of
+// text buffers and the OS main task stack cannot hold one. On device the
+// link task may update it concurrently; render/touch hold the client lock
+// while reading, API callers treat the reference as a transient snapshot.
+HermesView* g_empty_view = nullptr;   // heap fallback when no client exists
+}  // namespace
+
+const HermesView& hermes_view() {
+    if (g_client) return g_client->view();
+    if (!g_empty_view) g_empty_view = new HermesView();
+    return *g_empty_view;
+}
+
+const char* hermes_pairing_code() {
+    return hermes_view().pairing_code;
+}
+
+const char* hermes_pairing_command() {
+    return hermes_view().pairing_cmd;
+}
+
+bool hermes_send_text(const char* text) {
+    if (!ensure_client()) return false;
+    LockGuard lock;
+    return g_client->send_chat_text(text);
+}
+
+bool hermes_answer_prompt(bool yes) {
+    if (!g_client) return false;
+    LockGuard lock;
+    return g_client->answer_prompt(yes);
+}
+
+void hermes_pump(uint64_t now_ms) {
+    if (!g_client) return;
+    LockGuard lock;
+    g_client->tick(now_ms);
+}
+
+// ---------------------------------------------------------------------------
+// Link-layer entry points (called from hermes_link.cpp's task on device)
+// ---------------------------------------------------------------------------
+
+void hermes_core_transport_up() {
+    if (!ensure_client()) return;
+    LockGuard lock;
+    g_client->on_transport_open(now_ms());
+}
+
+void hermes_core_transport_down() {
+    if (!g_client) return;
+    LockGuard lock;
+    g_client->on_transport_closed(now_ms());
+}
+
+void hermes_core_transport_text(const char* json, size_t len) {
+    if (!g_client) return;
+    LockGuard lock;
+    g_client->on_text(json, len, now_ms());
+}
+
+void hermes_core_transport_binary(const uint8_t* data, size_t len) {
+    if (!g_client) return;
+    LockGuard lock;
+    g_client->on_binary(data, len, now_ms());
+}
+
+void hermes_core_pump() { hermes_pump(now_ms()); }
+
+bool hermes_core_wants_reconnect() {
+    if (!g_client) return false;
+    LockGuard lock;
+    return g_client->wants_reconnect();
+}
+
+bool hermes_core_talk_active() {
+    if (!g_client) return false;
+    LockGuard lock;
+    return g_client->talk_active();
+}
+
+void hermes_core_talk_feed(const int16_t* pcm, size_t frames) {
+    if (!g_client) return;
+    LockGuard lock;
+    g_client->talk_feed(pcm, frames);
+}
+
+void hermes_core_set_battery(int pct) {
+    if (!g_client) return;
+    LockGuard lock;
+    g_client->set_battery(pct, now_ms());
+}
+
+bool hermes_core_ota_reboot_pending() {
+    if (!g_client) return false;
+    LockGuard lock;
+    return g_client->ota_reboot_pending();
+}
+
+void hermes_core_ota_reboot_consumed() {
+    if (!g_client) return;
+    LockGuard lock;
+    g_client->ota_reboot_consumed();
+}
+
+// ---------------------------------------------------------------------------
+// App lifecycle
+// ---------------------------------------------------------------------------
 
 void hermes_init() {
-    if (g_state.initialized) return;
-
-    // DeviceProfile for the Waveshare 2.06" board, derived from HermesGadget's
-    // CONFIG_HG_BOARD_AMOLED_206 config in firmware/esp32/main/board.cpp:
-    //   - Board name: "esp32s3-touch-amoled-2.06"
-    //   - Display: 410x502 CO5300 AMOLED, RGB565 (not round)
-    //   - Audio: ES8311 speaker + ES7210 dual mic at 16 kHz
-    //   - Touch: FT3168 on I2C addr 0x38 (register-compatible with FT5x06 driver)
-    //   - Buttons: BOOT=GPIO0 acts as TALK, PWR via AXP2101 (swipe down cancels)
-
-    g_state.initialized = true;
+    if (g_initialized) return;
+    g_initialized = true;
+#ifdef __ESPRESSIF_IDF__
+    if (!g_lock) g_lock = xSemaphoreCreateMutex();
+#endif
+    ensure_client();
+    hermes_link_start();   // device: WiFi + WS task; host: stub (returns false)
 }
 
 void hermes_tick(uint32_t elapsed_ms) {
-    if (!g_state.initialized) return;
-
-    // In the original code, App::tick() does:
-    // 1. Power management tick (AXP2101 polling for battery %, charging state)
-    // 2. Connection lifecycle: retry WiFi connect with exponential backoff
-    // 3. WebSocket I/O: read server messages -> on_transport_text/binary dispatch
-    // 4. Audio streaming: if mic_stream active, send ES7210 samples via binary channel;
-    //    if speaker stream active, write received PCM to ES8311 codec
-    // 5. Display updates: Ui::render() flushes changed bands to the framebuffer
-    // 6. Timeout handling: session idle (heartbeat), reply linger, card TTL
-
     (void)elapsed_ms;
-
-    // Drive the hg::App state machine if it were instantiated:
-    //   g_hermes_app->tick();
+    hermes_pump(now_ms());
 }
 
 void hermes_render(aiwatchos::Framebuffer& fb) {
-    if (!g_state.initialized) return;
-
-    // Clear to black (AMOLED native).
     fb.fill(kHermesBg);
-
-    // In the original code, hg::Ui renders a UiModel with these screen states:
-    //   Boot -> "AIWatchOS" centered with progress indicator
-    //   Ready  -> last reply text + hint bar ("Hold to talk")
-    //   Thinking -> "Thinking..." spinner animation
-    //   Responding -> streamed reply text (paged)
-    //   Pairing -> pairing code displayed for approval
-
-    // Draw a header band at the top.
     fb.fill_rect(0, 0, aiwatchos::kDisplayWidth - 1, 36, kHeaderColor);
+    draw_text(fb, 16, 11, "HERMES", 3, kTextColor);
 
-    // Draw the app title centered in the main content area, in the shared
-    // 5x7 font (scale 2 -> 10x14 px glyphs).
-    const char* status = "Hermes AI Agent";
-    int text_x = (aiwatchos::kDisplayWidth -
-                  aiwatchos::Framebuffer::text_width(status)) / 2;
-    fb.draw_text(text_x, aiwatchos::kDisplayHeight / 2 - 30, status, kTextColor);
+    // The view is read in place under the client lock — never copied. It is
+    // ~7 KB of text buffers and this runs on the OS main task's stack.
+    LockGuard lock;
+    const HermesView& v = hermes_view();
+    const uint8_t* image_px = nullptr;
+    int image_w = 0, image_h = 0;
+    if (g_client && v.image_active) {
+        image_px = g_client->image_pixels();
+        image_w = v.image_w;
+        image_h = v.image_h;
+    }
 
-    // Device-health dashboard rows (companion device-screen equivalent):
-    // battery outline + proportional fill, charging marker when charging.
-    // Unknown battery (percent 255) draws the empty outline only.
+    // State headline + device id.
+    char headline[48];
+    std::snprintf(headline, sizeof(headline), "LINK %s", link_word(v.link));
+    draw_text(fb, 16, 48, headline, 3,
+              v.link == HermesLinkState::Linked ? kGreenColor
+              : v.link == HermesLinkState::AuthFailed ? kRedColor : kAmberColor);
+    if (g_client) {
+        draw_text(fb, 16, 76, g_client->device_id(), 2, kStatusColor);
+    }
+
+    // Device-health battery bar — geometry unchanged from the original
+    // dashboard (host tests pin these pixels).
     if (g_hal) {
         aiwatchos::PowerStatus ps = g_hal->read_power();
         constexpr int kBarX = 16, kBarY = 120, kBarW = 200, kBarH = 20;
@@ -142,37 +498,153 @@ void hermes_render(aiwatchos::Framebuffer& fb) {
         }
     }
 
-    // Draw hint bar at the bottom.
+    const int kContentY = 156;
+    const int kContentW = aiwatchos::kDisplayWidth - 32;
+
+    if (v.link == HermesLinkState::AuthFailed) {
+        draw_wrapped(fb, 16, kContentY, kContentW, v.error, 2, kRedColor, 3);
+        draw_wrapped(fb, 16, kContentY + 60, kContentW,
+                     "ON THE HERMES HOST RUN: HERMES GADGET FORGET THIS DEVICE, THEN REBOOT THE WATCH TO RE-ENROLL.",
+                     2, kDimColor, 8);
+    } else if (v.prompt_active) {
+        draw_wrapped(fb, 16, kContentY, kContentW, v.prompt_title, 3, kAmberColor, 2);
+        draw_wrapped(fb, 16, kContentY + 44, kContentW, v.prompt_text, 2, kTextColor, 8);
+        // YES / NO targets.
+        fb.fill_rect(16, 380, 197, 440, kGreenColor);
+        fb.fill_rect(213, 380, 394, 440, kRedColor);
+        draw_text(fb, 76, 402, "YES", 4, kHermesBg);
+        draw_text(fb, 284, 402, "NO", 4, kHermesBg);
+    } else if (v.link == HermesLinkState::Pairing && v.pairing_code[0]) {
+        draw_text(fb, 16, kContentY, "PAIRING CODE", 2, kStatusColor);
+        int code_w = text_w(v.pairing_code, 6);
+        draw_text(fb, (aiwatchos::kDisplayWidth - code_w) / 2, kContentY + 24,
+                  v.pairing_code, 6, kAmberColor);
+        draw_wrapped(fb, 16, kContentY + 76, kContentW,
+                     "APPROVE ON THE HERMES HOST:", 2, kDimColor, 2);
+        draw_wrapped(fb, 16, kContentY + 104, kContentW,
+                     v.pairing_cmd[0] ? v.pairing_cmd : "HERMES PAIRING APPROVE GADGET <CODE>",
+                     2, kTextColor, 6);
+    } else if (v.card_active) {
+        draw_wrapped(fb, 16, kContentY, kContentW, v.card_title, 3, kTextColor, 2);
+        draw_wrapped(fb, 16, kContentY + 44, kContentW, v.card_body, 2, kDimColor, 12);
+    } else if (v.image_active && image_px && image_w > 0 && image_h > 0) {
+        // Nearest-neighbour fit into the content area, aspect preserved.
+        int max_w = kContentW, max_h = 280;
+        int dw = max_w, dh = image_h * max_w / image_w;
+        if (dh > max_h) { dh = max_h; dw = image_w * max_h / image_h; }
+        int ox = (aiwatchos::kDisplayWidth - dw) / 2, oy = kContentY;
+        for (int y = 0; y < dh; ++y) {
+            int sy = y * image_h / dh;
+            const uint8_t* row = image_px + static_cast<size_t>(sy) * image_w * 2;
+            for (int x = 0; x < dw; ++x) {
+                int sx = x * image_w / dw;
+                uint16_t px = static_cast<uint16_t>(row[sx * 2] | (row[sx * 2 + 1] << 8));
+                fb.put_pixel(ox + x, oy + y, px);
+            }
+        }
+    } else {
+        // Conversation.
+        int y = kContentY;
+        if (v.ota_active) {
+            char ota_line[48];
+            unsigned pct = v.ota_size ? v.ota_received * 100 / v.ota_size : 0;
+            std::snprintf(ota_line, sizeof(ota_line), "UPDATING %u%%", pct);
+            draw_text(fb, 16, y, ota_line, 2, kAmberColor);
+            y += 28;
+        }
+        if (v.busy || v.status[0]) {
+            char status_line[176];
+            std::snprintf(status_line, sizeof(status_line), "> %s",
+                          v.status[0] ? v.status : "THINKING");
+            y = draw_wrapped(fb, 16, y, kContentW, status_line, 2, kAmberColor, 2);
+            y += 6;
+        }
+        if (v.transcript[0]) {
+            y = draw_wrapped(fb, 16, y, kContentW, "YOU:", 2, kStatusColor, 1);
+            y = draw_wrapped(fb, 16, y, kContentW, v.transcript, 2, kDimColor, 3);
+            y += 6;
+        }
+        if (v.reply[0]) {
+            draw_wrapped(fb, 16, y, kContentW, v.reply, 2, kTextColor, 12);
+        } else if (v.link == HermesLinkState::Linked && !v.busy) {
+            // One-tap smoke message + push-to-talk affordance.
+            fb.fill_rect(105, 300, 305, 348, kHeaderColor);
+            draw_text(fb, 137, 316, "SAY HELLO", 3, kTextColor);
+            draw_text(fb, 16, 364, "OR HOLD BOTTOM TO TALK", 2, kStatusColor);
+        } else if (v.link == HermesLinkState::Offline) {
+            draw_wrapped(fb, 16, y, kContentW,
+                         "NO LINK. THE WATCH JOINS WIFI AND CONNECTS TO THE HERMES HUB AUTOMATICALLY.",
+                         2, kDimColor, 6);
+            if (v.error[0]) {
+                draw_wrapped(fb, 16, y + 92, kContentW, v.error, 2, kRedColor, 2);
+            }
+        } else if (v.link == HermesLinkState::Connecting) {
+            draw_text(fb, 16, y, "CONNECTING...", 2, kDimColor);
+        } else if (v.link == HermesLinkState::Pairing) {
+            draw_text(fb, 16, y, "WAITING FOR PAIRING CODE...", 2, kDimColor);
+        }
+        if (v.notice[0] && now_ms() < v.notice_until_ms) {
+            draw_wrapped(fb, 16, 424, kContentW, v.notice, 2, kAmberColor, 1);
+        }
+    }
+
+    // Hint bar (same band as the original layout).
     fb.fill_rect(0, aiwatchos::kDisplayHeight - 48,
                  aiwatchos::kDisplayWidth - 1, aiwatchos::kDisplayHeight - 1, kHeaderColor);
+    const char* hint = "HOLD BOTTOM: TALK";
+    if (v.prompt_active) hint = "TAP YES OR NO";
+    else if (v.card_active || v.image_active) hint = "TAP: DISMISS";
+    else if (v.link != HermesLinkState::Linked) hint = "HERMES GADGET";
+    draw_text(fb, 16, aiwatchos::kDisplayHeight - 32, hint, 2, kDimColor);
 }
 
 bool hermes_on_touch(const aiwatchos::TouchEvent& event) {
-    if (!g_state.initialized) return false;
+    if (!g_client) return false;
+    LockGuard lock;
+    const HermesView& v = g_client->view();
+    uint64_t now = now_ms();
 
-    // Touch mapping for the Hermes app (same as the original touch_screen=true config):
-    //   - Press in bottom-center: push-to-talk (hold while speaking, release to send)
-    //   - Swipe down from top: cancel current action / dismiss overlay
-    if (event.type == aiwatchos::TouchEvent::Press &&
-        event.y > aiwatchos::kDisplayHeight - 100) {
-        return true;   // consumed as TALK press
+    if (event.type == aiwatchos::TouchEvent::Press) {
+        // Prompt first (guard: ignore presses in the first 0.6 s so a press
+        // meant for something else doesn't answer — protocol doc rule).
+        if (v.prompt_active && now - v.prompt_since_ms >= 600 && event.y >= 340) {
+            return g_client->answer_prompt(event.x < aiwatchos::kDisplayWidth / 2);
+        }
+        // Cards/images dismiss on tap.
+        if (v.card_active || v.image_active) {
+            g_client->dismiss_card();
+            return true;
+        }
+        // Top edge: cancel capture / running turn.
+        if (event.y < 60) {
+            g_client->cancel(now);
+            return true;
+        }
+        // SAY HELLO button (only drawn in the linked+idle state).
+        if (v.link == HermesLinkState::Linked && !v.busy && !v.reply[0] &&
+            event.x >= 105 && event.x <= 305 && event.y >= 300 && event.y <= 348) {
+            return g_client->send_chat_text("Hello from my watch");
+        }
+        // Bottom-center hold: push-to-talk.
+        if (event.y > aiwatchos::kDisplayHeight - 100) {
+            return g_client->talk_start(now);
+        }
+        return false;
     }
 
     if (event.type == aiwatchos::TouchEvent::Release &&
         event.y > aiwatchos::kDisplayHeight - 100) {
-        return true;   // consumed as TALK release -> finish_listening()
+        if (g_client->talk_active()) {
+            g_client->talk_stop(now);
+            return true;
+        }
     }
-
-    // Swipe down from top edge: cancel.
-    if (event.type == aiwatchos::TouchEvent::Press && event.y < 60) {
-        return true;   // consumed as CANCEL/swipe-down
-    }
-
     return false;
 }
 
 aiwatchos::App make_hermes_app(aiwatchos::Hal& hal) {
     g_hal = &hal;
+    hermes_init();   // boot the client + link at OS start, not first launch
     return aiwatchos::make_app(
         "hermes",
         hermes_init,      // init
@@ -181,5 +653,60 @@ aiwatchos::App make_hermes_app(aiwatchos::Hal& hal) {
         hermes_on_touch   // on_touch
     );
 }
+
+// ---------------------------------------------------------------------------
+// Host-test hooks (host build only — see header)
+// ---------------------------------------------------------------------------
+
+#ifndef __ESPRESSIF_IDF__
+void hermes_test_reset(const uint8_t key[32]) {
+    ensure_client();
+    if (!g_client) return;
+    HermesSinks sinks{};
+    sinks.send_text = &sink_send_text;
+    sinks.send_binary = &sink_send_binary;
+    sinks.audio_begin = &sink_audio_begin;
+    sinks.audio_write = &sink_audio_write;
+    sinks.audio_end = &sink_audio_end;
+    sinks.audio_abort = &sink_audio_abort;
+    sinks.ota_begin = &sink_ota_begin;
+    sinks.ota_write = &sink_ota_write;
+    sinks.ota_finish = &sink_ota_finish;
+    sinks.ota_abort = &sink_ota_abort;
+    sinks.fill_random = &sink_fill_random;
+    sinks.alloc_big = &sink_alloc_big;
+    sinks.free_big = &sink_free_big;
+    HermesConfig cfg{};
+    g_client->init(sinks, cfg);
+    g_client->set_key(key);
+    g_outbound.clear();
+    hermes_link_test_ota_reset();
+}
+
+void hermes_test_transport_up() { hermes_core_transport_up(); }
+void hermes_test_transport_down() { hermes_core_transport_down(); }
+void hermes_test_inject_text(const char* json) {
+    hermes_core_transport_text(json, std::strlen(json));
+}
+void hermes_test_inject_binary(const uint8_t* data, size_t len) {
+    hermes_core_transport_binary(data, len);
+}
+void hermes_test_talk_feed(const int16_t* pcm, size_t frames) {
+    hermes_core_talk_feed(pcm, frames);
+}
+size_t hermes_test_outbound_count() { return g_outbound.size(); }
+bool hermes_test_outbound_is_binary(size_t i) {
+    return i < g_outbound.size() && g_outbound[i].binary;
+}
+std::string hermes_test_outbound_text(size_t i) {
+    if (i >= g_outbound.size() || g_outbound[i].binary) return std::string();
+    return std::string(g_outbound[i].bytes.begin(), g_outbound[i].bytes.end());
+}
+void hermes_test_clear_outbound() { g_outbound.clear(); }
+size_t hermes_test_ota_captured(const uint8_t** out) {
+    if (out) *out = hermes_link_test_ota_data();
+    return hermes_link_test_ota_size();
+}
+#endif
 
 }  // namespace aiwatchos_hermes
