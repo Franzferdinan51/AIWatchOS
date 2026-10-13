@@ -1122,6 +1122,7 @@ static void test_rtc_seam() {
     aiwatchos::board_set_epoch_ms(base_before);   // restore for other tests
     aiwatchos::rtc_test_set_present(false);
     printf("test_rtc_seam: PASSED\n");
+}
 // --- Hermes Gadget Protocol v1: published identity/auth vectors ------------
 // The same vectors pin the HermesGadget server (tests/test_protocol.py) and
 // firmware suites, so the two implementations cannot drift apart silently.
