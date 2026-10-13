@@ -26,6 +26,12 @@ using HermesState = HermesView;
 // ONLINE / AUTH FAIL — never a hardcoded value.
 std::string hermes_health_line();
 
+// Which hub endpoint the link layer is riding: "LAN" (home) or "REMOTE"
+// (away-from-home, the hub host's Tailscale Funnel over wss). Shown as
+// the health line's VIA tag; the underlying failover policy is the pure
+// HermesFailover machine in hermes_proto.hpp.
+const char* hermes_link_endpoint_tag();
+
 // Uptime as MM:SS below one hour, HH:MM above. Writes into out (always NUL-
 // terminated) and returns out.
 char* hermes_uptime_str(uint64_t now_ms, char* out, size_t len);

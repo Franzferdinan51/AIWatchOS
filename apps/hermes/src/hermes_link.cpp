@@ -3,6 +3,16 @@
 // and the pump task that feeds frames into the protocol client
 // (hermes_proto.cpp) via the hermes_core_* entry points in the adapter.
 //
+// The hub has two endpoints: the home-LAN ws:// (HERMES_HOST/HERMES_PORT
+// Kconfig) and an away-from-home wss:// via the hub host's Tailscale
+// Funnel (provisioned through the shared net config, NetConfig's
+// hermes_remote_* fields). The pure HermesFailover machine
+// (hermes_proto.hpp) picks the endpoint per attempt: LAN first every
+// cycle, REMOTE after repeated LAN failures, back to LAN after a
+// remote failure — so returning home recovers LAN automatically.
+// TLS for wss rides the same esp_crt_bundle machinery the net
+// component uses; no hand-rolled TLS here.
+//
 // WiFi itself is NOT owned here: components/aiwatchos_net (net_start() in
 // app_main) is the single WiFi/SNTP owner. This layer only observes
 // aiwatchos_net::wifi_connected() and runs the WebSocket while the shared
@@ -38,6 +48,7 @@
 #include "aiwatchos/hal.hpp"
 #include "aiwatchos_net/net.hpp"   // wifi_connected(), net_config() — shared net owner
 #include "cJSON.h"
+#include "esp_crt_bundle.h"
 #include "esp_event.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
@@ -77,6 +88,13 @@ bool g_ever_connected = false;
 uint32_t g_backoff_ms = kBackoffMinMs;
 int64_t g_next_attempt_ms = 0;
 esp_websocket_client_handle_t g_ws = nullptr;
+
+// Endpoint failover state: g_attempt_* tracks the in-flight attempt so
+// ws_start() can score the attempt it supersedes (never came up = failed).
+HermesFailover g_failover;
+HermesEndpoint g_attempt_ep = HermesEndpoint::Lan;
+bool g_attempt_made = false;
+bool g_attempt_up = false;
 
 // Reassembly buffer for fragmented WS messages (PSRAM, allocated once).
 uint8_t* g_rx = nullptr;
@@ -132,12 +150,19 @@ void ws_event_handler(void*, esp_event_base_t, int32_t event_id, void* event_dat
             g_ws_up = true;
             g_ever_connected = true;
             g_backoff_ms = kBackoffMinMs;
+            g_attempt_up = true;
+            g_failover.on_connected(g_attempt_ep);
             post(Msg::Up, nullptr, 0);
             break;
         case WEBSOCKET_EVENT_DISCONNECTED:
         case WEBSOCKET_EVENT_CLOSED:
         case WEBSOCKET_EVENT_ERROR:
-            if (g_ws_up) post(Msg::Down, nullptr, 0);
+            if (g_ws_up) {
+                post(Msg::Down, nullptr, 0);
+                // An established link dropped: the next cycle re-arms
+                // LAN first (see HermesFailover).
+                g_failover.on_link_down();
+            }
             g_ws_up = false;
             g_rx_len = 0;
             break;
@@ -176,9 +201,32 @@ void ws_start() {
         esp_websocket_client_destroy(g_ws);
         g_ws = nullptr;
     }
-    char uri[128];
-    std::snprintf(uri, sizeof(uri), "ws://%s:%d/gadget", CONFIG_HERMES_HOST, CONFIG_HERMES_PORT);
+    // Score the superseded attempt, then let the failover machine pick
+    // this attempt's endpoint. The remote endpoint is re-read from the
+    // shared net config on every attempt, so provisioning (NVS / setup
+    // string) takes effect on the next reconnect without a reflash.
+    if (g_attempt_made && !g_attempt_up) g_failover.on_attempt_failed(g_attempt_ep);
+    const aiwatchos_net::NetConfig& nc = aiwatchos_net::net_config();
+    g_failover.remote_enabled = nc.hermes_remote_configured();
+    const HermesEndpoint ep = g_failover.next_endpoint();
+    g_attempt_ep = ep;
+    g_attempt_made = true;
+    g_attempt_up = false;
+
+    char uri[288];
     esp_websocket_client_config_t cfg = {};
+    if (ep == HermesEndpoint::Remote) {
+        const int n = std::snprintf(uri, sizeof(uri), "wss://%s:%d/gadget",
+                                    nc.hermes_remote_host.c_str(), nc.hermes_remote_port);
+        if (n < 0 || static_cast<size_t>(n) >= sizeof(uri)) {
+            ESP_LOGW(TAG, "remote endpoint URI does not fit - attempt skipped");
+            return;   // fail closed; the pump's backoff ladder retries
+        }
+        cfg.crt_bundle_attach = esp_crt_bundle_attach;
+    } else {
+        std::snprintf(uri, sizeof(uri), "ws://%s:%d/gadget", CONFIG_HERMES_HOST, CONFIG_HERMES_PORT);
+    }
+    ESP_LOGI(TAG, "connecting via %s", hermes_endpoint_name(ep));
     cfg.uri = uri;
     cfg.subprotocol = "hermes-gadget.v1";
     cfg.buffer_size = 4096;
@@ -309,6 +357,8 @@ void hermes_link_erase_key() {
 }
 
 void hermes_link_wake_reconnect() { g_wake = true; }
+
+const char* hermes_link_endpoint_tag() { return hermes_endpoint_name(g_attempt_ep); }
 
 void hermes_link_save_outbox(const char* const* texts, int count) {
     if (!ensure_nvs()) return;
@@ -487,6 +537,7 @@ bool hermes_link_load_key(uint8_t[32]) { return false; }
 void hermes_link_store_key(const uint8_t[32]) {}
 void hermes_link_erase_key() {}
 void hermes_link_wake_reconnect() {}
+const char* hermes_link_endpoint_tag() { return "LAN"; }
 
 // In-memory persistence stubs: same semantics as the NVS layer, so the
 // adapter's save/restore flows run identically in host tests.

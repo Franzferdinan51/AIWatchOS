@@ -69,6 +69,66 @@ bool hermes_binary_parse(const uint8_t* data, size_t len, uint8_t* channel, uint
                          uint16_t* seq, const uint8_t** payload, size_t* payload_len);
 
 // ---------------------------------------------------------------------------
+// Hub endpoint failover (away-from-home).
+//
+// The hub is reachable two ways: the home-LAN endpoint (ws://, the
+// HERMES_HOST/HERMES_PORT Kconfig pair in apps/hermes) and a remote
+// endpoint (wss:// through the hub host's Tailscale Funnel, provisioned
+// via the shared net config — see NetConfig::hermes_remote_*). This pure
+// machine decides which endpoint each connection attempt uses; the link
+// layer feeds it attempt outcomes and owns the backoff timing, so the
+// policy is fully host-testable:
+//
+//   - every fresh cycle starts on LAN: a successful connect and a
+//     dropped established link both re-arm LAN first, so returning
+//     home recovers the LAN endpoint automatically;
+//   - kHermesLanFailoverThreshold consecutive failed LAN attempts move
+//     the next attempt to REMOTE (only when a remote endpoint is
+//     configured + enabled — otherwise LAN is retried forever);
+//   - a failed REMOTE attempt hands the cycle back to LAN with the
+//     streak reset, so the endpoints alternate L,L,R,L,L,R... while
+//     both are down and the link layer's backoff ladder paces them.
+// ---------------------------------------------------------------------------
+
+enum class HermesEndpoint : uint8_t { Lan = 0, Remote = 1 };
+
+constexpr int kHermesLanFailoverThreshold = 2;
+
+const char* hermes_endpoint_name(HermesEndpoint ep);   // "LAN" / "REMOTE"
+
+struct HermesFailover {
+    bool remote_enabled = false;   // remote configured + enabled (link layer syncs per attempt)
+    HermesEndpoint next = HermesEndpoint::Lan;     // endpoint the next attempt uses
+    HermesEndpoint active = HermesEndpoint::Lan;   // endpoint of the last successful connect
+    bool has_active = false;                       // any successful connect yet
+    int lan_failures = 0;                          // consecutive failed LAN attempts
+
+    HermesEndpoint next_endpoint() const { return next; }
+
+    void on_connected(HermesEndpoint ep) {
+        active = ep;
+        has_active = true;
+        lan_failures = 0;
+        next = HermesEndpoint::Lan;   // fresh cycles prefer LAN
+    }
+    void on_attempt_failed(HermesEndpoint ep) {
+        if (ep == HermesEndpoint::Remote) {
+            lan_failures = 0;
+            next = HermesEndpoint::Lan;
+            return;
+        }
+        ++lan_failures;
+        next = (remote_enabled && lan_failures >= kHermesLanFailoverThreshold)
+                   ? HermesEndpoint::Remote
+                   : HermesEndpoint::Lan;
+    }
+    void on_link_down() {   // an established link dropped: fresh cycle
+        lan_failures = 0;
+        next = HermesEndpoint::Lan;
+    }
+};
+
+// ---------------------------------------------------------------------------
 // Client
 // ---------------------------------------------------------------------------
 

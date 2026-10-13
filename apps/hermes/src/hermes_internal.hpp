@@ -24,6 +24,10 @@ void hermes_link_clear_conversation();
 // Cut the current reconnect backoff short (buddy's wakeup channel):
 // foregrounding the app or queueing a text pokes the pump loop.
 void hermes_link_wake_reconnect();
+// Endpoint diagnostics for the health line: "LAN" or "REMOTE" — the
+// endpoint of the link layer's latest connection attempt (the live
+// endpoint while connected). Host stub reports "LAN".
+const char* hermes_link_endpoint_tag();
 void hermes_link_fill_random(uint8_t* out, size_t len);
 bool hermes_link_ota_begin(uint32_t size);
 bool hermes_link_ota_write(const uint8_t* data, size_t len);

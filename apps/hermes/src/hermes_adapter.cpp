@@ -335,11 +335,15 @@ std::string hermes_health_line() {
             srv_up[i] = (c >= 'a' && c <= 'z') ? static_cast<char>(c - 'a' + 'A') : c;
         }
         srv_up[i] = '\0';
-        char tail[48];
+        // The endpoint in use rides along (LAN at home, REMOTE via the
+        // hub's Tailscale Funnel away) so a dead link says where it died.
+        char tail[56];
         if (ses[0]) {
-            std::snprintf(tail, sizeof(tail), " SRV %.23s SES %.8s", srv_up, ses);
+            std::snprintf(tail, sizeof(tail), " SRV %.16s SES %.8s VIA %s", srv_up, ses,
+                          hermes_link_endpoint_tag());
         } else {
-            std::snprintf(tail, sizeof(tail), " SRV %.23s", srv_up);
+            std::snprintf(tail, sizeof(tail), " SRV %.16s VIA %s", srv_up,
+                          hermes_link_endpoint_tag());
         }
         const size_t used = std::strlen(line);
         if (used + 1 < sizeof(line)) {
