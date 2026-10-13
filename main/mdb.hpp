@@ -46,10 +46,12 @@ bool apply_frame(int* n_points, int* xs, int* ys, uint32_t* buttons);
 // the glass intact instead of being erased by the next render.
 bool frame_card_requested();
 
-// Frame-pipeline performance counters (perf-wave F0 instrumentation).
+// Frame-pipeline performance counters (perf-wave diagnostics, kept
+// in the shipping build: a handful of counters + stage timers is the
+// cheapest way to prove frame behaviour on the glass-less bench).
 // The main loop is the only writer; the console task reads them for
-// `mdb perf` / `mdb health`. Debug-grade by design, like the rest of
-// the MDB state: a torn 64-bit read on the console side is acceptable.
+// `mdb perf` / `mdb health`. Like the rest of the MDB state, a torn
+// 64-bit read on the console side is acceptable.
 // Window fields (frames..flush_us_max) are zeroed by perf_reset();
 // the switch fields are last-event records and survive resets.
 struct PerfStats {
@@ -64,9 +66,8 @@ struct PerfStats {
     uint32_t hash_us_max = 0;
     uint64_t flush_us_sum = 0;
     uint32_t flush_us_max = 0;
-    uint32_t switch_ms_last = 0;  // switch detect -> transition complete
+    uint32_t switch_ms_last = 0;  // switch detect -> first frame flushed
     uint32_t switch_ms_max = 0;
-    uint32_t dark_ms_last = 0;    // masked-switch dark window (T1)
 };
 extern PerfStats g_perf;
 void perf_reset();

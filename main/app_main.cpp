@@ -87,11 +87,9 @@ void perf_reset() {
     // fact, in a later `mdb perf` window than the reset).
     const uint32_t sl = g_perf.switch_ms_last;
     const uint32_t sm = g_perf.switch_ms_max;
-    const uint32_t dk = g_perf.dark_ms_last;
     g_perf = PerfStats{};
     g_perf.switch_ms_last = sl;
     g_perf.switch_ms_max = sm;
-    g_perf.dark_ms_last = dk;
 }
 }  // namespace detail
 
@@ -452,10 +450,9 @@ extern "C" void app_main(void) {
     static aiwatchos::BootEscape g_boot_escape;
     static aiwatchos::TouchSynth g_touch_synth;
     static aiwatchos::BandFlush g_band_flush;
-    // App-switch brightness dip state (plan 3.0 transition).
+    // App-switch tracking (transition timing only — see the switch
+    // block below; the panel itself is never brightness-masked).
     const char* last_app_id = nullptr;
-    int dip_step = -1;
-    uint8_t dip_saved = 100;
     // Perf (F0): previous awake iteration start + switch-detect time.
     uint64_t prev_iter_us = 0;
     uint64_t switch_t0_us = 0;
@@ -566,24 +563,24 @@ extern "C" void app_main(void) {
         // Tick the foreground app (updates AI conversation state, voice pipeline).
         g_app_mgr.tick(kFrameMs);
 
-        // App-switch dip (plan 3.0): when the foreground app changes,
-        // brightness dips toward black and back over ~6 frames, so the
-        // user never sees a full-brightness cut between two screens.
+        // App-switch transition (perf-wave close-out): NO brightness
+        // dip and NO clear. The panel keeps displaying the outgoing
+        // app's last flushed frame in GRAM while this iteration
+        // composes the incoming app's first frame in full in the
+        // framebuffer; the band flush below then swaps it in as one
+        // composed frame. The old plan-3.0 dip ramped brightness
+        // 45/15/0/15/45/100 across ~6 frames after the switch — at the
+        // perf-wave frame rate that read on the glass as a flicker
+        // (owner report 2026-10-13), so the dip is gone entirely:
+        // brightness is never touched on a switch. All this block does
+        // now is timestamp the switch for the perf readout.
         {
             const char* current_id = g_app_mgr.current_app_id();
-            if (dip_step < 0 && last_app_id && current_id &&
+            if (!switch_t0_us && last_app_id && current_id &&
                 std::strcmp(last_app_id, current_id) != 0) {
-                dip_saved = board.backlight_percent();
-                dip_step = 0;
-                switch_t0_us = perf_now_us();   // perf (F0)
+                switch_t0_us = perf_now_us();
             }
             if (current_id) last_app_id = current_id;
-            if (dip_step >= 0) {
-                static const uint8_t kDipPct[6] = {45, 15, 0, 15, 45, 100};
-                board.set_backlight(static_cast<uint8_t>(
-                    dip_saved * kDipPct[dip_step] / 100));
-                if (++dip_step >= 6) dip_step = -1;
-            }
         }
 
         // Render (plan 3.0 order): G5 backdrop -> app -> shell status
@@ -675,9 +672,12 @@ extern "C" void app_main(void) {
                 aiwatchos_mdb::detail::g_perf.flush_frames++;
 #endif
             }
-            // Perf (F0): a switch's transition completes when its dip
-            // has finished AND the settled frame has been flushed.
-            if (switch_t0_us && dip_step < 0) {
+            // Perf readout: a switch's transition completes when the
+            // incoming app's first composed frame has been flushed
+            // (same iteration as detection — composition and flush are
+            // synchronous in this loop, so this is the glass-visible
+            // switch latency from the shell's point of view).
+            if (switch_t0_us) {
                 const uint32_t ms = static_cast<uint32_t>(
                     (perf_now_us() - switch_t0_us) / 1000);
                 aiwatchos_mdb::detail::g_perf.switch_ms_last = ms;

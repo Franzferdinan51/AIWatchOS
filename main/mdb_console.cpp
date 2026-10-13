@@ -529,9 +529,8 @@ void cmd_health() {
             wx_age_s = static_cast<long>(now - static_cast<time_t>(wx.fetched_epoch_ms / 1000));
         }
     }
-    snprintf(buf, sizeof(buf), "perf_switch_ms_last=%u perf_dark_ms_last=%u\n",
-             static_cast<unsigned>(detail::g_perf.switch_ms_last),
-             static_cast<unsigned>(detail::g_perf.dark_ms_last));
+    snprintf(buf, sizeof(buf), "perf_switch_ms_last=%u\n",
+             static_cast<unsigned>(detail::g_perf.switch_ms_last));
     out_str(buf);
     snprintf(buf, sizeof(buf), "weather_status=%s weather_age_s=%ld current_app=%s asleep=%d\n",
              wx_name, wx_age_s,
@@ -574,10 +573,9 @@ void cmd_perf() {
              p.flush_us_max / 1000.0);
     out_str(buf);
     snprintf(buf, sizeof(buf),
-             "switch_ms_last=%u switch_ms_max=%u dark_ms_last=%u\n",
+             "switch_ms_last=%u switch_ms_max=%u\n",
              static_cast<unsigned>(p.switch_ms_last),
-             static_cast<unsigned>(p.switch_ms_max),
-             static_cast<unsigned>(p.dark_ms_last));
+             static_cast<unsigned>(p.switch_ms_max));
     out_str(buf);
     out_str("MDB_PERF_END\n");
     aiwatchos_mdb::detail::perf_reset();
