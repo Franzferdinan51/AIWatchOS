@@ -4,6 +4,7 @@
 // Muse/Hermes server, push-to-talk voice capture (ES7210 mic), and reply playback
 // (ES8311 speaker). This adapter decomposes that into init/tick/render callbacks.
 #include "aiwatchos_muse.hpp"
+#include "muse_captions.hpp"  // companion caption/activity ports (M1/M2/M3)
 #include "aiwatchos/colors.hpp"
 #include "aiwatchos/font.hpp"
 #include "minimp3.h"
@@ -68,6 +69,41 @@ static aiwatchos::MuseState muse_face_state(const char** word_out) {
         return aiwatchos::MuseState::kThinking;
     }
 #ifdef __ESPRESSIF_IDF__
+    {
+        // M2: a FRESH agent status (under 15 s — the companion expires
+        // a pinned status after 5 s of event silence, but status
+        // events pause while reply deltas flow) refines the face: an
+        // error code wins, a speaking code confirms SPEAKING while
+        // text streams, any other busy code holds THINKING.
+        aiwatchos_net::MuseAgentStatus agent;
+        if (aiwatchos_net::muse_link_agent_status(&agent) &&
+            agent.age_ms >= 0 && agent.age_ms < 15000) {
+            switch (activity_pose(agent.code)) {
+                case ActivityPose::kError:
+                    *word_out = "ERROR";
+                    return aiwatchos::MuseState::kError;
+                case ActivityPose::kSpeaking:
+                    if (agent.busy ||
+                        aiwatchos_net::muse_link_reply_streaming()) {
+                        *word_out = "SPEAKING";
+                        return aiwatchos::MuseState::kSpeaking;
+                    }
+                    break;
+                case ActivityPose::kOff:
+                case ActivityPose::kBoot:
+                    *word_out = "LINKING";
+                    return aiwatchos::MuseState::kBoot;
+                case ActivityPose::kThinking:
+                    if (agent.busy) {
+                        *word_out = "THINKING";
+                        return aiwatchos::MuseState::kThinking;
+                    }
+                    break;
+                default:
+                    break;   // idle/listening poses leave the face alone
+            }
+        }
+    }
     switch (aiwatchos_net::muse_link_state()) {
         case aiwatchos_net::LinkState::kLinked:
             *word_out = "READY";
@@ -431,6 +467,27 @@ void muse_render(aiwatchos::Framebuffer& fb) {
 
     // State word (Headline, accent) at the top of the content zone.
     draw_text_aa_centered(fb, kCx, 50, word, FontFace::kHeadline, accent);
+#ifdef __ESPRESSIF_IDF__
+    {
+        // M2: status line under the word — the task label when the
+        // event carried one, else the companion caption for the
+        // activity code. Shown while the status is fresh (60 s) or a
+        // reply is still streaming in.
+        aiwatchos_net::MuseAgentStatus agent;
+        if (aiwatchos_net::muse_link_agent_status(&agent) &&
+            agent.age_ms >= 0 &&
+            (agent.age_ms < 60000 ||
+             aiwatchos_net::muse_link_reply_streaming())) {
+            std::string line = agent.label;
+            if (line.empty()) activity_caption(agent.code, &line);
+            if (!line.empty()) {
+                draw_text_aa_centered(fb, kCx, 76, line.c_str(),
+                                      FontFace::kCaption,
+                                      agent.busy ? accent : colors::kDim);
+            }
+        }
+    }
+#endif
 
     // G6 glow: 8 rings between the stage and the bezel, scheme stops
     // f3 (outer) -> f0 (inner) in pairs.
@@ -483,15 +540,39 @@ void muse_render(aiwatchos::Framebuffer& fb) {
         }
     }
 
-    // Caption bubble: the latest reply (device) or the latest turn
-    // (host), in Caption `caption`; hint text when neither exists.
+    // Caption bubble: the agent's reply — LIVE while it streams (M1),
+    // the finished reply afterwards — cleaned with the companion's
+    // rules (M3: markdown/fences stripped, clipped to 240) in PSRAM
+    // scratch (4096 = the link's reply cap; never on the render stack).
+    // Falls back to the latest-turn / hint text (host path included).
     char caption[256];
     caption[0] = '\0';
 #ifdef __ESPRESSIF_IDF__
-    char reply[240];
-    if (aiwatchos_net::muse_link_last_reply(reply, sizeof(reply)) &&
-        reply[0]) {
-        std::snprintf(caption, sizeof(caption), "%s", reply);
+    {
+        static char* raw = nullptr;
+        static char* cleaned_buf = nullptr;
+        if (!raw) {
+            raw = static_cast<char*>(heap_caps_malloc(4096, MALLOC_CAP_SPIRAM));
+        }
+        if (!cleaned_buf) {
+            cleaned_buf = static_cast<char*>(heap_caps_malloc(1024, MALLOC_CAP_SPIRAM));
+        }
+        if (raw && cleaned_buf) {
+            const bool streaming = aiwatchos_net::muse_link_reply_streaming();
+            bool have = streaming
+                ? aiwatchos_net::muse_link_live_reply(raw, 4096)
+                : aiwatchos_net::muse_link_last_reply(raw, 4096);
+            if (!have && streaming) {
+                have = aiwatchos_net::muse_link_last_reply(raw, 4096);
+            }
+            if (have && raw[0]) {
+                std::string cleaned = caption_from_reply(raw);
+                if (!cleaned.empty()) {
+                    std::snprintf(cleaned_buf, 1024, "%s", cleaned.c_str());
+                    std::snprintf(caption, sizeof(caption), "%s", cleaned_buf);
+                }
+            }
+        }
     }
 #endif
     if (!caption[0]) {
