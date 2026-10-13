@@ -31,6 +31,21 @@ struct NetConfig {
     std::string domain;         // for "<vm>.<domain>" derivation
     std::string sntp_server;
 
+    // Cloud TTS (M10): an OpenAI-shaped POST /v1/audio/speech endpoint
+    // (the companion's OpenRouter path). Everything is provisioning —
+    // no endpoint, model, or key is compiled in as a requirement, and
+    // an empty key means speech is off (text replies unaffected).
+    std::string tts_url;        // full speech endpoint URL
+    std::string tts_key;        // API key (Bearer) — never logged/rendered
+    std::string tts_model;      // model id sent in the request body
+    std::string tts_voice;      // voice id ("" = provider default)
+    bool tts_speak = false;     // the OS Settings "Speak replies" toggle
+
+    // True when speech could work if enabled: endpoint + key present.
+    bool tts_provisioned() const {
+        return !tts_url.empty() && !tts_key.empty();
+    }
+
     // True when a Muse session is even attemptable: WiFi credentials and
     // either an account token or a direct VM token.
     bool muse_configured() const {

@@ -205,5 +205,64 @@ int main() {
         CHECK(std::strcmp(tiny, "ab") == 0);
     }
 
+    // --- setup string: M10 TTS provisioning fields -----------------------
+    {
+        SetupFields f;
+        CHECK(parse_setup_string(
+            "aiwatchos://setup?ttsurl=https%3A%2F%2Fexample.com%2Fspeech"
+            "&ttskey=sk-abc&ttsmodel=m1&ttsvoice=v9&speak=1", &f));
+        CHECK(f.has_tts_url && f.tts_url == "https://example.com/speech");
+        CHECK(f.has_tts_key && f.tts_key == "sk-abc");
+        CHECK(f.has_tts_model && f.tts_model == "m1");
+        CHECK(f.has_tts_voice && f.tts_voice == "v9");
+        CHECK(f.has_tts_speak && f.tts_speak);
+        SetupFields g;
+        CHECK(parse_setup_string("aiwatchos://setup?speak=0", &g));
+        CHECK(g.has_tts_speak && !g.tts_speak);
+        CHECK(!g.has_tts_key);   // untouched fields stay unset
+    }
+
+    // --- TTS chunking (companion _chunkText, cap 1800 default) -----------
+    {
+        CHECK(tts_chunks("").empty());
+        CHECK(tts_chunks("   ").empty());
+        auto one = tts_chunks("  hello there  ");
+        CHECK(one.size() == 1 && one[0] == "hello there");
+        // Exactly at the cap stays one chunk.
+        std::string exact(kTtsChunkChars, 'a');
+        auto at = tts_chunks(exact);
+        CHECK(at.size() == 1 && at[0].size() == kTtsChunkChars);
+        // Sentences pack greedily; an oversize sentence hard-splits.
+        auto parts = tts_chunks("One. Two. Three four five.", 12);
+        CHECK(parts.size() == 3);
+        if (parts.size() == 3) {
+            CHECK(parts[0] == "One. Two.");
+            CHECK(parts[1] == "Three four f");
+            CHECK(parts[2] == "ive.");
+        }
+        // A sentence that alone fills the cap is not merged with others.
+        auto two = tts_chunks("Ab. Cd.", 4);
+        CHECK(two.size() == 2 && two[0] == "Ab." && two[1] == "Cd.");
+        // No chunk ever exceeds the cap, whatever the punctuation.
+        std::string big;
+        for (int i = 0; i < 50; ++i) big += "Sentence number one! ";
+        for (const auto& c : tts_chunks(big, 100)) CHECK(c.size() <= 100);
+    }
+
+    // --- TTS request JSON (companion body shape, byte-exact) -------------
+    {
+        CHECK(tts_request_json("m1", "", "hi") ==
+              "{\"model\":\"m1\",\"input\":\"hi\","
+              "\"response_format\":\"mp3\"}");
+        CHECK(tts_request_json("m1", "v9", "hi") ==
+              "{\"model\":\"m1\",\"input\":\"hi\","
+              "\"response_format\":\"mp3\",\"voice\":\"v9\"}");
+        // Quotes / backslash / newline in the input are escaped.
+        CHECK(tts_request_json("m", "", "say \"hi\"\nback\\slash") ==
+              "{\"model\":\"m\",\"input\":"
+              "\"say \\\"hi\\\"\\nback\\\\slash\","
+              "\"response_format\":\"mp3\"}");
+    }
+
     return g_failures ? 1 : 0;
 }

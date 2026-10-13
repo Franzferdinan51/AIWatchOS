@@ -55,4 +55,42 @@ config AIWATCHOS_NET_SNTP_SERVER
     string "SNTP server"
     default "pool.ntp.org"
 
+config AIWATCHOS_NET_TTS_URL
+    string "TTS speech endpoint (OpenAI-shaped /v1/audio/speech)"
+    default "https://openrouter.ai/api/v1/audio/speech"
+    help
+        Full URL of the cloud text-to-speech endpoint for spoken Muse
+        replies (M10). The default is the companion app's OpenRouter
+        endpoint; any OpenAI-shaped speech API works. An NVS value
+        (namespace "aiwnet", key "ttsurl") or the setup string
+        overrides this at runtime.
+
+config AIWATCHOS_NET_TTS_KEY
+    string "TTS API key (build-time default)"
+    default ""
+    help
+        Bearer key for the TTS endpoint. Leave empty in source: paste
+        it at flash time or provision it via NVS ("ttskey") / the
+        setup string. Empty = spoken replies off, text unaffected.
+        The key is never logged and never rendered.
+
+config AIWATCHOS_NET_TTS_MODEL
+    string "TTS model id"
+    default "fish-audio/s2.1-pro-free:free"
+    help
+        Model id sent in the speech request body. Default matches the
+        companion app's OpenRouter default.
+
+config AIWATCHOS_NET_TTS_VOICE
+    string "TTS voice id (empty: provider default)"
+    default ""
+
+config AIWATCHOS_NET_TTS_SPEAK
+    bool "Speak Muse replies by default"
+    default n
+    help
+        Initial value of the OS Settings "Speak replies" toggle (the
+        companion's cloud TTS is opt-in too). The runtime toggle,
+        persisted to NVS ("ttsspeak"), wins once touched.
+
 endmenu

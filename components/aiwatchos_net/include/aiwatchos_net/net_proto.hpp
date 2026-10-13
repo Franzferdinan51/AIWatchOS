@@ -14,6 +14,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <vector>
 
 namespace aiwatchos_net {
 namespace proto {
@@ -99,6 +100,13 @@ bool heard_transcript_clean(const char* raw, char* out, size_t cap);
 // empty means "leave unchanged" when applied over existing config.
 struct SetupFields {
     std::string ssid, pass, token, vm_token, vm, host, domain;
+    // M10 TTS provisioning: ttsurl / ttskey / ttsmodel / ttsvoice carry
+    // the speech endpoint, API key, model, and voice; speak is the
+    // initial Speak-replies toggle ("1"/"true" = on, "0" = off).
+    std::string tts_url, tts_key, tts_model, tts_voice;
+    bool tts_speak = false;
+    bool has_tts_url = false, has_tts_key = false, has_tts_model = false,
+         has_tts_voice = false, has_tts_speak = false;
     bool has_ssid = false, has_pass = false, has_token = false,
          has_vm_token = false, has_vm = false, has_host = false,
          has_domain = false;
@@ -106,6 +114,23 @@ struct SetupFields {
 
 // Parses a setup string. Returns false when the scheme/prefix is wrong.
 bool parse_setup_string(const char* text, SetupFields* out);
+
+// --- Cloud TTS request shaping (M10) ---------------------------------------
+// The companion's openrouter_tts.dart contract, ported pure so it is
+// host-testable: POST the endpoint with {"model","input",
+// "response_format":"mp3"} (plus "voice" only when set), the reply
+// text split into <=1800-char chunks on sentence boundaries, played
+// back to back. One deliberate divergence: a single sentence longer
+// than the cap is hard-split at the cap (on a UTF-8 boundary) so no
+// request ever exceeds it — the companion would send it whole.
+inline constexpr size_t kTtsChunkChars = 1800;
+std::vector<std::string> tts_chunks(const std::string& text,
+                                    size_t max_chars = kTtsChunkChars);
+// The exact JSON request body for one chunk (keys in the companion's
+// order; voice omitted when empty).
+std::string tts_request_json(const std::string& model,
+                             const std::string& voice,
+                             const std::string& input);
 
 }  // namespace proto
 }  // namespace aiwatchos_net
