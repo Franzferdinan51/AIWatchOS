@@ -121,6 +121,59 @@ int main() {
         CHECK(!parse_setup_string(nullptr, &f));
     }
 
+    // --- Agent/task status combine (M2) -----------------------------------
+    // Fixtures are subscribe-stream NDJSON lines; the field triples below
+    // are what the firmware's cJSON extraction hands agent_status_combine
+    // (activity_code, status, label — extraction yields "" for absent or
+    // non-string fields, which the combine treats as absent):
+    //   {"type":"event","seq":7,"event":"agent.status","payload":{"status":"idle"}}
+    //   {"type":"event","seq":8,"event":"agent.status","payload":{"activity_code":"searching"}}
+    //   {"type":"event","seq":9,"event":"task.status","payload":{"status":"running","label":"Summarize inbox"}}
+    //   {"type":"event","seq":10,"event":"task.status","payload":{"status":"completed"}}
+    //   {"type":"event","seq":11,"event":"agent.status","payload":{"activity_code":42}}
+    {
+        AgentStatus st;
+        // Bare status, no label. Busy follows the reference firmware's
+        // status-only rule (busy unless completed/failed) — even for
+        // "idle": on the wire a status-only agent.status is turn
+        // activity; the UI's pose map (muse_captions) is what renders
+        // "idle" as rest. The code's idle spellings only relax busy
+        // when they arrive AS an activity_code (next checks).
+        CHECK(agent_status_combine(nullptr, "idle", nullptr, &st));
+        CHECK(st.present && st.busy && std::string(st.code) == "idle");
+        CHECK(st.label[0] == '\0');
+        // Activity code wins over status and drives busy.
+        CHECK(agent_status_combine("searching", "idle", nullptr, &st));
+        CHECK(st.busy && std::string(st.code) == "searching");
+        // The code's idle spellings are not busy.
+        CHECK(agent_status_combine("online", nullptr, nullptr, &st));
+        CHECK(!st.busy);
+        CHECK(agent_status_combine("idle", nullptr, nullptr, &st));
+        CHECK(!st.busy);
+        // Empty activity_code falls through to status (companion _text).
+        CHECK(agent_status_combine("", "working", nullptr, &st));
+        CHECK(st.busy && std::string(st.code) == "working");
+        // Task status: label retained; running is busy.
+        CHECK(agent_status_combine(nullptr, "running", "Summarize inbox", &st));
+        CHECK(st.busy && std::string(st.label) == "Summarize inbox");
+        // Terminal task states are not busy.
+        CHECK(agent_status_combine(nullptr, "completed", nullptr, &st));
+        CHECK(!st.busy);
+        CHECK(agent_status_combine(nullptr, "failed", nullptr, &st));
+        CHECK(!st.busy);
+        // Malformed/absent: non-string activity_code extracts as "", an
+        // empty payload has neither field — combine refuses both.
+        CHECK(!agent_status_combine("", "", nullptr, &st));
+        CHECK(!st.present);
+        CHECK(!agent_status_combine(nullptr, nullptr, nullptr, &st));
+        CHECK(!agent_status_combine(nullptr, nullptr, "orphan label", &st));
+        // An over-long code is capped, never overflowing the field.
+        std::string big(200, 'x');
+        CHECK(agent_status_combine(big.c_str(), nullptr, nullptr, &st));
+        CHECK(std::strlen(st.code) == sizeof(st.code) - 1);
+        CHECK(!agent_status_combine("thinking", nullptr, nullptr, nullptr));
+    }
+
     if (g_failures == 0) std::printf("net_logic_test: all checks passed\n");
     return g_failures ? 1 : 0;
 }

@@ -96,6 +96,26 @@ bool muse_link_upload_turn(const uint8_t* adpcm, size_t len);
 // reply stream (see the report / muse_link.cpp notes).
 bool muse_link_last_reply(char* out, size_t cap);
 
+// --- Agent status + live reply (companion M1/M2 surfaces) ------------------
+
+// Latest agent/task status retained from the subscribe stream's
+// agent.status / task.status events — payloads the parser used to drop
+// after counting them for settle timing.
+struct MuseAgentStatus {
+    bool valid = false;    // a status event has been parsed this session
+    bool busy = false;     // agent is working (firmware busy semantics)
+    char code[40] = {};    // raw activity code, e.g. "searching"
+    char label[96] = {};   // task label when the event carried one
+    int64_t age_ms = -1;   // ms since the status last updated (-1 = none)
+};
+bool muse_link_agent_status(MuseAgentStatus* out);
+
+// The reply text of the in-progress (or most recent) turn, RAW — the UI
+// cleans it for display (M3). While a reply streams in, this grows delta
+// by delta; muse_link_reply_streaming() says whether it is still moving.
+bool muse_link_live_reply(char* out, size_t cap);
+bool muse_link_reply_streaming();
+
 // Starts WiFi + SNTP + the Muse link task. Idempotent. Safe to call when
 // unconfigured (everything stays off; muse_link_state() == kOff).
 void net_start();

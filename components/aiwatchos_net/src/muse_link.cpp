@@ -361,8 +361,40 @@ TurnRx g_rx;
 SemaphoreHandle_t g_reply_mutex = nullptr;
 std::string g_last_reply;
 
+// M1/M2 surfaces, published under g_reply_mutex for the UI task: the
+// live (in-progress) reply text, and the latest agent/task status —
+// the status payloads used to be parsed for settle timing only and
+// then dropped on the floor.
+std::string g_live_reply;
+bool g_live_streaming = false;
+proto::AgentStatus g_agent_status{};
+int64_t g_agent_status_us = 0;
+
+// Recompute the live-reply snapshot from the turn state (link task).
+void publish_live_reply() {
+    std::string joined;
+    bool streaming = false;
+    for (const auto& m : g_rx.msgs) {
+        if (!m.done) streaming = true;
+        if (m.text.empty()) continue;
+        if (!joined.empty()) joined += "\n";
+        joined += m.text;
+    }
+    if (!g_reply_mutex) return;
+    xSemaphoreTake(g_reply_mutex, portMAX_DELAY);
+    g_live_reply = joined;
+    g_live_streaming = streaming;
+    xSemaphoreGive(g_reply_mutex);
+}
+
 void turn_rx_reset() {
     g_rx = TurnRx{};
+    if (g_reply_mutex) {
+        xSemaphoreTake(g_reply_mutex, portMAX_DELAY);
+        g_live_reply.clear();
+        g_live_streaming = false;
+        xSemaphoreGive(g_reply_mutex);
+    }
 }
 
 bool id_in_user_ids(const std::string& id) {
@@ -434,9 +466,30 @@ void on_sub_line(const char* line) {
                 }
                 g_rx.any_event = true;
                 g_rx.last_event_us = now_us();
+                publish_live_reply();   // M1: caption shows it growing
             } else if (ev == "agent.status" || ev == "task.status") {
                 g_rx.any_event = true;  // activity counts for settle timing
                 g_rx.last_event_us = now_us();
+                // M2: retain the payload instead of dropping it. The
+                // companion renders activity_code ?? status; a task
+                // event may add a human label (label, else task/title).
+                // Combine semantics are pure + host-tested (net_proto).
+                std::string ac = json_str_field(p, "activity_code");
+                std::string st = json_str_field(p, "status");
+                std::string label = json_str_field(p, "label");
+                if (label.empty()) label = json_str_field(p, "task");
+                if (label.empty()) label = json_str_field(p, "title");
+                proto::AgentStatus parsed;
+                if (proto::agent_status_combine(
+                        ac.empty() ? nullptr : ac.c_str(),
+                        st.empty() ? nullptr : st.c_str(),
+                        label.empty() ? nullptr : label.c_str(), &parsed) &&
+                    g_reply_mutex) {
+                    xSemaphoreTake(g_reply_mutex, portMAX_DELAY);
+                    g_agent_status = parsed;
+                    g_agent_status_us = now_us();
+                    xSemaphoreGive(g_reply_mutex);
+                }
             }
         }
     }
@@ -838,6 +891,8 @@ bool upload_turn_impl(const uint8_t* adpcm, size_t len) {
     if (!joined.empty() && g_reply_mutex) {
         xSemaphoreTake(g_reply_mutex, portMAX_DELAY);
         g_last_reply = joined;
+        g_live_reply = joined;
+        g_live_streaming = false;
         xSemaphoreGive(g_reply_mutex);
         ESP_LOGI(kTag, "reply: %u chars", static_cast<unsigned>(joined.size()));
     }
@@ -944,6 +999,40 @@ bool muse_link_last_reply(char* out, size_t cap) {
     out[cap - 1] = 0;
     xSemaphoreGive(g_reply_mutex);
     return have;
+}
+
+bool muse_link_agent_status(MuseAgentStatus* out) {
+    if (!out) return false;
+    *out = MuseAgentStatus{};
+    if (!g_reply_mutex) return false;
+    int64_t updated_us = 0;
+    xSemaphoreTake(g_reply_mutex, portMAX_DELAY);
+    out->valid = g_agent_status.present;
+    out->busy = g_agent_status.busy;
+    std::snprintf(out->code, sizeof(out->code), "%s", g_agent_status.code);
+    std::snprintf(out->label, sizeof(out->label), "%s", g_agent_status.label);
+    updated_us = g_agent_status_us;
+    xSemaphoreGive(g_reply_mutex);
+    if (out->valid) out->age_ms = (now_us() - updated_us) / 1000;
+    return out->valid;
+}
+
+bool muse_link_live_reply(char* out, size_t cap) {
+    if (!out || cap == 0 || !g_reply_mutex) return false;
+    xSemaphoreTake(g_reply_mutex, portMAX_DELAY);
+    bool have = !g_live_reply.empty();
+    std::strncpy(out, g_live_reply.c_str(), cap - 1);
+    out[cap - 1] = 0;
+    xSemaphoreGive(g_reply_mutex);
+    return have;
+}
+
+bool muse_link_reply_streaming() {
+    if (!g_reply_mutex) return false;
+    xSemaphoreTake(g_reply_mutex, portMAX_DELAY);
+    bool streaming = g_live_streaming;
+    xSemaphoreGive(g_reply_mutex);
+    return streaming;
 }
 
 void muse_link_task_start() {

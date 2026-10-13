@@ -55,6 +55,29 @@ std::string derive_host(const std::string& explicit_host,
                         const std::string& ws_url, const std::string& vm_id,
                         const std::string& domain);
 
+// --- Agent / task status (chat subscribe events) ---------------------------
+// The Hatch stream emits agent.status / task.status events whose payload
+// carries an activity_code (the companion's chat.dart falls back to
+// `status` when it is absent) and, for tasks, sometimes a human label.
+// The reference gadget firmware reduces the pair to a busy flag
+// (muse_chat_session.cpp: code present -> busy unless "online"/"idle";
+// status only -> busy unless "completed"/"failed"). That combine step
+// lives here so the semantics are host-testable; the firmware extracts
+// the fields with cJSON and calls this.
+struct AgentStatus {
+    bool present = false;   // the event carried a usable code
+    bool busy = false;
+    char code[40] = {};     // activity_code, else status (raw, capped)
+    char label[96] = {};    // task label when the payload carried one
+};
+
+// activity_code / status / label are the extracted payload fields
+// (nullptr or "" = field absent or not a string — both count as absent,
+// matching the companion's _text()). Returns false (and zeroes `out`)
+// when neither activity_code nor status is usable.
+bool agent_status_combine(const char* activity_code, const char* status,
+                          const char* label, AgentStatus* out);
+
 // --- Provisioning seam -----------------------------------------------------
 // The settings/BLE/serial setup flows all funnel into one string:
 //   aiwatchos://setup?ssid=<..>&pass=<..>&token=<..>&vmtoken=<..>

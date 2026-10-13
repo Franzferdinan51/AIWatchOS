@@ -3,6 +3,7 @@
 // session code (same author ecosystem; formats verified against it).
 #include "aiwatchos_net/net_proto.hpp"
 
+#include <cstdio>
 #include <cstring>
 
 namespace aiwatchos_net {
@@ -154,6 +155,33 @@ bool parse_setup_string(const char* text, SetupFields* out) {
         }
         if (amp == query.size()) break;
         pos = amp + 1;
+    }
+    return true;
+}
+
+bool agent_status_combine(const char* activity_code, const char* status,
+                          const char* label, AgentStatus* out) {
+    if (!out) return false;
+    *out = AgentStatus{};
+    auto usable = [](const char* v) { return v && v[0]; };
+    const bool from_code = usable(activity_code);
+    const char* code = from_code ? activity_code
+                                 : (usable(status) ? status : nullptr);
+    if (!code) return false;
+    out->present = true;
+    std::snprintf(out->code, sizeof(out->code), "%s", code);
+    if (usable(label)) {
+        std::snprintf(out->label, sizeof(out->label), "%s", label);
+    }
+    // Busy semantics, ported from the reference firmware's on_event:
+    // an activity code means busy unless it names the idle states; a
+    // bare status means busy unless the task completed or failed.
+    if (from_code) {
+        out->busy = std::strcmp(code, "online") != 0 &&
+                    std::strcmp(code, "idle") != 0;
+    } else {
+        out->busy = std::strcmp(code, "completed") != 0 &&
+                    std::strcmp(code, "failed") != 0;
     }
     return true;
 }
