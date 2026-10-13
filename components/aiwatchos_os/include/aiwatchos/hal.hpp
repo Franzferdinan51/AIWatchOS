@@ -18,6 +18,10 @@
 
 #ifdef __ESPRESSIF_IDF__
 #include "driver/i2c_master.h"
+// Forward declaration matching esp_lcd_panel_io.h: esp_lcd is a PRIVATE
+// requirement of aiwatchos_os, so this public header cannot include it.
+struct esp_lcd_panel_io_t;
+typedef struct esp_lcd_panel_io_t* esp_lcd_panel_io_handle_t;
 #endif
 
 namespace aiwatchos {
@@ -80,6 +84,23 @@ class Hal {
 // touch init. PMU, codecs and other bus clients attach devices to this bus
 // instead of creating their own. Null until ft3168_init() has run.
 i2c_master_bus_handle_t aiwatchos_i2c_bus();
+
+// Bench access to the production touch panel-IO handle (MDB diagnostics:
+// run the panel-IO transaction shape against the live handle from another
+// task to separate handle state from caller context). Null until
+// ft3168_init() has run.
+esp_lcd_panel_io_handle_t aiwatchos_touch_panel_io();
+
+// Touch read bookkeeping (stage-3 bench): outcome counters for the
+// production ft3168_read() path, the device-ms of the first failure, and
+// the most recent esp_err_t. Reported by `mdb tpoll2`.
+struct AiwTouchStats {
+    uint32_t ok = 0;
+    uint32_t fail = 0;
+    int64_t first_fail_ms = -1;
+    int last_err = 0;
+};
+AiwTouchStats aiwatchos_touch_stats();
 #endif
 
 // The concrete board implementation for the Waveshare ESP32-S3-Touch-AMOLED-2.06.

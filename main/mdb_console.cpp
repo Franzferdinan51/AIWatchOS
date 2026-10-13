@@ -28,7 +28,9 @@
 #include "aiwatchos_hermes.hpp"
 #include "aiwatchos_net/net.hpp"
 #include "aiwatchos_weather/weather_service.hpp"
+#include "driver/gpio.h"
 #include "driver/i2c_master.h"
+#include "esp_lcd_panel_io.h"
 #include "driver/usb_serial_jtag.h"
 #include "esp_err.h"
 #include "esp_heap_caps.h"
@@ -314,6 +316,13 @@ void cmd_i2c() {
             i2c_master_bus_rm_device(dev);
         }
     }
+    // Line state at probe end: SCL=GPIO14, SDA=GPIO15 (both configured
+    // input-enabled by the I2C driver, so gpio_get_level reads the wire).
+    // A line stuck low here = a slave (or the master) is holding the bus.
+    snprintf(buf, sizeof(buf), "pins: scl=%d sda=%d\n",
+             gpio_get_level(static_cast<gpio_num_t>(14)),
+             gpio_get_level(static_cast<gpio_num_t>(15)));
+    out_str(buf);
     out_str("MDB_I2C_END\n");
 }
 
@@ -367,6 +376,71 @@ void cmd_tpoll() {
     }
     i2c_master_bus_rm_device(dev);
     out_str("MDB_TPOLL_END\n");
+}
+
+void cmd_tpoll2() {
+    // Touch attribution A/B (stage-3): the production read path fails
+    // from the app loop while raw bus reads pass from this task. Same
+    // register (0x02), same panel-IO transaction shape, three routes:
+    // (a) the production panel-IO handle from boot, (b) a fresh panel-IO
+    // handle created here, (c) the production handle after a bus reset.
+    // Plus the production read counters (tstat).
+    i2c_master_bus_handle_t bus = aiwatchos::aiwatchos_i2c_bus();
+    esp_lcd_panel_io_handle_t prod = aiwatchos::aiwatchos_touch_panel_io();
+    char buf[256];
+    out_str("MDB_TPOLL2_BEGIN\n");
+    if (!bus || !prod) {
+        out_str("ERR no bus/io\n");
+        out_str("MDB_TPOLL2_END\n");
+        return;
+    }
+    auto rx_n = [](esp_lcd_panel_io_handle_t io, const char* label, int n) {
+        int ok = 0;
+        char first[96] = "";
+        for (int i = 0; i < n; ++i) {
+            uint8_t val = 0;
+            const esp_err_t e = esp_lcd_panel_io_rx_param(io, 0x02, &val, 1);
+            if (e == ESP_OK) {
+                ++ok;
+            } else if (first[0] == 0) {
+                snprintf(first, sizeof(first), " first_err@%d=%s", i,
+                         esp_err_to_name(e));
+            }
+            vTaskDelay(pdMS_TO_TICKS(100));
+        }
+        char b[256];
+        snprintf(b, sizeof(b), "%s: %d/%d ok%s\n", label, ok, n, first);
+        out_str(b);
+    };
+    rx_n(prod, "prod io rx reg02", 10);
+    esp_lcd_panel_io_i2c_config_t io_cfg = {};
+    io_cfg.dev_addr = 0x38;
+    io_cfg.control_phase_bytes = 1;
+    io_cfg.dc_bit_offset = 0;
+    io_cfg.lcd_cmd_bits = 8;
+    io_cfg.lcd_param_bits = 8;
+    io_cfg.flags.disable_control_phase = 1;
+    io_cfg.scl_speed_hz = 100000;
+    io_cfg.transaction_timeout_ms = -1;
+    esp_lcd_panel_io_handle_t fresh = nullptr;
+    if (esp_lcd_new_panel_io_i2c(bus, &io_cfg, &fresh) == ESP_OK) {
+        rx_n(fresh, "fresh io rx reg02", 10);
+        esp_lcd_panel_io_del(fresh);
+    } else {
+        out_str("fresh io create FAILED\n");
+    }
+    const esp_err_t rerr = i2c_master_bus_reset(bus);
+    snprintf(buf, sizeof(buf), "bus_reset: %s\n", esp_err_to_name(rerr));
+    out_str(buf);
+    rx_n(prod, "prod io rx reg02 post-reset", 5);
+    const aiwatchos::AiwTouchStats st = aiwatchos::aiwatchos_touch_stats();
+    snprintf(buf, sizeof(buf),
+             "tstat: ok=%u fail=%u first_fail_ms=%lld last_err=%s\n",
+             static_cast<unsigned>(st.ok), static_cast<unsigned>(st.fail),
+             static_cast<long long>(st.first_fail_ms),
+             esp_err_to_name(static_cast<esp_err_t>(st.last_err)));
+    out_str(buf);
+    out_str("MDB_TPOLL2_END\n");
 }
 
 void cmd_health() {
@@ -522,6 +596,7 @@ void cmd_help() {
         "  mdb logs                  recent log ring (~32 KB)\n"
         "  mdb i2c                   bus scan + raw touch/RTC/PMIC probe\n"
         "  mdb tpoll                 touch A/B: raw vs panel-IO reads\n"
+        "  mdb tpoll2                touch attribution: prod/fresh panel-IO + reset + stats\n"
         "  mdb touch                 stream touch points until any byte\n"
         "  mdb panic                 reset reason + boot/panic counters\n"
         "  mdb tap <x> <y>           inject a tap\n"
@@ -545,6 +620,7 @@ void dispatch(char* line) {
     if (strcmp(verb, "screenshot") == 0) { cmd_screenshot(); return; }
     if (strcmp(verb, "i2c") == 0) { cmd_i2c(); return; }
     if (strcmp(verb, "tpoll") == 0) { cmd_tpoll(); return; }
+    if (strcmp(verb, "tpoll2") == 0) { cmd_tpoll2(); return; }
     if (strcmp(verb, "health") == 0) { cmd_health(); return; }
     if (strcmp(verb, "logs") == 0) { cmd_logs(); return; }
     if (strcmp(verb, "touch") == 0) { cmd_touch(); return; }

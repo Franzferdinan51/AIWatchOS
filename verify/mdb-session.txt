@@ -1,0 +1,19 @@
+=== MDB VERIFY SESSION ===
+CMD mdb wake                     -> None
+HEALTH initial: NO MDB_HEALTH_BEGIN
+SCREENSHOT clock: NO FBDUMP_BEGIN
+CMD mdb goto launcher            -> None
+SCREENSHOT launcher: NO FBDUMP_BEGIN
+CMD mdb goto muse                -> None
+SCREENSHOT muse: NO FBDUMP_BEGIN
+CMD mdb goto hermes              -> None
+SCREENSHOT hermes: NO FBDUMP_BEGIN
+CMD mdb goto settings            -> None
+SCREENSHOT settings: NO FBDUMP_BEGIN
+CMD mdb goto launcher            -> None
+CMD mdb wake                     -> None
+CMD mdb tap 81 112               -> None
+SCREENSHOT after-tap: NO FBDUMP_BEGIN
+HEALTH after-tap: NO MDB_HEALTH_BEGIN
+CMD mdb goto clock               -> None
+=== SESSION DONE ===

@@ -1,0 +1,12 @@
+MDB_HEALTH_BEGIN
+uptime_s=36
+boot_count=4 panic_count=0 reset_reason=other
+heap_free=6450144 heap_min=6398000 psram_free=6371688
+battery_pct=100 battery_mv=4114 charging=0
+wifi_state=CONNECTED wifi_ip=- wifi_rssi=-51
+muse_link=OFFLINE
+hermes_paired=0 hermes_endpoint=lan
+hermes_health=BAT 100% UP 55:45 LINK PAIRING SRV HERMES SES 6687d1bc
+cfg_wifi=1 cfg_hatch_token=0 cfg_vm_token=0 cfg_tts_key=0
+weather_status=ok weather_age_s=31 current_app=clock asleep=1
+MDB_HEALTH_END
