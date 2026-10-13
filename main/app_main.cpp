@@ -139,9 +139,31 @@ extern "C" void app_main(void) {
                     aiwatchos_net::muse_link_state()));
             add("Hermes pairing",
                 aiwatchos_hermes::hermes_paired() ? "PAIRED" : "NOT PAIRED");
+            add("Speech (TTS)",
+                !aiwatchos_net::muse_tts_provisioned()
+                    ? "NO KEY"
+                    : (aiwatchos_net::muse_tts_speak_enabled() ? "ON"
+                                                                : "OFF"));
             return n;
         },
         nullptr);
+
+    // M10: the "Speak replies" toggle row in OS Settings (the volume
+    // slider next to it already drives the HAL playback gain). State
+    // lives in net config (NVS-persisted); the settings layer only
+    // sees these callbacks.
+    {
+        aiwatchos::SettingsToggleRow speak_row;
+        speak_row.label = "Speak replies";
+        speak_row.icon = aiwatchos::Icon::kVolume;
+        speak_row.get = [](void*) {
+            return aiwatchos_net::muse_tts_speak_enabled();
+        };
+        speak_row.set = [](void*, bool on) {
+            aiwatchos_net::muse_tts_set_speak_enabled(on);
+        };
+        aiwatchos::settings_register_toggle(speak_row);
+    }
 #endif
 
     // --- 3. Status bar with battery display ---

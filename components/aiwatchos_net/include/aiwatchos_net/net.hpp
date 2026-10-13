@@ -138,6 +138,36 @@ bool muse_link_agent_status(MuseAgentStatus* out);
 bool muse_link_live_reply(char* out, size_t cap);
 bool muse_link_reply_streaming();
 
+// --- Spoken replies (M10, cloud TTS) ---------------------------------------
+// The watch-side client for the companion's opt-in OpenRouter speech
+// path, generalized to any OpenAI-shaped endpoint (see NetConfig's
+// tts_* fields). The engine (muse_tts.cpp) chunks the cleaned reply,
+// POSTs each chunk, and plays the MP3 through the registered player.
+// Speech is an enhancement only: off, unprovisioned, or failed speech
+// never affects the text reply.
+
+// The persisted OS Settings "Speak replies" toggle.
+bool muse_tts_speak_enabled();
+void muse_tts_set_speak_enabled(bool on);
+// Endpoint + key present (provisioning state for status pages).
+bool muse_tts_provisioned();
+// A fetch or playback is in flight.
+bool muse_tts_speaking();
+// Barge-in: drop pending speech and remaining chunks. (The in-flight
+// MP3 itself is aborted by the app's player — muse_speech_stop.)
+void muse_tts_stop();
+// Hand a CLEANED reply (companion caption cleaning, full text — the
+// engine chunks it) to the speech engine. Latest wins: unspeaked
+// older text is replaced. No-op unless enabled + provisioned + a
+// player is registered.
+void muse_tts_speak_text(const char* cleaned_text);
+// Playback seam: the Muse app registers its MP3 player so this
+// component never depends on the app layer (the outbox pump pattern).
+// The callback blocks until playback ends or the app aborts it, and
+// returns the number of 16 kHz frames written.
+using SpeechPlayerFn = size_t (*)(const uint8_t* mp3, size_t len, void* ctx);
+void muse_tts_set_player(SpeechPlayerFn fn, void* ctx);
+
 // Starts WiFi + SNTP + the Muse link task. Idempotent. Safe to call when
 // unconfigured (everything stays off; muse_link_state() == kOff).
 void net_start();

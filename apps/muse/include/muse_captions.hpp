@@ -142,6 +142,13 @@ inline std::string caption_from_reply(const std::string& text) {
     return captions_detail::clip(captions_detail::clean(text), kCaptionLimit);
 }
 
+// The same cleaning WITHOUT the caption clip — for speech (M10): the
+// TTS engine chunks the full text itself, so the 240-char display
+// limit must not truncate what gets spoken.
+inline std::string caption_clean_full(const std::string& text) {
+    return captions_detail::clean(text);
+}
+
 // Short line for an agent.status activity code (captions.dart
 // activityCaption). Returns false when the code is empty/unusable.
 inline bool activity_caption(const char* code, std::string* out) {

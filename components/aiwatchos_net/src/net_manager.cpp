@@ -108,6 +108,8 @@ bool net_time_synced() { return g_time_synced.load(); }
 
 // Defined in muse_link.cpp.
 void muse_link_task_start();
+// Defined in muse_tts.cpp.
+void muse_tts_start();
 
 void net_start() {
     if (g_started) return;
@@ -171,6 +173,7 @@ void net_start() {
 
     xTaskCreate(time_task, "aiw_time", 3072, nullptr, 4, nullptr);
     muse_link_task_start();
+    muse_tts_start();
 #endif
 }
 

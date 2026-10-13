@@ -72,6 +72,14 @@ bool muse_turn_at(size_t idx, MuseTurn* out);
 // the speaker. Returns 16 kHz mono frames written (0 when audio is down).
 size_t muse_play_reply(const uint8_t* mp3, size_t len);
 
+// Spoken replies (M10): true while a TTS MP3 is playing through
+// muse_play_reply (the face shows SPEAKING from this, not from a
+// status code). muse_speech_stop() is the barge-in: it aborts the
+// in-flight playback at the next MP3 frame and drops any queued
+// speech in the net component's TTS engine.
+bool muse_speech_playing();
+void muse_speech_stop();
+
 // Initialize the muse app: sets up WiFi, audio codec (ES8311/ES7210), and
 // prepares the voice pipeline. Called once by the OS on first launch.
 void muse_init();

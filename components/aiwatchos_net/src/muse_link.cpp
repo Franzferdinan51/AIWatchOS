@@ -236,6 +236,13 @@ struct Conn {
 
 Conn g_conn;
 std::atomic<LinkState> g_state{LinkState::kOff};
+// One-TLS gate signal (M10): true while a turn upload is in flight, so
+// other HTTPS users (the TTS fetch) can sequence behind it.
+std::atomic<bool> g_upload_active{false};
+struct UploadActiveGuard {
+    UploadActiveGuard() { g_upload_active.store(true); }
+    ~UploadActiveGuard() { g_upload_active.store(false); }
+};
 
 enum StreamKind { kStreamNone = 0, kStreamSub = 1, kStreamChat = 2 };
 struct StreamSlot {
@@ -835,6 +842,7 @@ OutboxPumpFn g_pump = nullptr;
 void* g_pump_ctx = nullptr;
 
 bool upload_turn_impl(const uint8_t* adpcm, size_t len) {
+    UploadActiveGuard upload_guard;
     turn_rx_reset();
     g_chat_body.clear();
     g_chat.kind = kStreamChat;
@@ -1023,6 +1031,10 @@ bool muse_link_upload_turn(const uint8_t* adpcm, size_t len) {
     if (!g_conn.up || !adpcm) return false;
     return upload_turn_impl(adpcm, len);
 }
+
+// True while a turn upload (POST /chat/stream + reply collection) is
+// in flight. Internal to the component (the M10 gate in muse_tts.cpp).
+bool muse_link_upload_active() { return g_upload_active.load(); }
 
 bool muse_link_last_reply(char* out, size_t cap) {
     if (!out || cap == 0 || !g_reply_mutex) return false;

@@ -193,13 +193,13 @@ void SettingsPage::render(Framebuffer& fb) {
 // About page (M22): provisioning status — battery from the HAL plus
 // the registered provider's rows (presence/state words only; the
 // provider contract forbids secret values). Compact rows so battery
-// + 5 status rows + the back hint all fit the screen.
+// + 6 status rows + the back hint all fit the screen.
 void SettingsPage::render_about(Framebuffer& fb) {
-    SettingsStatusRow rows[5];
+    SettingsStatusRow rows[6];
     size_t n_prov = 0;
     if (g_status_fn) {
-        n_prov = g_status_fn(rows, 5, g_status_ctx);
-        if (n_prov > 5) n_prov = 5;
+        n_prov = g_status_fn(rows, 6, g_status_ctx);
+        if (n_prov > 6) n_prov = 6;
     }
     const int total = 1 + static_cast<int>(n_prov);
     for (int i = 0; i < total; ++i) {

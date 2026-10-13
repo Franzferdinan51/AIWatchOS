@@ -1996,6 +1996,14 @@ static void test_muse_captions() {
     assert(caption_from_reply("# Title\n> quoted _line_ ~gone~") ==
            "Title quoted line gone");
     assert(caption_from_reply("  spaced   out\t\n lines  ") == "spaced out lines");
+    // M10: the speech cleaner is the same cleaning WITHOUT the
+    // 240-char caption clip (the TTS engine chunks the full text).
+    {
+        std::string long_reply(300, 'x');
+        assert(caption_from_reply(long_reply).size() < 300);
+        assert(caption_clean_full(long_reply) == long_reply);
+        assert(caption_clean_full("**loud** and `clear`") == "loud and clear");
+    }
     // An unclosed fence is not a fence (the regex needs the pair); its
     // backticks are stripped as markdown chars and the text survives.
     assert(caption_from_reply("a ``` b") == "a b");

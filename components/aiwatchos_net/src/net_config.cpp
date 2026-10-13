@@ -43,7 +43,11 @@ void load_once() {
     g_cfg.tts_key = CONFIG_AIWATCHOS_NET_TTS_KEY;
     g_cfg.tts_model = CONFIG_AIWATCHOS_NET_TTS_MODEL;
     g_cfg.tts_voice = CONFIG_AIWATCHOS_NET_TTS_VOICE;
-    g_cfg.tts_speak = CONFIG_AIWATCHOS_NET_TTS_SPEAK;
+#ifdef CONFIG_AIWATCHOS_NET_TTS_SPEAK
+    g_cfg.tts_speak = true;   // unset bool Kconfigs get no define
+#else
+    g_cfg.tts_speak = false;
+#endif
 
     nvs_handle_t h = 0;
     if (nvs_open(kNs, NVS_READONLY, &h) == ESP_OK) {

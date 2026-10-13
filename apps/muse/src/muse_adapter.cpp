@@ -9,6 +9,7 @@
 #include "aiwatchos/colors.hpp"
 #include "aiwatchos/font.hpp"
 #include "minimp3.h"
+#include <atomic>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
@@ -42,6 +43,11 @@ static uint64_t g_anim_ms = 0;          // face animation clock (tick-driven)
 // the interim primitives avatar (draw_jolly) stands in permanently.
 static bool g_pixel_tried = false;
 static bool g_pixel_ok = false;
+// M10 speech state: the net component's TTS engine plays fetched MP3
+// through speech_player() (below); g_speech_stop is the barge-in flag
+// muse_play_reply polls per MP3 frame.
+static std::atomic<bool> g_speech_playing{false};
+static std::atomic<bool> g_speech_stop{false};
 static aiwatchos::MuseState g_pose_state = aiwatchos::MuseState::kReady;
 static uint64_t g_pose_since_ms = 0;
 static uint64_t g_happy_until_ms = 0;   // pet reaction envelope (g_hal time)
@@ -72,6 +78,11 @@ static aiwatchos::MuseState muse_face_state(const char** word_out) {
     if (g_state.listening) {
         *word_out = "LISTENING";
         return aiwatchos::MuseState::kListening;
+    }
+    if (g_speech_playing.load()) {
+        // M10: SPEAKING is driven by real TTS playback, not a code.
+        *word_out = "SPEAKING";
+        return aiwatchos::MuseState::kSpeaking;
     }
     if (muse_outbox_depth() > 0 || g_state.turn_bytes > 0) {
         *word_out = "THINKING";
@@ -276,6 +287,23 @@ bool muse_turn_at(size_t idx, MuseTurn* out) {
     return true;
 }
 
+#ifdef __ESPRESSIF_IDF__
+namespace {
+// M10 playback seam for the net component's TTS engine: wraps
+// muse_play_reply with the playing flag the face and barge-in read.
+// The stop flag is cleared on entry — a stop only aborts the playback
+// it was aimed at (stops during a fetch are the engine's generation
+// check, not this flag's job).
+size_t speech_player(const uint8_t* mp3, size_t len, void*) {
+    g_speech_stop.store(false);
+    g_speech_playing.store(true);
+    const size_t played = muse_play_reply(mp3, len);
+    g_speech_playing.store(false);
+    return played;
+}
+}  // namespace
+#endif
+
 void muse_init() {
     if (g_state.initialized) return;
 
@@ -293,6 +321,8 @@ void muse_init() {
                 nullptr);
         },
         nullptr);
+    // M10: register the MP3 player with the TTS engine.
+    aiwatchos_net::muse_tts_set_player(&speech_player, nullptr);
 #endif
 
     // The original muse_app_run() in main/app.c does:
@@ -315,6 +345,38 @@ void muse_tick(uint32_t elapsed_ms) {
     g_state.last_tick_ms = 0;
     muse_face_anim(elapsed_ms);
 
+#ifdef __ESPRESSIF_IDF__
+    {
+        // M10: a reply that just SETTLED (final text published, no
+        // longer streaming) is handed to the TTS engine exactly once:
+        // cleaned with the companion cleaner at full length (no
+        // 240-char display clip — the engine chunks). Detection state
+        // lives in PSRAM; the engine itself gates on the Settings
+        // toggle, the provisioned key, and the registered player.
+        static char* tts_raw = nullptr;
+        static char* tts_last = nullptr;
+        if (!tts_raw) {
+            tts_raw = static_cast<char*>(
+                heap_caps_malloc(4096, MALLOC_CAP_SPIRAM));
+        }
+        if (!tts_last) {
+            tts_last = static_cast<char*>(
+                heap_caps_malloc(4096, MALLOC_CAP_SPIRAM));
+            if (tts_last) tts_last[0] = '\0';
+        }
+        if (tts_raw && tts_last &&
+            !aiwatchos_net::muse_link_reply_streaming() &&
+            aiwatchos_net::muse_link_last_reply(tts_raw, 4096) &&
+            tts_raw[0] && std::strcmp(tts_raw, tts_last) != 0) {
+            std::snprintf(tts_last, 4096, "%s", tts_raw);
+            const std::string cleaned = caption_clean_full(tts_raw);
+            if (!cleaned.empty()) {
+                aiwatchos_net::muse_tts_speak_text(cleaned.c_str());
+            }
+        }
+    }
+#endif
+
     // In the original code, muse_app_run() calls:
     // - muse_pmu_poll_key(): poll AXP2101 for BOOT/PWR button presses
     //   (BOOT triggers push-to-talk in hold mode)
@@ -331,9 +393,14 @@ void muse_tick(uint32_t elapsed_ms) {
     // not die because BOOT is up, and vice versa).
     if (boot_pressed && !g_state.boot_held) {
         g_state.boot_held = true;
-        // muse_voice_start(): enable ES7210 capture and encode as ADPCM into
-        // the turn buffer; the Noise transport sends it on release.
-        if (!g_state.listening) begin_listen();
+        if (g_speech_playing.load()) {
+            muse_speech_stop();   // M10 barge-in: BOOT stops the reply
+        } else if (!g_state.listening) {
+            // muse_voice_start(): enable ES7210 capture and encode as
+            // ADPCM into the turn buffer; the Noise transport sends it
+            // on release.
+            begin_listen();
+        }
     } else if (!boot_pressed && g_state.boot_held) {
         g_state.boot_held = false;
         if (!g_state.touch_held) end_listen();
@@ -712,6 +779,10 @@ bool muse_on_touch(const aiwatchos::TouchEvent& event) {
         const int dx = event.x - 205;
         const int dy = event.y - 232;
         if (dx * dx + dy * dy < 138 * 138) {
+            if (g_speech_playing.load()) {
+                muse_speech_stop();   // M10 barge-in: tap avatar = stop
+                return true;          // consumed (not a pet)
+            }
             g_happy_until_ms = (g_hal ? g_hal->now_ms() : 0) + 1200;
             return true;   // consumed
         }
@@ -721,6 +792,10 @@ bool muse_on_touch(const aiwatchos::TouchEvent& event) {
     // the bottom-center of the screen acts as push-to-talk (hold while speaking).
     if (event.type == aiwatchos::TouchEvent::Press &&
         event.y > aiwatchos::kDisplayHeight - 100) {
+        if (g_speech_playing.load()) {
+            muse_speech_stop();   // M10 barge-in: stop, don't record over it
+            return true;          // consumed
+        }
         g_state.touch_held = true;
         if (!g_state.listening) begin_listen();
         return true;   // consumed
@@ -749,6 +824,7 @@ size_t muse_play_reply(const uint8_t* mp3, size_t len) {
     // 1152-sample frames at up to 48 kHz shrink to <= 384 output frames.
     static int16_t out[1152];
     while (offset < len) {
+        if (g_speech_stop.load()) break;   // M10 barge-in
         mp3dec_frame_info_t info = {};
         int samples = mp3dec_decode_frame(&dec, mp3 + offset, len - offset,
                                           frame, &info);
@@ -785,6 +861,15 @@ size_t muse_play_reply(const uint8_t* mp3, size_t len) {
     }
     g_hal->audio_stop_playback();
     return played;
+}
+
+bool muse_speech_playing() { return g_speech_playing.load(); }
+
+void muse_speech_stop() {
+    g_speech_stop.store(true);
+#ifdef __ESPRESSIF_IDF__
+    aiwatchos_net::muse_tts_stop();   // drop pending text + later chunks
+#endif
 }
 
 aiwatchos::App make_muse_app(aiwatchos::Hal& hal) {
