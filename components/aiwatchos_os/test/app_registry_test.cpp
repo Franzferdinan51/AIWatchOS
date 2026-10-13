@@ -2525,33 +2525,41 @@ static void test_boot_escape() {
         assert(!esc.update(false, 1500));
         assert(!esc.latched());
     }
-    // Hold: fires exactly once, on the frame that crosses 2000 ms;
-    // release clears the latch and a fresh hold fires again.
+    // Hold: fires exactly once, on the frame that crosses 3000 ms;
+    // release clears the latch and a fresh hold fires again. The
+    // threshold sits ABOVE the in-app BOOT holds (Hermes fires its
+    // session.new / key reset at 2000 ms, in the foreground tick):
+    // a 2500 ms app-length hold passes with the escape silent and
+    // unlatched, so the app action always completes first.
     {
         BootEscape esc;
         assert(!esc.update(true, 2000));
-        assert(!esc.update(true, 3999));   // 1999 ms in: not yet
-        assert(esc.update(true, 4000));    // 2000 ms in: fires
-        assert(esc.latched());
-        assert(!esc.update(true, 4100));   // still held: no second fire
-        assert(esc.latched());
-        assert(!esc.update(false, 4200));
+        assert(!esc.update(true, 4499));   // 2499 ms in: app fired, escape silent
+        assert(!esc.update(false, 4500));  // released at 2500 ms: nothing pending
         assert(!esc.latched());
         assert(!esc.update(true, 5000));
-        assert(esc.update(true, 7000));    // second hold fires too
+        assert(!esc.update(true, 7999));   // 2999 ms in: not yet
+        assert(esc.update(true, 8000));    // 3000 ms in: fires
+        assert(esc.latched());
+        assert(!esc.update(true, 8100));   // still held: no second fire
+        assert(esc.latched());
+        assert(!esc.update(false, 8200));
+        assert(!esc.latched());
+        assert(!esc.update(true, 9000));
+        assert(esc.update(true, 12000));   // second hold fires too
     }
     // Bounce resets the timer: a broken hold never accumulates.
     {
         BootEscape esc;
         assert(!esc.update(true, 0));
-        assert(!esc.update(true, 1900));
-        assert(!esc.update(false, 1950));  // released at 1950 ms
-        assert(!esc.update(true, 2000));   // new press starts over
-        assert(!esc.update(true, 3900));   // 1900 ms into the new press
-        assert(esc.update(true, 4000));    // 2000 ms into the new press
+        assert(!esc.update(true, 2900));
+        assert(!esc.update(false, 2950));  // released at 2950 ms
+        assert(!esc.update(true, 3000));   // new press starts over
+        assert(!esc.update(true, 5900));   // 2900 ms into the new press
+        assert(esc.update(true, 6000));    // 3000 ms into the new press
     }
     // Wiring, exactly as app_main runs it: foreground capture app,
-    // BOOT scripted down at the 40 ms frame cadence for 2.4 s.
+    // BOOT scripted down at the 40 ms frame cadence for 3.4 s.
     {
         aiwatchos::TestHal hal;
         aiwatchos::AppManager mgr(hal);
@@ -2563,14 +2571,14 @@ static void test_boot_escape() {
         BootEscape esc;
         uint64_t t = 10000;
         bool saw_fire = false;
-        for (int frame = 0; frame < 60; ++frame) {
+        for (int frame = 0; frame < 85; ++frame) {
             uint32_t buttons = 0x01u;      // BOOT held the whole time
             if (esc.update((buttons & 0x01u) != 0, t)) {
                 mgr.switch_to("launcher");
                 saw_fire = true;
             }
             if (esc.latched()) buttons &= ~0x01u;   // swallowed
-            if (frame < 50) {   // 50 frames * 40 ms = 2000 ms: fire is frame 50
+            if (frame < 75) {   // 75 frames * 40 ms = 3000 ms: fire is frame 75; frames 50..74 are past the 2000 ms in-app threshold with the escape still silent, so an app hold fires first
                 assert(std::string(mgr.current_app_id()) == "muse");
                 assert(buttons == 0x01u);          // not yet swallowed
             } else {
@@ -2587,7 +2595,7 @@ static void test_boot_escape() {
 int main() {
     test_aa_text();                      // baked Inter AA renderer against real assets
     test_touch_synth();
-    test_boot_escape();                  // shell BOOT-hold escape: >= 2 s hold -> launcher, press swallowed
+    test_boot_escape();                  // shell BOOT-hold escape: >= 3 s hold -> launcher, press swallowed
     test_band_flush();                   // dirty-band hash change detection
     test_color_test_pattern();           // pure bands + accents for the byte-order check
     test_gloss_color_math();             // Muse Gloss token/blend/gradient math

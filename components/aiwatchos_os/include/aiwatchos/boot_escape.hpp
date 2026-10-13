@@ -23,7 +23,15 @@ namespace aiwatchos {
 
 class BootEscape {
  public:
-    static constexpr uint64_t kHoldMs = 2000;
+    // 3000 ms, deliberately ABOVE the in-app BOOT-hold actions:
+    // Hermes fires session.new (and, on its AUTH FAIL screen, the
+    // key reset) at a 2000 ms hold, accumulated in its foreground
+    // tick. The escape is sampled before AppManager::tick each
+    // frame, so at an equal 2000 ms threshold it would switch to
+    // the launcher on the very frame Hermes fires and starve the
+    // action. At 3000 ms an app hold always completes first; the
+    // shell escape remains the longer, unmistakable hold.
+    static constexpr uint64_t kHoldMs = 3000;
 
     // Advance the detector by one frame.
     //   boot_down: BOOT bit (button mask bit 0) currently set.

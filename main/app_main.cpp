@@ -360,9 +360,13 @@ extern "C" void app_main(void) {
         // BOOT-hold escape (shell gesture, above app dispatch): BOOT
         // is also an app key (PTT / barge-in) and a capture-mode app
         // owns it completely, so the escape cannot live in any app.
-        // Holding BOOT >= 2 s fires once per hold: switch to the
+        // Holding BOOT >= 3 s fires once per hold: switch to the
         // launcher, and swallow the rest of the hold (bit masked) so
-        // no app ever acts on this press. Short presses pass through
+        // no app ever acts on this press. The 3 s threshold sits
+        // deliberately above the in-app BOOT-hold actions (Hermes
+        // session.new / key reset fire at 2 s, in the app tick
+        // below): an app hold always completes before the escape
+        // can pre-empt it. Short presses pass through
         // untouched. Runs asleep too: the power policy below still
         // wakes the panel on the initial press, as before.
         if (g_boot_escape.update((buttons & 0x01u) != 0, frame_now_ms)) {
