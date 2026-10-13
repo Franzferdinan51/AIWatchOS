@@ -65,6 +65,7 @@ constexpr uint32_t kBackoffMinMs = 1000;
 constexpr uint32_t kBackoffMaxMs = 30000;
 
 bool g_nvs_ready = false;
+volatile bool g_wake = false;   // reconnect-wakeup poke for the pump loop
 bool g_started = false;
 bool g_ws_up = false;
 bool g_ever_connected = false;
@@ -213,9 +214,18 @@ void pump_task(void*) {
             heap_caps_free(m);
         }
 
+        // Buddy-harvest wakeup: a poke (app foregrounded, text queued,
+        // identity forgotten) cuts the current backoff wait short —
+        // the pump loop polls at <=30 ms, so the retry is immediate.
+        if (g_wake) {
+            g_wake = false;
+            g_next_attempt_ms = 0;
+            g_backoff_ms = kBackoffMinMs;
+        }
+
         // (Re)connect management with exponential backoff. After an auth
         // failure the client says wants_reconnect()==false and we stop
-        // until reboot — the owner must forget the device on the host.
+        // until the owner forgets the device (app gesture or host-side).
         int64_t now = now_ms64();
         if (aiwatchos_net::wifi_connected() && !g_ws_up && now >= g_next_attempt_ms &&
             (!g_ever_connected || hermes_core_wants_reconnect())) {
@@ -231,7 +241,8 @@ void pump_task(void*) {
         if (unow - last_battery_ms >= 2000) {
             last_battery_ms = unow;
             aiwatchos::PowerStatus ps = aiwatchos::hal().read_power();
-            hermes_core_set_battery(ps.battery_percent <= 100 ? ps.battery_percent : -1);
+            hermes_core_set_battery(ps.battery_percent <= 100 ? ps.battery_percent : -1,
+                                    ps.battery_present ? (ps.charging ? 1 : 0) : -1);
         }
 
         // Push-to-talk mic pump while a capture is live.
@@ -279,6 +290,89 @@ void hermes_link_store_key(const uint8_t key[32]) {
     nvs_handle_t h;
     if (nvs_open("hermes", NVS_READWRITE, &h) != ESP_OK) return;
     nvs_set_blob(h, "devkey", key, 32);
+    nvs_commit(h);
+    nvs_close(h);
+}
+
+void hermes_link_erase_key() {
+    if (!ensure_nvs()) return;
+    nvs_handle_t h;
+    if (nvs_open("hermes", NVS_READWRITE, &h) != ESP_OK) return;
+    nvs_erase_key(h, "devkey");
+    nvs_commit(h);
+    nvs_close(h);
+}
+
+void hermes_link_wake_reconnect() { g_wake = true; }
+
+void hermes_link_save_outbox(const char* const* texts, int count) {
+    if (!ensure_nvs()) return;
+    if (count < 0) count = 0;
+    if (count > 4) count = 4;
+    nvs_handle_t h;
+    if (nvs_open("hermes", NVS_READWRITE, &h) != ESP_OK) return;
+    nvs_set_u8(h, "qn", static_cast<uint8_t>(count));
+    for (int i = 0; i < count; ++i) {
+        char key[3] = {'q', static_cast<char>('0' + i), '\0'};
+        const char* t = texts[i] ? texts[i] : "";
+        nvs_set_blob(h, key, t, std::strlen(t) + 1);
+    }
+    nvs_commit(h);
+    nvs_close(h);
+}
+
+int hermes_link_load_outbox(char (*out)[512], int max) {
+    if (!ensure_nvs() || !out || max <= 0) return 0;
+    nvs_handle_t h;
+    if (nvs_open("hermes", NVS_READONLY, &h) != ESP_OK) return 0;
+    uint8_t n = 0;
+    if (nvs_get_u8(h, "qn", &n) != ESP_OK) n = 0;
+    int count = 0;
+    for (int i = 0; i < n && i < max && i < 4; ++i) {
+        char key[3] = {'q', static_cast<char>('0' + i), '\0'};
+        size_t len = 512;
+        if (nvs_get_blob(h, key, out[i], &len) == ESP_OK && len > 0) {
+            out[i][511] = '\0';
+            if (out[i][0]) ++count;
+        }
+    }
+    nvs_close(h);
+    return count;
+}
+
+void hermes_link_save_conversation(const char* transcript, const char* reply) {
+    if (!ensure_nvs()) return;
+    nvs_handle_t h;
+    if (nvs_open("hermes", NVS_READWRITE, &h) != ESP_OK) return;
+    const char* t = transcript ? transcript : "";
+    const char* r = reply ? reply : "";
+    nvs_set_blob(h, "ct", t, std::strlen(t) + 1);
+    nvs_set_blob(h, "cr", r, std::strlen(r) + 1);
+    nvs_commit(h);
+    nvs_close(h);
+}
+
+bool hermes_link_load_conversation(char* t, size_t tcap, char* r, size_t rcap) {
+    if (!ensure_nvs() || !t || !r || tcap == 0 || rcap == 0) return false;
+    nvs_handle_t h;
+    if (nvs_open("hermes", NVS_READONLY, &h) != ESP_OK) return false;
+    size_t tl = tcap, rl = rcap;
+    bool ok = nvs_get_blob(h, "ct", t, &tl) == ESP_OK &&
+              nvs_get_blob(h, "cr", r, &rl) == ESP_OK;
+    nvs_close(h);
+    if (ok) {
+        t[tcap - 1] = '\0';
+        r[rcap - 1] = '\0';
+    }
+    return ok;
+}
+
+void hermes_link_clear_conversation() {
+    if (!ensure_nvs()) return;
+    nvs_handle_t h;
+    if (nvs_open("hermes", NVS_READWRITE, &h) != ESP_OK) return;
+    nvs_erase_key(h, "ct");
+    nvs_erase_key(h, "cr");
     nvs_commit(h);
     nvs_close(h);
 }
@@ -386,6 +480,58 @@ bool hermes_link_send_text(const char*, size_t) { return false; }
 bool hermes_link_send_binary(const uint8_t*, size_t) { return false; }
 bool hermes_link_load_key(uint8_t[32]) { return false; }
 void hermes_link_store_key(const uint8_t[32]) {}
+void hermes_link_erase_key() {}
+void hermes_link_wake_reconnect() {}
+
+// In-memory persistence stubs: same semantics as the NVS layer, so the
+// adapter's save/restore flows run identically in host tests.
+namespace {
+char g_stub_outbox[4][512] = {};
+int g_stub_outbox_n = 0;
+char g_stub_ct[512] = {};
+char g_stub_cr[4096] = {};
+bool g_stub_conv = false;
+
+void stub_copy(char* dst, size_t cap, const char* src) {
+    if (!src) src = "";
+    size_t n = std::strlen(src);
+    if (n >= cap) n = cap - 1;
+    std::memcpy(dst, src, n);
+    dst[n] = '\0';
+}
+}  // namespace
+
+void hermes_link_save_outbox(const char* const* texts, int count) {
+    if (count < 0) count = 0;
+    if (count > 4) count = 4;
+    g_stub_outbox_n = count;
+    for (int i = 0; i < count; ++i) stub_copy(g_stub_outbox[i], 512, texts[i]);
+}
+
+int hermes_link_load_outbox(char (*out)[512], int max) {
+    int n = g_stub_outbox_n < max ? g_stub_outbox_n : max;
+    for (int i = 0; i < n; ++i) stub_copy(out[i], 512, g_stub_outbox[i]);
+    return n;
+}
+
+void hermes_link_save_conversation(const char* transcript, const char* reply) {
+    stub_copy(g_stub_ct, sizeof(g_stub_ct), transcript);
+    stub_copy(g_stub_cr, sizeof(g_stub_cr), reply);
+    g_stub_conv = true;
+}
+
+bool hermes_link_load_conversation(char* t, size_t tcap, char* r, size_t rcap) {
+    if (!g_stub_conv) return false;
+    stub_copy(t, tcap, g_stub_ct);
+    stub_copy(r, rcap, g_stub_cr);
+    return true;
+}
+
+void hermes_link_clear_conversation() {
+    g_stub_conv = false;
+    g_stub_ct[0] = '\0';
+    g_stub_cr[0] = '\0';
+}
 void hermes_link_fill_random(uint8_t* out, size_t len) {
     for (size_t i = 0; i < len; ++i) {
         g_rand_state = g_rand_state * 1103515245u + 12345u;

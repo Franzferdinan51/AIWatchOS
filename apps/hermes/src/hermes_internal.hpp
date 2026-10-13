@@ -13,6 +13,17 @@ bool hermes_link_send_text(const char* json, size_t len);
 bool hermes_link_send_binary(const uint8_t* data, size_t len);
 bool hermes_link_load_key(uint8_t key[32]);   // false when no stored key
 void hermes_link_store_key(const uint8_t key[32]);
+void hermes_link_erase_key();   // forget the stored identity (key reset)
+// Buddy-harvest persistence: the offline outbox ring and the last
+// conversation pair, stored in the same NVS namespace as the key.
+void hermes_link_save_outbox(const char* const* texts, int count);
+int hermes_link_load_outbox(char (*out)[512], int max);   // returns count
+void hermes_link_save_conversation(const char* transcript, const char* reply);
+bool hermes_link_load_conversation(char* t, size_t tcap, char* r, size_t rcap);
+void hermes_link_clear_conversation();
+// Cut the current reconnect backoff short (buddy's wakeup channel):
+// foregrounding the app or queueing a text pokes the pump loop.
+void hermes_link_wake_reconnect();
 void hermes_link_fill_random(uint8_t* out, size_t len);
 bool hermes_link_ota_begin(uint32_t size);
 bool hermes_link_ota_write(const uint8_t* data, size_t len);
@@ -34,7 +45,7 @@ void hermes_core_pump();                    // client.tick + housekeeping
 bool hermes_core_wants_reconnect();
 bool hermes_core_talk_active();
 void hermes_core_talk_feed(const int16_t* pcm, size_t frames);
-void hermes_core_set_battery(int pct);
+void hermes_core_set_battery(int pct, int charging);   // charging: -1/0/1
 bool hermes_core_ota_reboot_pending();
 void hermes_core_ota_reboot_consumed();
 
