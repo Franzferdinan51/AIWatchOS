@@ -1,5 +1,15 @@
 # Spoken replies (TTS) — investigation, 2026-10-13
 
+> **Status update (2026-10-13, later): IMPLEMENTED.** The port this
+> investigation specified was built the same day on the `tts-port`
+> branch, provider-agnostic as recommended here: an OpenAI-shaped
+> speech endpoint configured through the aiwnet Kconfig/NVS seam
+> (base URL default `https://openrouter.ai/api`, key default EMPTY =
+> spoken replies off). The implemented design — flow, config,
+> chunking policy, failure semantics, size gate — lives in
+> `docs/tts.md`. The investigation below stands as the trace and
+> rationale.
+
 **Question:** Hatch replies arrive as text. Can the watch speak them, the way
 muse-gadget-206 supposedly does — using only the credentials the watch
 already has (the Hatch device/VM token)?

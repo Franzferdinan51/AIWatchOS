@@ -130,7 +130,11 @@ SKIPPED without them. Run it from the repo root.
   null temperature (NWS stations lag) counts as a failed fetch, never
   as invented weather.
 - No on-watch settings UI for network credentials yet (Kconfig/NVS only).
-- Spoken replies are not wired: host replies are text; the MP3 path awaits a TTS source.
+- Muse spoken replies are wired but opt-in: with a TTS API key in
+  the aiwnet config, replies are spoken via any OpenAI-shaped speech
+  endpoint (default base `https://openrouter.ai/api`) through the MP3
+  path; with no key (the default) replies stay text. See
+  `docs/tts.md`. (Hermes spoken replies are the hub's own feature.)
 - The Muse Gloss redesign (`docs/ui/DESIGN_TOKENS.md` +
   `docs/ui/IMPLEMENTATION_PLAN.md`) has landed on the `ui-gloss`
   branch: renderer primitives (rounded rect / gradient / alpha),
