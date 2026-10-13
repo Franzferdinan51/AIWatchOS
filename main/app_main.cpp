@@ -19,6 +19,7 @@
 
 #ifdef __ESPRESSIF_IDF__
 #include "aiwatchos_net/net.hpp"
+#include "aiwatchos_weather/weather_service.hpp"
 #endif
 
 #ifdef __ESPRESSIF_IDF__
@@ -101,6 +102,11 @@ extern "C" void app_main(void) {
     // Fails soft: with no credentials configured this leaves the watch in
     // today's offline outbox mode, untouched.
     aiwatchos_net::net_start();
+
+    // --- 3c. Weather: Open-Meteo fetch task; publishes real readings
+    // into the weather app via its provider seam. Fails soft the same
+    // way: unconfigured WiFi leaves the app in its NO DATA YET state.
+    aiwatchos_weather::weather_service_start();
 #endif
 
     // --- 4. Main event loop (replaces Arduino's loop()) ---

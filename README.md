@@ -105,7 +105,10 @@ SKIPPED without them. Run it from the repo root.
 ## Status / known limitations
 
 - Hermes watch app is a placeholder (see above); protocol-v1 client in progress.
-- Weather shows placeholder data until its network fetch lands.
+- Weather fetches REAL current conditions from Open-Meteo (no API key)
+  via components/aiwatchos_weather: Kconfig location (default Huber
+  Heights, Ohio), 30-minute refresh, honest NO DATA YET / OFFLINE /
+  STALE states — placeholder data is gone.
 - No on-watch settings UI for network credentials yet (Kconfig/NVS only).
 - Spoken replies are not wired: host replies are text; the MP3 path awaits a TTS source.
 - UI quality gaps (typography, launcher labels, flush cost) are catalogued in
