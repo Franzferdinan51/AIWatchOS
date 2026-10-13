@@ -818,11 +818,32 @@ size_t muse_play_reply(const uint8_t* mp3, size_t len) {
 
     mp3dec_t dec;
     mp3dec_init(&dec);
-    static int16_t frame[MINIMP3_MAX_SAMPLES_PER_FRAME];
+    // Decode + resample staging: PSRAM, allocated per call (M10 note).
+    // These were function-local statics in the vendored player; while
+    // the player had no caller the linker discarded them, but wiring
+    // it up (M10) would have cost 6,912 B of static DIRAM. Both are
+    // >4 KB-class buffers, so they follow the PSRAM rule instead —
+    // speech is rare and long, the access pattern is sequential, and
+    // allocation failure just skips the spoken reply (fail-closed).
+#ifdef __ESPRESSIF_IDF__
+    int16_t* frame = static_cast<int16_t*>(heap_caps_malloc(
+        sizeof(int16_t) * MINIMP3_MAX_SAMPLES_PER_FRAME, MALLOC_CAP_SPIRAM));
+    int16_t* out = static_cast<int16_t*>(
+        heap_caps_malloc(sizeof(int16_t) * 1152, MALLOC_CAP_SPIRAM));
+#else
+    int16_t* frame = static_cast<int16_t*>(
+        malloc(sizeof(int16_t) * MINIMP3_MAX_SAMPLES_PER_FRAME));
+    int16_t* out = static_cast<int16_t*>(malloc(sizeof(int16_t) * 1152));
+#endif
+    if (!frame || !out) {
+        free(frame);
+        free(out);
+        g_hal->audio_stop_playback();
+        return 0;
+    }
     size_t offset = 0, played = 0;
     // 16 kHz mono output staging: resample each decoded frame, then stream.
     // 1152-sample frames at up to 48 kHz shrink to <= 384 output frames.
-    static int16_t out[1152];
     while (offset < len) {
         if (g_speech_stop.load()) break;   // M10 barge-in
         mp3dec_frame_info_t info = {};
@@ -859,6 +880,8 @@ size_t muse_play_reply(const uint8_t* mp3, size_t len) {
         g_hal->audio_write(out, out_n > 1152 ? 1152 : out_n);
         played += static_cast<size_t>(out_n > 1152 ? 1152 : out_n);
     }
+    free(frame);
+    free(out);
     g_hal->audio_stop_playback();
     return played;
 }
