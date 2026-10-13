@@ -26,7 +26,18 @@ Hal& hal() {
 // The PCF85063 is an I2C RTC that keeps wall-clock time even when the ESP32 sleeps.
 // In production this reads seconds/timestamp registers; for testing we track a simple
 // millisecond counter that can be advanced via board_advance_test_time_ms().
-static uint64_t g_now_ms = 1700000000099ULL;   // epoch-like base (Nov 2023) to produce realistic H:M
+//
+// Base epoch: the firmware BUILD time (seconds since epoch at compile time,
+// injected by CMake as AIWATCHOS_BUILD_EPOCH_MS), so a freshly flashed watch
+// shows approximately the correct time of day, still + uptime. Reading the
+// PCF85063 RTC (or SNTP sync once networking lands) remains future work and
+// will replace this base. Host test builds have no CMake definition and keep
+// the old fixed base.
+#ifdef AIWATCHOS_BUILD_EPOCH_MS
+static uint64_t g_now_ms = AIWATCHOS_BUILD_EPOCH_MS;
+#else
+static uint64_t g_now_ms = 1700000000099ULL;   // fixed base for host tests
+#endif
 
 Board::Board() = default;
 
@@ -190,7 +201,8 @@ PowerStatus Board::read_power() {
 }
 
 // --- Time (PCF85063 RTC via I2C once its driver lands; until then the
-// ESP32's microsecond timer advances the clock from the fixed base) ---
+// ESP32's microsecond timer advances the clock from the build-time base —
+// see g_now_ms above) ---
 uint64_t Board::now_ms() {
 #ifdef __ESPRESSIF_IDF__
     return g_now_ms + static_cast<uint64_t>(esp_timer_get_time() / 1000);

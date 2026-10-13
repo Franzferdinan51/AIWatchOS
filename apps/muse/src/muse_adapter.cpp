@@ -243,15 +243,12 @@ void muse_render(aiwatchos::Framebuffer& fb) {
     } else if (g_state.turn_bytes > 0) {
         prompt = "READY";
     }
-    int text_x = (aiwatchos::kDisplayWidth - static_cast<int>(strlen(prompt)) * 8) / 2;
+    int text_x = (aiwatchos::kDisplayWidth -
+                  aiwatchos::Framebuffer::text_width(prompt)) / 2;
+    int text_y = aiwatchos::kDisplayHeight / 2 - 30;
 
-    // Simple bitmap-style text rendering: draw each character as an 8x16 block.
-    for (size_t i = 0; prompt[i]; ++i) {
-        int cx = text_x + static_cast<int>(i) * 9;
-        int cy = aiwatchos::kDisplayHeight / 2 - 30;
-        // Draw a placeholder rectangle for each character.
-        fb.fill_rect(cx, cy, cx + 7, cy + 15, kPromptText);
-    }
+    // Phase prompt in the shared 5x7 font (scale 2 -> 10x14 px glyphs).
+    fb.draw_text(text_x, text_y, prompt, kPromptText);
 
     // Live level meter: 24 bars across the lower half, heights from the
     // smoothed mic RMS (flat while idle). Companion live-screen equivalent.

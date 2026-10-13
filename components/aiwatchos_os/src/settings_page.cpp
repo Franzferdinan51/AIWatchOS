@@ -44,16 +44,12 @@ void SettingsPage::render(Framebuffer& fb) {
         uint16_t bg = selected ? kSelectedCol : kItemColor;
         fb.fill_rect(8, y_top, kDisplayWidth - 16, y_top + item_h - 8, bg);
 
-        // Draw a simple text label as a row of pixels (placeholder for bitmap font).
+        // Item label, drawn with the shared 5x7 font (scale 2 -> 10x14 glyphs).
         const char* label = kMenuItems[i];
         int label_x = 24;
-        int label_y = y_top + item_h / 2 - 8;
+        int label_y = y_top + item_h / 2 - 7;
 
-        // Render each character as an 8x16 block (simplified — real impl uses font5x7).
-        for (size_t c = 0; label[c]; ++c) {
-            int cx = label_x + static_cast<int>(c) * 9;
-            fb.fill_rect(cx, label_y, cx + 7, label_y + 15, kTextColor);
-        }
+        fb.draw_text(label_x, label_y, label, kTextColor);
 
         // Draw the current value on the right side.
         const char* value_str = nullptr;
@@ -83,11 +79,10 @@ void SettingsPage::render(Framebuffer& fb) {
         }
 
         if (value_str) {
-            int val_x = kDisplayWidth - 80;
-            for (size_t c = 0; value_str[c]; ++c) {
-                int cx = val_x + static_cast<int>(c) * 9;
-                fb.fill_rect(cx, label_y, cx + 7, label_y + 15, kMutedColor);
-            }
+            // Right-align the value, ending 24 px from the right edge (clear of
+            // the scroll-indicator dots at the very edge).
+            int val_x = kDisplayWidth - 24 - Framebuffer::text_width(value_str);
+            fb.draw_text(val_x, label_y, value_str, kMutedColor);
         }
     }
 
