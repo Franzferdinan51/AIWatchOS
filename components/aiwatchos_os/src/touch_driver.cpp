@@ -14,6 +14,7 @@
 #include "driver/i2c_master.h"
 #include "esp_check.h"
 #include "esp_lcd_panel_io.h"
+#include "esp_timer.h"
 #include "esp_lcd_touch_ft5x06.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
@@ -39,6 +40,23 @@ static const char* kTouchTag = "ft3168";
 static esp_lcd_touch_handle_t s_touch = nullptr;
 static esp_lcd_panel_io_handle_t s_touch_io = nullptr;
 static i2c_master_bus_handle_t s_touch_bus = nullptr;
+
+// Stage-3 bench stats for the production read path (see hal.hpp).
+static AiwTouchStats s_tp_stats;
+esp_lcd_panel_io_handle_t aiwatchos_touch_panel_io() { return s_touch_io; }
+AiwTouchStats aiwatchos_touch_stats() { return s_tp_stats; }
+static void tp_note_ok() { ++s_tp_stats.ok; }
+static void tp_note_fail(esp_err_t err) {
+    ++s_tp_stats.fail;
+    s_tp_stats.last_err = err;
+    if (s_tp_stats.first_fail_ms < 0) {
+        s_tp_stats.first_fail_ms = esp_timer_get_time() / 1000;
+        ESP_LOGE(kTouchTag,
+                 "first read_data failure: err=%s task=%s at %lld ms",
+                 esp_err_to_name(err), pcTaskGetName(nullptr),
+                 (long long)s_tp_stats.first_fail_ms);
+    }
+}
 
 // Shared I2C bus for PMU/codec clients (declared in hal.hpp). Null until
 // ft3168_init() has created it.
@@ -160,7 +178,25 @@ int ft3168_read(int* out_xs, int* out_ys, int max_points) {
     // HermesGadget did the same migration (firmware/esp32/main/
     // port_touch.cpp).
     if (!s_touch) return 0;
-    if (esp_lcd_touch_read_data(s_touch) != ESP_OK) return 0;
+    esp_err_t rd_err = esp_lcd_touch_read_data(s_touch);
+    if (rd_err == ESP_OK) tp_note_ok();
+    if (rd_err != ESP_OK) {
+        // Monitor-mode wake retry. The ft5x06 driver's init programs
+        // FT5x06_ID_G_TIME_ENTER_MONITOR = 2 (seconds): the FT3168 drops
+        // into Monitor shortly after the last bus activity, and a cold
+        // access against a monitoring FocalTech part can NACK (the
+        // first-boot log: init writes at ~2.9 s all ACKed, every read
+        // from 16.5 s on NACKed). HermesGadget polls every 20 ms so its
+        // chip never idles; this OS polls on its frame cadence, which
+        // can be seconds apart. One short-delay retry absorbs the wake.
+        vTaskDelay(pdMS_TO_TICKS(5));
+        rd_err = esp_lcd_touch_read_data(s_touch);
+        if (rd_err != ESP_OK) {
+            tp_note_fail(rd_err);
+            return 0;
+        }
+        tp_note_ok();
+    }
 
     esp_lcd_touch_point_data_t points[2] = {};
     uint8_t point_num = 0;
@@ -237,7 +273,15 @@ esp_err_t ft3168_init(void) {
     tp_io_cfg.lcd_cmd_bits = 8;
     tp_io_cfg.lcd_param_bits = 8;
     tp_io_cfg.flags.disable_control_phase = 1;
-    tp_io_cfg.scl_speed_hz = 400000;
+    // 100 kHz, matching HermesGadget's proven FT5x06 bring-up for this
+    // board (firmware/esp32/main/port_touch.cpp sets scl_speed_hz =
+    // 100000; it is also the ESP_LCD_TOUCH_IO_I2C_FT5x06_CONFIG()
+    // default). The 400 kHz this file used previously is the prime
+    // suspect for the first-boot NACK storm: every
+    // esp_lcd_touch_ft5x06_read_data failed with an I2C read error
+    // while slower devices on the same bus (AXP2101, ES8311) answered
+    // fine (boot log 2026-10-13, reads at 16.5 s + 13.52 s cadence).
+    tp_io_cfg.scl_speed_hz = 100000;
     tp_io_cfg.transaction_timeout_ms = -1;
     ESP_RETURN_ON_ERROR(esp_lcd_new_panel_io_i2c(s_touch_bus, &tp_io_cfg, &s_touch_io),
                         kTouchTag, "touch IO");
@@ -245,8 +289,13 @@ esp_err_t ft3168_init(void) {
     esp_lcd_touch_config_t tp_cfg = {};
     tp_cfg.x_max = kDisplayWidth;
     tp_cfg.y_max = kDisplayHeight;
-    tp_cfg.rst_gpio_num = static_cast<gpio_num_t>(kTouchRst);
-    tp_cfg.int_gpio_num = static_cast<gpio_num_t>(kTouchInt);
+    // NC for both, exactly as HermesGadget's port_touch.cpp configures
+    // the same driver for this board: reset is the manual pulse above,
+    // input is polled (no ISR consumer). Handing the pins to the driver
+    // makes IT reset the chip a second time and arms a GPIO interrupt
+    // nobody services.
+    tp_cfg.rst_gpio_num = GPIO_NUM_NC;
+    tp_cfg.int_gpio_num = GPIO_NUM_NC;
     tp_cfg.levels.reset = 0;
     tp_cfg.levels.interrupt = 0;
     tp_cfg.flags.swap_xy = 0;
@@ -254,6 +303,10 @@ esp_err_t ft3168_init(void) {
     tp_cfg.flags.mirror_y = 0;
     ESP_RETURN_ON_ERROR(esp_lcd_touch_new_i2c_ft5x06(s_touch_io, &tp_cfg, &s_touch),
                         kTouchTag, "FT3168 touch");
+    // STAGE-3 DIAGNOSTIC (temporary): verbose I2C master logging so the
+    // mechanism of the first failing transaction (NCK vs hw/sw timeout)
+    // is visible in the boot capture. Remove when the fix lands.
+    esp_log_level_set("i2c_master", ESP_LOG_DEBUG);
     return ESP_OK;
 }
 

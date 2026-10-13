@@ -1,13 +1,26 @@
 // Baked-asset loading + AA text/icon rendering — see font.hpp.
+#include "aiwatchos/hal.hpp"   // FIRST: carries the ESP_PLATFORM -> __ESPRESSIF_IDF__ mapping
 #include "aiwatchos/font.hpp"
 
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 
+// Tripwire: without the hal.hpp mapping above, an ESP-IDF build of this
+// TU silently selects the host branch — no FAT mount, no log lines, and
+// fopen("assets/...") failing on device (the 2026-10-13 first-boot bug:
+// the watch rendered fallback text while every log claimed nothing).
+#if defined(ESP_PLATFORM) && !defined(__ESPRESSIF_IDF__)
+#error "font.cpp: ESP-IDF build without __ESPRESSIF_IDF__ — hal.hpp must be included first"
+#endif
+
 #ifdef __ESPRESSIF_IDF__
+#include "esp_err.h"
 #include "esp_heap_caps.h"
+#include "esp_log.h"
 #include "esp_vfs_fat.h"
+
+static const char* kFontTag = "aiw-font";
 #endif
 
 namespace aiwatchos {
@@ -222,8 +235,18 @@ bool assets_load() {
         .max_files = 2,
         .allocation_unit_size = 4096,
     };
-    esp_vfs_fat_spiflash_mount_ro("/assets", "aiwatchos_assets",
-                                  &mount_config);
+    const esp_err_t mount_err = esp_vfs_fat_spiflash_mount_ro(
+        "/assets", "aiwatchos_assets", &mount_config);
+    // This result used to be discarded, which is why the first-boot
+    // log (2026-10-13) contained ZERO font/FAT lines while the watch
+    // rendered fallback blocks: nobody could tell mount failure from
+    // missing files from parse failure. Log all three stages now.
+    if (mount_err == ESP_OK) {
+        ESP_LOGI(kFontTag, "assets partition mounted at /assets");
+    } else {
+        ESP_LOGW(kFontTag, "assets mount FAILED: %s",
+                 esp_err_to_name(mount_err));
+    }
     const char* prefix = "/assets/";
 #else
     const char* prefix = "assets/";
@@ -232,6 +255,7 @@ bool assets_load() {
     }
 #endif
     bool all = true;
+    int faces_ok = 0;
     for (int i = 0; i < kFaceCount; ++i) {
         char path[96];
 #ifdef __ESPRESSIF_IDF__
@@ -248,6 +272,12 @@ bool assets_load() {
         uint8_t* buf = read_whole_file(path, &size);
         if (!buf || !parse_font(buf, size, g_fonts[i])) {
             all = false;   // face stays unavailable; others may still load
+#ifdef __ESPRESSIF_IDF__
+            ESP_LOGW(kFontTag, "font face unavailable: %s (%s)", path,
+                     buf ? "bad AIF1 image" : "open failed");
+#endif
+        } else {
+            ++faces_ok;
         }
     }
     {
@@ -266,6 +296,10 @@ bool assets_load() {
         uint8_t* buf = read_whole_file(path, &size);
         if (buf) g_sprites_ok = parse_sprites(buf, size);
     }
+#ifdef __ESPRESSIF_IDF__
+    ESP_LOGI(kFontTag, "assets load: %d/%d faces, sprites %s",
+             faces_ok, kFaceCount, g_sprites_ok ? "ok" : "FAIL");
+#endif
     g_ready = all;
     return g_ready;
 }

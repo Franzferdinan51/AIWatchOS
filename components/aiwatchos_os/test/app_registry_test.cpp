@@ -26,7 +26,8 @@
 #include "aiwatchos/battery_display.hpp"   // for status-bar time rendering verification
 #include "aiwatchos/notifications.hpp"   // for notification wrap verification
 #include "aiwatchos/color_test.hpp"      // for colour-test pattern verification
-#include "aiwatchos/touch_synth.hpp"     // for Press/Move/Release synthesis verification
+#include "aiwatchos/touch_synth.hpp"
+#include "aiwatchos/boot_escape.hpp"   // for BOOT-hold escape verification     // for Press/Move/Release synthesis verification
 #include "aiwatchos/band_flush.hpp"      // for dirty-band flush verification
 #include "aiwatchos/font.hpp"            // for AA text/icon rendering verification
 #include "aiwatchos_hermes.hpp"   // for device-health dashboard verification
@@ -457,9 +458,10 @@ static void test_status_bar_time() {
     status.render(fb, "12:34");
 
     // Time ink: full-coverage glyph pixels in `text` (0xF77F) in the
-    // left of the 44px status zone (Muse Gloss section 8 geometry).
+    // left of the status zone (Muse Gloss section 8 geometry; the zone
+    // now starts at kStatusZoneTop, the glass safe-area inset).
     bool found_clock_pixel = false;
-    for (int y = 0; y < aiwatchos::kStatusZoneH && !found_clock_pixel; ++y) {
+    for (int y = 0; y < aiwatchos::kStatusZoneBottom && !found_clock_pixel; ++y) {
         for (int x = 0; x < aiwatchos::kDisplayWidth / 2; ++x) {
             if (buf[y * aiwatchos::kDisplayWidth + x] == aiwatchos::colors::kText) {
                 found_clock_pixel = true;
@@ -469,10 +471,12 @@ static void test_status_bar_time() {
     }
     assert(found_clock_pixel);   // time glyphs were actually drawn
 
-    // Battery cluster: 25x12 outline in `dim` at the right (ox=363,
-    // oy=16); TestHal reports 85% not charging, so the fill is `text`.
-    const int ox = aiwatchos::kDisplayWidth - 20 - 2 - 25;
-    const int oy = (aiwatchos::kStatusZoneH - 12) / 2;
+    // Battery cluster: 25x12 outline in `dim` at the right (ox=353,
+    // oy = kStatusZoneTop + 16); TestHal reports 85% not charging, so
+    // the fill is `text`.
+    const int ox =
+        aiwatchos::kDisplayWidth - aiwatchos::kSafeCornerEnd - 2 - 25;
+    const int oy = aiwatchos::kStatusZoneTop + (aiwatchos::kStatusZoneH - 12) / 2;
     assert(buf[oy * aiwatchos::kDisplayWidth + (ox + 12)] == aiwatchos::colors::kDim);
     assert(buf[(oy + 6) * aiwatchos::kDisplayWidth + (ox + 5)] == aiwatchos::colors::kText);
 
@@ -952,22 +956,22 @@ static void test_notification_wrap() {
                 if (buf[y * aiwatchos::kDisplayWidth + x] == c) ++n;
         return n;
     };
-    // Card geometry: card0 (newest, "Second") y=56 h=86; card1 ("First")
-    // y=154. Body text is Caption `dim` (0x8C35), titles BodySB kText.
+    // Card geometry: card0 (newest, "Second") y=74 h=86; card1 ("First")
+    // y=172. Body text is Caption `dim` (0x8C35), titles BodySB kText.
     // Second card's first body line ("aaa...") is long.
-    assert(count_color(0x8C35, 84, 380, 92, 110) > 200);
+    assert(count_color(0x8C35, 84, 380, 110, 128) > 200);
     // ...and its second line ("bbb...") renders too.
-    assert(count_color(0x8C35, 84, 380, 112, 130) > 200);
+    assert(count_color(0x8C35, 84, 380, 130, 148) > 200);
     // The OLDER notification renders below as its own card (it used to
     // be unreachable): bubble interior + title ink.
-    assert(count_color(0x118B, 24, 60, 190, 240) > 50);
-    assert(count_color(0xF77F, 84, 300, 164, 186) > 20);
+    assert(count_color(0x118B, 24, 60, 208, 258) > 50);
+    assert(count_color(0xF77F, 84, 300, 182, 204) > 20);
     // First card's line 1 packs MANY words: long dim run.
-    assert(count_color(0x8C35, 84, 380, 190, 208) > 200);
+    assert(count_color(0x8C35, 84, 380, 208, 226) > 200);
     // Receipt time in Micro `faint` at the card's top right.
-    assert(count_color(0x398B, 300, 378, 66, 84) > 10);
+    assert(count_color(0x398B, 300, 378, 84, 102) > 10);
     // Collapsed: no third body line for "First" yet (its card is 86px).
-    assert(count_color(0x8C35, 84, 380, 230, 248) == 0);
+    assert(count_color(0x8C35, 84, 380, 248, 266) == 0);
 
     // Tap "First" -> expands to its full 3 lines.
     aiwatchos::TouchEvent p1{200, 200, aiwatchos::TouchEvent::Press};
@@ -976,12 +980,12 @@ static void test_notification_wrap() {
     assert(mgr.on_touch(r1) == true);
     fb.fill(0x0000);
     mgr.render(fb);
-    assert(count_color(0x8C35, 84, 380, 230, 248) > 50);
+    assert(count_color(0x8C35, 84, 380, 248, 266) > 50);
 
     // Swipe right on the top card dismisses it.
-    aiwatchos::TouchEvent p2{100, 80, aiwatchos::TouchEvent::Press};
-    aiwatchos::TouchEvent m2{210, 80, aiwatchos::TouchEvent::Move};
-    aiwatchos::TouchEvent r2{210, 80, aiwatchos::TouchEvent::Release};
+    aiwatchos::TouchEvent p2{100, 100, aiwatchos::TouchEvent::Press};
+    aiwatchos::TouchEvent m2{210, 100, aiwatchos::TouchEvent::Move};
+    aiwatchos::TouchEvent r2{210, 100, aiwatchos::TouchEvent::Release};
     assert(mgr.on_touch(p2) == true);
     assert(mgr.on_touch(m2) == true);
     assert(mgr.on_touch(r2) == true);
@@ -1089,12 +1093,12 @@ static void test_hermes_vitals() {
     fb.fill(0x0000);
     app.render(fb);
     // Fill carries the state colour now: charging = kOk green.
-    assert(buf[129 * aiwatchos::kDisplayWidth + 150] == 0x6F97);   // deep fill
+    assert(buf[159 * aiwatchos::kDisplayWidth + 150] == 0x6F97);   // deep fill
     // The white charging square is deleted; the percent readout (Body,
     // warm white 0xEF7E) sits right of the bar instead.
     {
         int pct_ink = 0;
-        for (int y = 118; y <= 142; ++y) {
+        for (int y = 148; y <= 172; ++y) {
             for (int x = 226; x <= 300; ++x) {
                 if (buf[y * aiwatchos::kDisplayWidth + x] == 0xEF7E) ++pct_ink;
             }
@@ -1104,8 +1108,8 @@ static void test_hermes_vitals() {
     hal.set_power(true, 0, false);
     fb.fill(0x0000);
     app.render(fb);
-    assert(buf[129 * aiwatchos::kDisplayWidth + 150] == 0x18E5);   // empty bar surface
-    assert(buf[129 * aiwatchos::kDisplayWidth + 230] != 0xFFFF);  // no marker
+    assert(buf[159 * aiwatchos::kDisplayWidth + 150] == 0x18E5);   // empty bar surface
+    assert(buf[159 * aiwatchos::kDisplayWidth + 230] != 0xFFFF);  // no marker
 
     printf("test_hermes_vitals: PASSED\n");
 }
@@ -2145,8 +2149,8 @@ static void test_notifications_actionable() {
         mgr.on_touch(press);
         mgr.on_touch(release);
     };
-    // Newest ("Plain") renders on top (y=56, one body line); the
-    // prompt card follows at y~131. Tapping it fires the action with
+    // Newest ("Plain") renders on top (y=74, one body line); the
+    // prompt card follows at y~149. Tapping it fires the action with
     // the producing app id.
     g_action_fires = 0;
     tap(200, 160);
@@ -2161,7 +2165,7 @@ static void test_notifications_actionable() {
     fb.fill(0x0000);
     mgr.render(fb);
     int danger = 0;
-    for (int y = 150; y <= 170; ++y)
+    for (int y = 168; y <= 188; ++y)
         for (int x = 320; x <= 380; ++x)
             if (buf[y * aiwatchos::kDisplayWidth + x] == 0xFAEB) ++danger;
     assert(danger > 3);
@@ -2506,9 +2510,95 @@ static void test_hermes_reply_notify() {
     printf("test_hermes_reply_notify: PASSED\n");
 }
 
+
+// --- BOOT-hold shell escape (stage-2 trap fix) ---
+// The detector is a pure state machine like DisplayPower; the wiring
+// case below scripts the exact app_main seam: a capture-mode app in
+// the foreground, BOOT held, and at the firing frame the shell
+// switches to the launcher and masks the bit for the rest of the hold.
+static void test_boot_escape() {
+    using aiwatchos::BootEscape;
+
+    // Short press (500 ms): never fires, never latches.
+    {
+        BootEscape esc;
+        assert(!esc.update(true, 1000));
+        assert(!esc.update(true, 1400));
+        assert(!esc.latched());
+        assert(!esc.update(false, 1500));
+        assert(!esc.latched());
+    }
+    // Hold: fires exactly once, on the frame that crosses 3000 ms;
+    // release clears the latch and a fresh hold fires again. The
+    // threshold sits ABOVE the in-app BOOT holds (Hermes fires its
+    // session.new / key reset at 2000 ms, in the foreground tick):
+    // a 2500 ms app-length hold passes with the escape silent and
+    // unlatched, so the app action always completes first.
+    {
+        BootEscape esc;
+        assert(!esc.update(true, 2000));
+        assert(!esc.update(true, 4499));   // 2499 ms in: app fired, escape silent
+        assert(!esc.update(false, 4500));  // released at 2500 ms: nothing pending
+        assert(!esc.latched());
+        assert(!esc.update(true, 5000));
+        assert(!esc.update(true, 7999));   // 2999 ms in: not yet
+        assert(esc.update(true, 8000));    // 3000 ms in: fires
+        assert(esc.latched());
+        assert(!esc.update(true, 8100));   // still held: no second fire
+        assert(esc.latched());
+        assert(!esc.update(false, 8200));
+        assert(!esc.latched());
+        assert(!esc.update(true, 9000));
+        assert(esc.update(true, 12000));   // second hold fires too
+    }
+    // Bounce resets the timer: a broken hold never accumulates.
+    {
+        BootEscape esc;
+        assert(!esc.update(true, 0));
+        assert(!esc.update(true, 2900));
+        assert(!esc.update(false, 2950));  // released at 2950 ms
+        assert(!esc.update(true, 3000));   // new press starts over
+        assert(!esc.update(true, 5900));   // 2900 ms into the new press
+        assert(esc.update(true, 6000));    // 3000 ms into the new press
+    }
+    // Wiring, exactly as app_main runs it: foreground capture app,
+    // BOOT scripted down at the 40 ms frame cadence for 3.4 s.
+    {
+        aiwatchos::TestHal hal;
+        aiwatchos::AppManager mgr(hal);
+        aiwatchos::App capture_app = aiwatchos::make_app("muse");
+        aiwatchos::App launcher_app = aiwatchos::make_app("launcher");
+        assert(mgr.register_app(&capture_app, true));
+        assert(mgr.register_app(&launcher_app));
+        assert(std::string(mgr.current_app_id()) == "muse");
+        BootEscape esc;
+        uint64_t t = 10000;
+        bool saw_fire = false;
+        for (int frame = 0; frame < 85; ++frame) {
+            uint32_t buttons = 0x01u;      // BOOT held the whole time
+            if (esc.update((buttons & 0x01u) != 0, t)) {
+                mgr.switch_to("launcher");
+                saw_fire = true;
+            }
+            if (esc.latched()) buttons &= ~0x01u;   // swallowed
+            if (frame < 75) {   // 75 frames * 40 ms = 3000 ms: fire is frame 75; frames 50..74 are past the 2000 ms in-app threshold with the escape still silent, so an app hold fires first
+                assert(std::string(mgr.current_app_id()) == "muse");
+                assert(buttons == 0x01u);          // not yet swallowed
+            } else {
+                assert(std::string(mgr.current_app_id()) == "launcher");
+                assert(buttons == 0x00u);          // swallowed after firing
+            }
+            t += 40;
+        }
+        assert(saw_fire);
+    }
+    printf("test_boot_escape: PASSED\n");
+}
+
 int main() {
     test_aa_text();                      // baked Inter AA renderer against real assets
-    test_touch_synth();                  // Press/Move/Release from the point stream
+    test_touch_synth();
+    test_boot_escape();                  // shell BOOT-hold escape: >= 3 s hold -> launcher, press swallowed
     test_band_flush();                   // dirty-band hash change detection
     test_color_test_pattern();           // pure bands + accents for the byte-order check
     test_gloss_color_math();             // Muse Gloss token/blend/gradient math

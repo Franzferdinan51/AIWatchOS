@@ -127,8 +127,9 @@ SKIPPED without them. Run it from the repo root.
   latest-observation chain, Kconfig location (default Huber Heights,
   Ohio), 30-minute refresh, honest NO DATA YET / OFFLINE / FETCH FAILED
   / STALE states — placeholder data is gone. A station that reports a
-  null temperature (NWS stations lag) counts as a failed fetch, never
-  as invented weather.
+  null temperature (NWS stations lag) is not a parse failure: the
+  last-good reading is kept and ages into STALE by the normal rule,
+  never replaced by invented weather.
 - No on-watch settings UI for network credentials yet (Kconfig/NVS only).
 - Spoken replies are not wired: host replies are text; the MP3 path awaits a TTS source.
 - The Muse Gloss redesign (`docs/ui/DESIGN_TOKENS.md` +

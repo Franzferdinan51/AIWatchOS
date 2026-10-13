@@ -1,0 +1,14 @@
+MDB_I2C_BEGIN
+scan: 18 34 38 40 51 6b
+touch txrx reg02 t200: err=ESP_OK val=0x00
+touch txrx reg02 t1000: err=ESP_OK val=0x00
+touch split reg02 t200: err=ESP_OK val=0x00
+touch txrx reg02 400k: err=ESP_OK val=0x00
+touch txrx reg00: err=ESP_OK val=0x00
+touch txrx regA3 chipid: err=ESP_OK val=0x64
+touch txrx regA6 fwver: err=ESP_OK val=0x02
+rtc txrx reg02 ctrl: err=ESP_OK val=0x00
+axp txrx reg03 ctrl: err=ESP_OK val=0x4A
+touch wr reg00=00: err=ESP_OK
+touch burst reg02: 10/10 ok
+MDB_I2C_END

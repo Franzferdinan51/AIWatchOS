@@ -22,6 +22,8 @@
 
 #include <cstddef>
 
+#include "aiwatchos/weather_app.hpp"  // WeatherSnapshot
+
 namespace aiwatchos_weather {
 
 // Converts a Celsius temperature to whole Fahrenheit (x9/5+32, rounded
@@ -52,10 +54,23 @@ bool weather_nws_parse_observation(const char* json, float* out_temp_f,
                                    int* out_humidity_pct,
                                    bool* out_has_humidity,
                                    char* out_description,
-                                   size_t desc_cap);
+                                   size_t desc_cap,
+                                   bool* out_lagging);
+// out_lagging (may be nullptr) distinguishes WHY a parse returned
+// false: true means the document IS a valid observation but the
+// station reports temperature.value = null (NWS lag — a real payload
+// shape, captured live from KFFO on 2026-10-13: every measured field
+// null, textDescription populated). Callers should treat that as
+// "no new measurement", not as a corrupt response. When out_lagging
+// is set, out_description still carries the parsed textDescription.
 
 // Starts the fetch task and registers the provider with the OS weather
 // app. Idempotent. Call once from app_main after aiwatchos_net::net_start().
 void weather_service_start();
+
+// The last published snapshot (same data the provider hands the OS
+// weather app) — for diagnostics such as MDB health. False before the
+// service starts.
+bool weather_service_snapshot(aiwatchos::WeatherSnapshot* out);
 
 }  // namespace aiwatchos_weather

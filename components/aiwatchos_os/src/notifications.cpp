@@ -15,7 +15,7 @@ namespace {
 constexpr int kMaxNotifications = 16;   // bounded buffer to limit PSRAM usage
 constexpr int kCardX = 20;
 constexpr int kCardW = 370;
-constexpr int kListY = 56;
+constexpr int kListY = kStatusZoneBottom;
 constexpr int kCardGap = 12;
 constexpr int kBodyX = 64;              // text starts right of the bell chip
 constexpr int kBodyW = 294;             // kCardW - kBodyX - 12
@@ -209,7 +209,7 @@ void NotificationManager::render(Framebuffer& fb) {
         const auto lines =
             wrap_px(n.body, FontFace::kCaption, kBodyW, expanded ? -1 : 2);
         const int h = card_height(static_cast<int>(lines.size()));
-        if (y + h >= kStatusZoneH && y < kDisplayHeight) {
+        if (y + h >= kStatusZoneBottom && y < kDisplayHeight) {
             // Card shadow: the baked card sprite stretched vertically
             // to this card's height (its reference height is 152).
             if (const AlphaSprite* shadow = shadow_card()) {

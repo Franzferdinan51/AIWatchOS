@@ -92,21 +92,41 @@ esp_err_t audio_codecs_init(void) {
     const audio_codec_if_t* spk_codec_if = es8311_codec_new(&es8311_cfg);
     if (!spk_codec_if) return ESP_ERR_NO_MEM;
 
-    audio_codec_i2s_cfg_t spk_i2s = {};
-    spk_i2s.port = I2S_NUM_0;
-    spk_i2s.rx_handle = s_rx;
-    spk_i2s.tx_handle = s_tx;
+    // ONE I2S data interface shared by both devices — the arrangement
+    // in the proven board file (muse-gadget-206
+    // board_waveshare_s3_206.c audio_init). Two separate data_if
+    // instances over the same channel handles fight over enabling them.
+    audio_codec_i2s_cfg_t i2s_cfg = {};
+    i2s_cfg.port = I2S_NUM_0;
+    i2s_cfg.rx_handle = s_rx;
+    i2s_cfg.tx_handle = s_tx;
+    const audio_codec_data_if_t* data_if = audio_codec_new_i2s_data(&i2s_cfg);
+    if (!data_if) return ESP_ERR_NO_MEM;
+
+    // dev_type is mandatory: esp_codec_dev_new (esp_codec_dev 1.6.2,
+    // esp_codec_dev.c) returns NULL when it is ESP_CODEC_DEV_TYPE_NONE,
+    // which is what a zero-initialised config carries. This omission is
+    // why first boot logged "audio init failed" 10 ms after the ES8311
+    // codec_if was created ("Work in Slave mode") — no device was ever
+    // created, let alone opened. gadget-206's audio_init sets
+    // ESP_CODEC_DEV_TYPE_OUT / _IN; do the same.
     esp_codec_dev_cfg_t spk_dev = {};
+    spk_dev.dev_type = ESP_CODEC_DEV_TYPE_OUT;
     spk_dev.codec_if = spk_codec_if;
-    spk_dev.data_if = audio_codec_new_i2s_data(&spk_i2s);
-    if (!spk_dev.data_if) return ESP_ERR_NO_MEM;
+    spk_dev.data_if = data_if;
     s_spk = esp_codec_dev_new(&spk_dev);
-    if (!s_spk) return ESP_ERR_NO_MEM;
+    if (!s_spk) { ESP_LOGE(kAudioTag, "speaker device create failed"); return ESP_FAIL; }
     esp_codec_dev_sample_info_t spk_fs = {};
     spk_fs.sample_rate = kAudioRateHz;
     spk_fs.channel = 2;
     spk_fs.bits_per_sample = 16;
-    if (esp_codec_dev_open(s_spk, &spk_fs)) return ESP_FAIL;
+    {
+        const int rc = esp_codec_dev_open(s_spk, &spk_fs);
+        if (rc != ESP_CODEC_DEV_OK) {
+            ESP_LOGE(kAudioTag, "speaker open failed (codec_dev err %d)", rc);
+            return ESP_FAIL;
+        }
+    }
 
     // ES7210 dual-mic ADC on the shared I2C bus. Same 8-bit convention:
     // 0x80 (== 7-bit 0x40, ES7210_CODEC_DEFAULT_ADDR).
@@ -122,22 +142,26 @@ esp_err_t audio_codecs_init(void) {
     const audio_codec_if_t* mic_codec_if = es7210_codec_new(&es7210_cfg);
     if (!mic_codec_if) return ESP_ERR_NO_MEM;
 
-    audio_codec_i2s_cfg_t mic_i2s = {};
-    mic_i2s.port = I2S_NUM_0;
-    mic_i2s.rx_handle = s_rx;
-    mic_i2s.tx_handle = s_tx;
     esp_codec_dev_cfg_t mic_dev = {};
+    mic_dev.dev_type = ESP_CODEC_DEV_TYPE_IN;
     mic_dev.codec_if = mic_codec_if;
-    mic_dev.data_if = audio_codec_new_i2s_data(&mic_i2s);
-    if (!mic_dev.data_if) return ESP_ERR_NO_MEM;
+    mic_dev.data_if = data_if;   // shared with the speaker (see above)
     s_mic = esp_codec_dev_new(&mic_dev);
-    if (!s_mic) return ESP_ERR_NO_MEM;
+    if (!s_mic) { ESP_LOGE(kAudioTag, "mic device create failed"); return ESP_FAIL; }
     esp_codec_dev_sample_info_t mic_fs = {};
     mic_fs.sample_rate = kAudioRateHz;
     mic_fs.channel = 2;
     mic_fs.bits_per_sample = 16;
-    if (esp_codec_dev_open(s_mic, &mic_fs)) return ESP_FAIL;
+    {
+        const int rc = esp_codec_dev_open(s_mic, &mic_fs);
+        if (rc != ESP_CODEC_DEV_OK) {
+            ESP_LOGE(kAudioTag, "mic open failed (codec_dev err %d)", rc);
+            return ESP_FAIL;
+        }
+    }
     esp_codec_dev_set_in_gain(s_mic, 30.0);   // ES7210 PGA ~30 dB (matches upstream)
+    ESP_LOGI(kAudioTag, "audio ready: ES8311 out + ES7210 in @ %lu Hz",
+             static_cast<unsigned long>(kAudioRateHz));
     return ESP_OK;
 }
 

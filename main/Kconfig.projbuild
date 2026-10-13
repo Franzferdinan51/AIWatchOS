@@ -1,0 +1,16 @@
+menu "AIWatchOS"
+
+config AIWATCHOS_MDB_ENABLE
+    bool "MDB — Muse Developer Bridge (debug console over USB serial)"
+    default y
+    help
+        The Muse Developer Bridge: a line-based debug console on the
+        USB serial port (mdb screenshot / health / logs / touch /
+        panic, plus ADB-style input injection — tap, swipe, press,
+        goto, wake, sleep, reboot). Protocol: docs/mdb.md.
+
+        ON by default for the hardware bring-up builds. Turn OFF for
+        any build that leaves the bench: the console accepts input
+        injection from anything that can open the serial port.
+
+endmenu

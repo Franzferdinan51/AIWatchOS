@@ -71,8 +71,17 @@ void load_once() {
 }
 
 void nvs_set_str(nvs_handle_t h, const char* key, const std::string& v) {
-    if (v.empty()) nvs_erase_key(h, key);
-    else nvs_set_str(h, key, v.c_str());
+    // The :: qualification is load-bearing, not stylistic: this helper's
+    // own name hides the global ESP-IDF ::nvs_set_str for unqualified
+    // lookup inside this namespace, so the unqualified call resolved to
+    // THIS function — unbounded recursion (each level converting
+    // v.c_str() back into a std::string via operator new) until the
+    // stack blew: the 2026-10-13 first-boot Guru Meditation
+    // (LoadProhibited, ~57 s in, when Hermes first-run persistence
+    // called net_save_config). Same for nvs_erase_key. Regression test:
+    // components/aiwatchos_net/test/net_config_test.cpp.
+    if (v.empty()) ::nvs_erase_key(h, key);
+    else ::nvs_set_str(h, key, v.c_str());
 }
 
 }  // namespace

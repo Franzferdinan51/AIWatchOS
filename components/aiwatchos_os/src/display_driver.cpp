@@ -18,6 +18,7 @@
 #include "esp_lcd_panel_ops.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
 #endif
 
@@ -43,6 +44,22 @@ constexpr int kBounceRows = 20;   // rows copied through DMA at a time to limit 
 constexpr int kBounceBytes = kBounceRows * kDisplayWidth * 2;
 static uint16_t* s_bounce_buf = nullptr;
 
+// Transfer-completion signal for the bounce buffer. esp_lcd_panel_io
+// queues color transfers asynchronously: draw_bitmap returns once the
+// chunk is QUEUED, not when the DMA has read the buffer. Without
+// waiting for completion before the next chunk overwrites s_bounce_buf,
+// queued chunks read back a mix of later rows — horizontal banding
+// across anything flushed in more chunks than the queue holds. This is
+// HermesGadget's pattern for the same panel (port_amoled.cpp:
+// on_color_trans_done gives a binary semaphore the flush waits on).
+static SemaphoreHandle_t s_trans_done = nullptr;
+static bool on_color_trans_done(esp_lcd_panel_io_handle_t,
+                                esp_lcd_panel_io_event_data_t*, void*) {
+    BaseType_t woken = pdFALSE;
+    if (s_trans_done) xSemaphoreGiveFromISR(s_trans_done, &woken);
+    return woken == pdTRUE;
+}
+
 // CO5300 init sequence for the 410x502 panel, taken from the upstream
 // board_waveshare_s3_206.c s_lcd_init[] (Waveshare BSP-derived, page
 // selects + QSPI enable + RGB565 + brightness block + address windows).
@@ -52,12 +69,24 @@ static const co5300_lcd_init_cmd_t s_lcd_init[] = {
     { 0x1C, (uint8_t[]){ 0xA0 }, 1, 0 },
     { 0xFE, (uint8_t[]){ 0x00 }, 1, 0 },
     { 0xC4, (uint8_t[]){ 0x80 }, 1, 0 },
-    { 0x3A, (uint8_t[]){ 0x55 }, 1, 0 },
+    // No 0x3A (COLMOD) here on purpose: the esp_lcd_co5300 driver sets
+    // the pixel format itself from bits_per_pixel (16 -> 0x55 RGB565),
+    // and having it in this vendor list too made the driver warn at
+    // every boot ("The 3Ah command has been used and will be
+    // overwritten by external initialization sequence", first-boot log
+    // 2026-10-13) for a value that was identical anyway. Exactly one
+    // owner: the driver. (HermesGadget's raw-command init lists 0x3A
+    // because it has no driver component in the path at all.)
     { 0x35, (uint8_t[]){ 0x00 }, 1, 0 },
     { 0x53, (uint8_t[]){ 0x20 }, 1, 0 },
     { 0x51, (uint8_t[]){ 0xFF }, 1, 0 },
     { 0x63, (uint8_t[]){ 0xFF }, 1, 0 },
-    { 0x2A, (uint8_t[]){ 0x00, 0x00, 0x01, 0x99 }, 4, 0 },
+    // CASET 22..431 (0x16..0x1AF), not 0..409: the visible glass on
+    // this panel starts at GRAM column offset 22 (Waveshare BSP for
+    // the 2.06, waveshare/esp32_s3_touch_amoled_2_06 v2.0.0, whose
+    // init list carries exactly these values; its flush-time twin is
+    // the set_gap(22, 0) in co5300_init below).
+    { 0x2A, (uint8_t[]){ 0x00, 0x16, 0x01, 0xAF }, 4, 0 },
     { 0x2B, (uint8_t[]){ 0x00, 0x00, 0x01, 0xF5 }, 4, 600 },
     { 0x11, nullptr, 0, 600 },
     { 0x29, nullptr, 0, 0 },
@@ -97,7 +126,8 @@ esp_err_t co5300_init(void) {
     io_cfg.spi_mode = 0;
     io_cfg.pclk_hz = 40 * 1000 * 1000;
     io_cfg.trans_queue_depth = 10;
-    io_cfg.on_color_trans_done = nullptr;
+    s_trans_done = xSemaphoreCreateBinary();
+    io_cfg.on_color_trans_done = on_color_trans_done;
     io_cfg.user_ctx = nullptr;
     io_cfg.lcd_cmd_bits = 32;
     io_cfg.lcd_param_bits = 8;
@@ -123,6 +153,34 @@ esp_err_t co5300_init(void) {
     if (!s_bounce_buf) {
         return ESP_ERR_NO_MEM;
     }
+
+    // GRAM clear + the real window offset (see the 0x2A note above).
+    // The set_gap(0, 0) done earlier still applies here, so this clear
+    // can address the full vendor GRAM span 0..431: paint every column
+    // black once, so no power-on GRAM content (the solid green the
+    // panel wakes up with) can survive anywhere — the columns outside
+    // the visible window included. Only then move the window onto the
+    // glass with gap (22, 0); every flush from here on lands at CASET
+    // 22..431 exactly as the vendor BSP drives this panel.
+    {
+        constexpr int kGramCols = 432;   // vendor window: 0..431
+        constexpr int kClearRows = 9;    // 432*9*2 = 7776 B <= bounce
+        memset(s_bounce_buf, 0, kGramCols * kClearRows * 2);
+        for (int y = 0; y < kDisplayHeight; y += kClearRows) {
+            const int rows = (y + kClearRows <= kDisplayHeight)
+                                 ? kClearRows
+                                 : (kDisplayHeight - y);
+            // Partial tail chunk streams only width*rows bytes from
+            // the (all-zero) buffer head — safe.
+            ESP_RETURN_ON_ERROR(
+                esp_lcd_panel_draw_bitmap(s_panel, 0, y, kGramCols,
+                                          y + rows, s_bounce_buf),
+                kTag, "GRAM clear");
+            if (s_trans_done) xSemaphoreTake(s_trans_done, portMAX_DELAY);
+        }
+    }
+    ESP_RETURN_ON_ERROR(esp_lcd_panel_set_gap(s_panel, 22, 0), kTag,
+                        "set gap 22");
     return ESP_OK;
 }
 
@@ -145,18 +203,32 @@ static esp_err_t co5300_flush_rows(uint16_t* fb, uint16_t y0, uint16_t y1) {
     if (!s_panel || !s_bounce_buf || !fb || y0 >= y1 || y1 > kDisplayHeight) {
         return ESP_ERR_INVALID_STATE;
     }
-    for (uint16_t y = y0; y < y1; y += kBounceRows) {
-        uint16_t rows = (y + kBounceRows <= y1) ? kBounceRows : static_cast<uint16_t>(y1 - y);
+    // The CO5300 only accepts windows that start on an even row and
+    // span an even count (HermesGadget port_amoled.cpp says it in as
+    // many words, and widens its flush windows the same way; the
+    // gadget's LVGL port rounds invalidate areas identically). The OS's
+    // 4-band flush splits 502 rows at 0/125/251/376/502 — odd starts,
+    // odd spans — so most band flushes violated the rule, the visible
+    // symptom being lines at band boundaries. Widen to even bounds here
+    // (the HAL is the only place that can guarantee it for every
+    // caller); re-sending an unchanged edge row is harmless.
+    const uint16_t ay0 = static_cast<uint16_t>(y0 & ~1u);
+    uint16_t ay1 = static_cast<uint16_t>((y1 + 1) & ~1u);
+    if (ay1 > kDisplayHeight) ay1 = kDisplayHeight;
+    for (uint16_t y = ay0; y < ay1; y += kBounceRows) {
+        uint16_t rows = (y + kBounceRows <= ay1) ? kBounceRows : static_cast<uint16_t>(ay1 - y);
         const uint16_t* src = &fb[y * kDisplayWidth];
         const int n = rows * kDisplayWidth;
         for (int i = 0; i < n; ++i) {
             const uint16_t px = src[i];
             s_bounce_buf[i] = static_cast<uint16_t>((px >> 8) | (px << 8));
         }
-        // draw_bitmap sets the address window internally; the CO5300 flush is
-        // dispatched per chunk so the bounce buffer can be reused immediately.
+        // draw_bitmap sets the address window internally. Wait for this
+        // chunk's DMA to finish before the loop overwrites the bounce
+        // buffer with the next chunk (see s_trans_done above).
         esp_err_t err = esp_lcd_panel_draw_bitmap(s_panel, 0, y, kDisplayWidth, y + rows, s_bounce_buf);
         if (err != ESP_OK) return err;
+        if (s_trans_done) xSemaphoreTake(s_trans_done, portMAX_DELAY);
     }
     return ESP_OK;
 }

@@ -1,0 +1,7 @@
+MDB_TPOLL_BEGIN
+raw phase1: 10/10 ok
+[0;31mE (320201) lcd_panel.io.i2c: panel_io_i2c_rx_buffer(145): i2c transaction failed[0m
+[0;31mE (320201) FT5x06: esp_lcd_touch_ft5x06_read_data(186): I2C read error![0m
+panel read_touch x30 @100ms: 0 nonzero
+raw phase2: 10/10 ok
+MDB_TPOLL_END

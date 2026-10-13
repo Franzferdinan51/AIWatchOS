@@ -6,6 +6,7 @@
 #include "aiwatchos_muse.hpp"
 #include "muse_captions.hpp"  // companion caption/activity ports (M1/M2/M3)
 #include "muse_pixel.h"       // muse-gadget-206 pixel avatar (M19)
+#include "aiwatchos/battery_display.hpp"   // kSafeBottom
 #include "aiwatchos/colors.hpp"
 #include "aiwatchos/font.hpp"
 #include "minimp3.h"
@@ -729,7 +730,7 @@ void muse_render(aiwatchos::Framebuffer& fb) {
         const int bw = text_w + 24;
         const int bh = n * font_line_height(FontFace::kCaption) + 12;
         const int bx = kCx - bw / 2;
-        const int by = 374;
+        const int by = 366;
         // M5: heard-transcript bubble — one dim line directly above the
         // reply bubble ("You: ..." — what STT heard for this turn).
         if (heard_text[0]) {
@@ -757,14 +758,17 @@ void muse_render(aiwatchos::Framebuffer& fb) {
     }
 
     // PTT disc (touch target unchanged: Press with y > H-100 starts,
-    // Release ends — the shell now delivers real Release events).
+    // Release ends — the shell now delivers real Release events). The
+    // disc's bottom edge anchors to the safe bottom line (stage-4).
     {
+        const int kPttY =
+            aiwatchos::kDisplayHeight - aiwatchos::kSafeBottom - 72;
         BubbleStyle ptt = bubble_style_filled();
-        fb.draw_bubble(kCx - 36, 424, 72, 72, 36, ptt);
+        fb.draw_bubble(kCx - 36, kPttY, 72, 72, 36, ptt);
         if (face_state == aiwatchos::MuseState::kListening) {
-            fb.ring(kCx, 460, 40, 3, accent);
+            fb.ring(kCx, kPttY + 36, 40, 3, accent);
         }
-        draw_icon(fb, kCx - 20, 440, Icon::kMic, FontFace::kIcon40,
+        draw_icon(fb, kCx - 20, kPttY + 16, Icon::kMic, FontFace::kIcon40,
                   colors::kMist);
     }
 }

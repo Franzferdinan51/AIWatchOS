@@ -1,0 +1,351 @@
+MDB_LOGS_BEGIN 28283
+[0;32mI (1400) aiw-mdb: MDB ready — USB-Serial-JTAG transport, 'mdb help'[0m
+[0;32mI (1400) gpio: GPIO[13]| InputEn: 0| OutputEn: 1| OpenDrain: 0| Pullup: 0| Pulldown: 0| Intr:0 [0m
+[0;32mI (1460) co5300: version: 1.0.2[0m
+[0;32mI (1460) gpio: GPIO[8]| InputEn: 0| OutputEn: 1| OpenDrain: 0| Pullup: 0| Pulldown: 0| Intr:0 [0m
+[0;32mI (1460) co5300_spi: LCD panel create success, version: 1.0.2[0m
+[0;32mI (2820) gpio: GPIO[9]| InputEn: 0| OutputEn: 1| OpenDrain: 0| Pullup: 0| Pulldown: 0| Intr:0 [0m
+[0;32mI (2890) gpio: GPIO[15]| InputEn: 1| OutputEn: 1| OpenDrain: 1| Pullup: 1| Pulldown: 0| Intr:0 [0m
+[0;32mI (2890) gpio: GPIO[14]| InputEn: 1| OutputEn: 1| OpenDrain: 1| Pullup: 1| Pulldown: 0| Intr:0 [0m
+[0;32mI (2900) gpio: GPIO[46]| InputEn: 0| OutputEn: 1| OpenDrain: 0| Pullup: 0| Pulldown: 0| Intr:0 [0m
+[0;32mI (2900) gpio: GPIO[46]| InputEn: 0| OutputEn: 1| OpenDrain: 0| Pullup: 0| Pulldown: 0| Intr:0 [0m
+[0;32mI (2920) ES8311: Work in Slave mode[0m
+[0;31mE (2920) i2s_common: i2s_channel_disable(1151): the channel has not been enabled yet[0m
+[0;32mI (2920) I2S_IF: Paired data: 0x3fcbe51c, current mode: playback, paired in_enable: 0, paired out_enable: 0[0m
+[0;32mI (2940) I2S_IF: STD: TX, data_bit: 16, slot_bit: 16, ws_width: 16, slot_mode: STEREO, slot_mask: 0x3[0m
+[0;32mI (2940) I2S_IF: STD: TX, sample_rate_hz: 16000, mclk_multiple: 256, clk_src: 6[0m
+[0;32mI (2970) Adev_Codec: Open codec device OK[0m
+[0;32mI (2970) ES7210: Work in Slave mode[0m
+[0;32mI (2980) ES7210: Enable ES7210_INPUT_MIC1[0m
+[0;32mI (2980) ES7210: Enable ES7210_INPUT_MIC2[0m
+[0;31mE (2990) i2s_common: i2s_channel_disable(1151): the channel has not been enabled yet[0m
+[0;32mI (2990) I2S_IF: Current mode(record) and peer mode have same sample_rate 16000, channel 2, bits_per_sample 16[0m
+[0;32mI (3000) I2S_IF: STD: RX, data_bit: 16, slot_bit: 16, ws_width: 16, slot_mode: STEREO, slot_mask: 0x3[0m
+[0;32mI (3010) I2S_IF: STD: RX, sample_rate_hz: 16000, mclk_multiple: 256, clk_src: 6[0m
+[0;32mI (3020) ES7210: Bits 16[0m
+[0;32mI (3030) ES7210: Enable ES7210_INPUT_MIC1[0m
+[0;32mI (3030) ES7210: Enable ES7210_INPUT_MIC2[0m
+[0;32mI (3040) ES7210: Unmuted[0m
+[0;32mI (3040) Adev_Codec: Open codec device OK[0m
+[0;32mI (3040) audio: audio ready: ES8311 out + ES7210 in @ 16000 Hz[0m
+[0;32mI (3040) gpio: GPIO[0]| InputEn: 1| OutputEn: 0| OpenDrain: 0| Pullup: 1| Pulldown: 0| Intr:0 [0m
+[0;32mI (3070) pp: pp rom version: e7ae62f[0m
+[0;32mI (3070) net80211: net80211 rom version: e7ae62f[0m
+I (3080) wifi:wifi driver task: 3fcc5824, prio:23, stack:6656, core=0
+I (3080) wifi:wifi firmware version: d7c8292
+I (3080) wifi:wifi certification version: v7.0
+I (3080) wifi:config NVS flash: enabled
+I (3080) wifi:config nano formating: disabled
+I (3090) wifi:Init data frame dynamic rx buffer num: 32
+I (3090) wifi:Init static rx mgmt buffer num: 5
+I (3100) wifi:Init management short buffer num: 32
+I (3100) wifi:Init static tx buffer num: 16
+I (3110) wifi:Init tx cache buffer num: 32
+I (3110) wifi:Init static tx FG buffer num: 2
+I (3110) wifi:Init static rx buffer size: 1600
+I (3120) wifi:Init static rx buffer num: 16
+I (3120) wifi:Init dynamic rx buffer num: 32
+[0;32mI (3130) wifi_init: rx ba win: 16[0m
+[0;32mI (3130) wifi_init: accept mbox: 6[0m
+[0;32mI (3130) wifi_init: tcpip mbox: 32[0m
+[0;32mI (3140) wifi_init: udp mbox: 6[0m
+[0;32mI (3140) wifi_init: tcp mbox: 6[0m
+[0;32mI (3140) wifi_init: tcp tx win: 5760[0m
+[0;32mI (3150) wifi_init: tcp rx win: 5760[0m
+[0;32mI (3150) wifi_init: tcp mss: 1440[0m
+[0;32mI (3160) wifi_init: WiFi/LWIP prefer SPIRAM[0m
+[0;32mI (3160) wifi_init: WiFi IRAM OP enabled[0m
+[0;32mI (3170) wifi_init: WiFi RX IRAM OP enabled[0m
+[0;32mI (3170) phy_init: phy_version 712,87e8c20e,Apr 13 2026,18:51:10[0m
+[0;32mI (3210) phy_init: Saving new calibration data due to checksum failure or outdated calibration data, mode(0)[0m
+I (3250) wifi:mode : sta (<mac>)
+I (3250) wifi:enable tsf
+[0;32mI (3260) aiw-net: wifi sta starting for ssid '<ssid>'[0m
+[0;32mI (3260) aiw-weather: weather service started (NWS, lat 39.864, lon -84.132)[0m
+I (3260) wifi:new:<6,0>, old:<1,0>, ap:<255,255>, sta:<6,0>, prof:1, snd_ch_cfg:0x0
+I (3270) wifi:state: init -> auth (0xb0)
+[0;32mI (3280) aiw-font: assets partition mounted at /assets[0m
+I (3290) wifi:state: auth -> assoc (0x0)
+I (3290) wifi:state: assoc -> run (0x10)
+I (3310) wifi:connected with <ssid>, aid = 4, channel 6, BW20, bssid = <mac>
+I (3310) wifi:security: WPA2-PSK, phy: bgn, rssi: -50, cipher(pairwise:0x3, group:0x3), pmf:0
+I (3320) wifi:pm start, type: 1
+
+I (3320) wifi:dp: 1, bi: 102400, li: 3, scale listen interval from 307200 us to 307200 us
+I (3330) wifi:set rx beacon pti, rx_bcn_pti: 0, bcn_timeout: 25000, mt_pti: 0, mt_time: 10000
+I (3340) wifi:<ba-add>idx:0 (ifx:0, <mac>), tid:0, ssn:0, winSize:64
+I (3370) wifi:dp: 2, bi: 102400, li: 4, scale listen interval from 307200 us to 409600 us
+I (3370) wifi:AP's beacon interval = 102400 us, DTIM period = 2
+I (3390) wifi:<ba-add>idx:1 (ifx:0, <mac>), tid:6, ssn:2, winSize:64
+[0;32mI (3400) aiw-font: assets load: 11/11 faces, sprites ok[0m
+[0;32mI (4260) aiw-net: clock disciplined from SNTP (epoch 1791920689000)[0m
+[0;32mI (4340) esp_netif_handlers: sta ip: <ip>, mask: <ip>, gw: <ip>[0m
+[0;32mI (4340) aiw-net: wifi got ip <ip>[0m
+[0;32mI (4340) aiw-net: sntp started (pool.ntp.org)[0m
+[0;32mI (4360) websocket_client: Started[0m
+[0;32mI (5520) esp-x509-crt-bundle: Certificate validated[0m
+[0;32mI (6110) esp-x509-crt-bundle: Certificate validated[0m
+[0;31mE (6610) lcd_panel.io.i2c: panel_io_i2c_rx_buffer(145): i2c transaction failed[0m
+[0;31mE (6610) FT5x06: esp_lcd_touch_ft5x06_read_data(186): I2C read error![0m
+[0;31mE (6610) lcd_panel.io.i2c: panel_io_i2c_rx_buffer(145): i2c transaction failed[0m
+[0;31mE (6620) FT5x06: esp_lcd_touch_ft5x06_read_data(186): I2C read error![0m
+[0;32mI (6660) aiw-weather: NWS station resolved: KFFO[0m
+[0;31mE (6720) lcd_panel.io.i2c: panel_io_i2c_rx_buffer(145): i2c transaction failed[0m
+[0;31mE (6720) FT5x06: esp_lcd_touch_ft5x06_read_data(186): I2C read error![0m
+[0;31mE (6720) lcd_panel.io.i2c: panel_io_i2c_rx_buffer(145): i2c transaction failed[0m
+[0;31mE (6740) FT5x06: esp_lcd_touch_ft5x06_read_data(186): I2C read error![0m
+[0;32mI (6880) esp-x509-crt-bundle: Certificate validated[0m
+[0;31mE (7170) lcd_panel.io.i2c: panel_io_i2c_rx_buffer(145): i2c transaction failed[0m
+[0;31mE (7170) FT5x06: esp_lcd_touch_ft5x06_read_data(186): I2C read error![0m
+[0;31mE (7180) lcd_panel.io.i2c: panel_io_i2c_rx_buffer(145): i2c transaction failed[0m
+[0;31mE (7180) FT5x06: esp_lcd_touch_ft5x06_read_data(186): I2C read error![0m
+[0;31mE (7270) lcd_panel.io.i2c: panel_io_i2c_rx_buffer(145): i2c transaction failed[0m
+[0;31mE (7270) FT5x06: esp_lcd_touch_ft5x06_read_data(186): I2C read error![0m
+[0;31mE (7270) lcd_panel.io.i2c: panel_io_i2c_rx_buffer(145): i2c transaction failed[0m
+[0;31mE (7280) FT5x06: esp_lcd_touch_ft5x06_read_data(186): I2C read error![0m
+[0;31mE (7370) lcd_panel.io.i2c: panel_io_i2c_rx_buffer(145): i2c transaction failed[0m
+[0;31mE (7370) FT5x06: esp_lcd_touch_ft5x06_read_data(186): I2C read error![0m
+[0;31mE (7370) lcd_panel.io.i2c: panel_io_i2c_rx_buffer(145): i2c transaction failed[0m
+[0;31mE (7380) FT5x06: esp_lcd_touch_ft5x06_read_data(186): I2C read error![0m
+[0;31mE (7470) lcd_panel.io.i2c: panel_io_i2c_rx_buffer(145): i2c transaction failed[0m
+[0;31mE (7470) FT5x06: esp_lcd_touch_ft5x06_read_data(186): I2C read error![0m
+[0;31mE (7470) lcd_panel.io.i2c: panel_io_i2c_rx_buffer(145): i2c transaction failed[0m
+[0;32mI (7480) aiw-weather: weather: 87F, humidity reported, "Mostly Clear"[0m
+[0;31mE (7480) FT5x06: esp_lcd_touch_ft5x06_read_data(186): I2C read error![0m
+[0;31mE (7580) lcd_panel.io.i2c: panel_io_i2c_rx_buffer(145): i2c transaction failed[0m
+[0;31mE (7580) FT5x06: esp_lcd_touch_ft5x06_read_data(186): I2C read error![0m
+[0;31mE (7580) lcd_panel.io.i2c: panel_io_i2c_rx_buffer(145): i2c transaction failed[0m
+[0;31mE (7590) FT5x06: esp_lcd_touch_ft5x06_read_data(186): I2C read error![0m
+[0;31mE (7680) lcd_panel.io.i2c: panel_io_i2c_rx_buffer(145): i2c transaction failed[0m
+[0;31mE (7680) FT5x06: esp_lcd_touch_ft5x06_read_data(186): I2C read error![0m
+[0;31mE (7680) lcd_panel.io.i2c: panel_io_i2c_rx_buffer(145): i2c transaction failed[0m
+[0;31mE (7690) FT5x06: esp_lcd_touch_ft5x06_read_data(186): I2C read error![0m
+[0;31mE (7780) lcd_panel.io.i2c: panel_io_i2c_rx_buffer(145): i2c transaction failed[0m
+[0;31mE (7780) FT5x06: esp_lcd_touch_ft5x06_read_data(186): I2C read error![0m
+[0;31mE (7780) lcd_panel.io.i2c: panel_io_i2c_rx_buffer(145): i2c transaction failed[0m
+[0;31mE (7790) FT5x06: esp_lcd_touch_ft5x06_read_data(186): I2C read error![0m
+[0;31mE (7880) lcd_panel.io.i2c: panel_io_i2c_rx_buffer(145): i2c transaction failed[0m
+[0;31mE (7880) FT5x06: esp_lcd_touch_ft5x06_read_data(186): I2C read error![0m
+[0;31mE (7880) lcd_panel.io.i2c: panel_io_i2c_rx_buffer(145): i2c transaction failed[0m
+[0;31mE (7890) FT5x06: esp_lcd_touch_ft5x06_read_data(186): I2C read error![0m
+[0;31mE (7980) lcd_panel.io.i2c: panel_io_i2c_rx_buffer(145): i2c transaction failed[0m
+[0;31mE (7980) FT5x06: esp_lcd_touch_ft5x06_read_data(186): I2C read error![0m
+[0;31mE (7980) lcd_panel.io.i2c: panel_io_i2c_rx_buffer(145): i2c transaction failed[0m
+[0;31mE (7990) FT5x06: esp_lcd_touch_ft5x06_read_data(186): I2C read error![0m
+[0;31mE (8080) lcd_panel.io.i2c: panel_io_i2c_rx_buffer(145): i2c transaction failed[0m
+[0;31mE (8080) FT5x06: esp_lcd_touch_ft5x06_read_data(186): I2C read error![0m
+[0;31mE (8080) lcd_panel.io.i2c: panel_io_i2c_rx_buffer(145): i2c transaction failed[0m
+[0;31mE (8090) FT5x06: esp_lcd_touch_ft5x06_read_data(186): I2C read error![0m
+[0;31mE (8180) lcd_panel.io.i2c: panel_io_i2c_rx_buffer(145): i2c transaction failed[0m
+[0;31mE (8180) FT5x06: esp_lcd_touch_ft5x06_read_data(186): I2C read error![0m
+[0;31mE (8180) lcd_panel.io.i2c: panel_io_i2c_rx_buffer(145): i2c transaction failed[0m
+[0;31mE (8190) FT5x06: esp_lcd_touch_ft5x06_read_data(186): I2C read error![0m
+[0;31mE (8280) lcd_panel.io.i2c: panel_io_i2c_rx_buffer(145): i2c transaction failed[0m
+[0;31mE (8280) FT5x06: esp_lcd_touch_ft5x06_read_data(186): I2C read error![0m
+[0;31mE (8280) lcd_panel.io.i2c: panel_io_i2c_rx_buffer(145): i2c transaction failed[0m
+[0;31mE (8290) FT5x06: esp_lcd_touch_ft5x06_read_data(186): I2C read error![0m
+[0;31mE (8380) lcd_panel.io.i2c: panel_io_i2c_rx_buffer(145): i2c transaction failed[0m
+[0;31mE (8380) FT5x06: esp_lcd_touch_ft5x06_read_data(186): I2C read error![0m
+[0;31mE (8380) lcd_panel.io.i2c: panel_io_i2c_rx_buffer(145): i2c transaction failed[0m
+[0;31mE (8390) FT5x06: esp_lcd_touch_ft5x06_read_data(186): I2C read error![0m
+[0;31mE (8480) lcd_panel.io.i2c: panel_io_i2c_rx_buffer(145): i2c transaction failed[0m
+[0;31mE (8480) FT5x06: esp_lcd_touch_ft5x06_read_data(186): I2C read error![0m
+[0;31mE (8480) lcd_panel.io.i2c: panel_io_i2c_rx_buffer(145): i2c transaction failed[0m
+[0;31mE (8490) FT5x06: esp_lcd_touch_ft5x06_read_data(186): I2C read error![0m
+[0;31mE (8580) lcd_panel.io.i2c: panel_io_i2c_rx_buffer(145): i2c transaction failed[0m
+[0;31mE (8580) FT5x06: esp_lcd_touch_ft5x06_read_data(186): I2C read error![0m
+[0;31mE (8580) lcd_panel.io.i2c: panel_io_i2c_rx_buffer(145): i2c transaction failed[0m
+[0;31mE (8590) FT5x06: esp_lcd_touch_ft5x06_read_data(186): I2C read error![0m
+[0;31mE (8680) lcd_panel.io.i2c: panel_io_i2c_rx_buffer(145): i2c transaction failed[0m
+[0;31mE (8680) FT5x06: esp_lcd_touch_ft5x06_read_data(186): I2C read error![0m
+[0;31mE (8680) lcd_panel.io.i2c: panel_io_i2c_rx_buffer(145): i2c transaction failed[0m
+[0;31mE (8690) FT5x06: esp_lcd_touch_ft5x06_read_data(186): I2C read error![0m
+[0;31mE (8780) lcd_panel.io.i2c: panel_io_i2c_rx_buffer(145): i2c transaction failed[0m
+[0;31mE (8780) FT5x06: esp_lcd_touch_ft5x06_read_data(186): I2C read error![0m
+[0;31mE (8780) lcd_panel.io.i2c: panel_io_i2c_rx_buffer(145): i2c transaction failed[0m
+[0;31mE (8790) FT5x06: esp_lcd_touch_ft5x06_read_data(186): I2C read error![0m
+[0;31mE (8880) lcd_panel.io.i2c: panel_io_i2c_rx_buffer(145): i2c transaction failed[0m
+[0;31mE (8880) FT5x06: esp_lcd_touch_ft5x06_read_data(186): I2C read error![0m
+[0;31mE (8880) lcd_panel.io.i2c: panel_io_i2c_rx_buffer(145): i2c transaction failed[0m
+[0;31mE (8890) FT5x06: esp_lcd_touch_ft5x06_read_data(186): I2C read error![0m
+[0;31mE (8980) lcd_panel.io.i2c: panel_io_i2c_rx_buffer(145): i2c transaction failed[0m
+[0;31mE (8980) FT5x06: esp_lcd_touch_ft5x06_read_data(186): I2C read error![0m
+[0;31mE (8980) lcd_panel.io.i2c: panel_io_i2c_rx_buffer(145): i2c transaction failed[0m
+[0;31mE (8990) FT5x06: esp_lcd_touch_ft5x06_read_data(186): I2C read error![0m
+[0;31mE (9080) lcd_panel.io.i2c: panel_io_i2c_rx_buffer(145): i2c transaction failed[0m
+[0;31mE (9080) FT5x06: esp_lcd_touch_ft5x06_read_data(186): I2C read error![0m
+[0;31mE (9080) lcd_panel.io.i2c: panel_io_i2c_rx_buffer(145): i2c transaction failed[0m
+[0;31mE (9090) FT5x06: esp_lcd_touch_ft5x06_read_data(186): I2C read error![0m
+[0;31mE (9180) lcd_panel.io.i2c: panel_io_i2c_rx_buffer(145): i2c transaction failed[0m
+[0;31mE (9180) FT5x06: esp_lcd_touch_ft5x06_read_data(186): I2C read error![0m
+[0;31mE (9180) lcd_panel.io.i2c: panel_io_i2c_rx_buffer(145): i2c transaction failed[0m
+[0;31mE (9190) FT5x06: esp_lcd_touch_ft5x06_read_data(186): I2C read error![0m
+[0;31mE (9280) lcd_panel.io.i2c: panel_io_i2c_rx_buffer(145): i2c transaction failed[0m
+[0;31mE (9280) FT5x06: esp_lcd_touch_ft5x06_read_data(186): I2C read error![0m
+[0;31mE (9280) lcd_panel.io.i2c: panel_io_i2c_rx_buffer(145): i2c transaction failed[0m
+[0;31mE (9290) FT5x06: esp_lcd_touch_ft5x06_read_data(186): I2C read error![0m
+[0;31mE (9380) lcd_panel.io.i2c: panel_io_i2c_rx_buffer(145): i2c transaction failed[0m
+[0;31mE (9380) FT5x06: esp_lcd_touch_ft5x06_read_data(186): I2C read error![0m
+[0;31mE (9380) lcd_panel.io.i2c: panel_io_i2c_rx_buffer(145): i2c transaction failed[0m
+[0;31mE (9390) FT5x06: esp_lcd_touch_ft5x06_read_data(186): I2C read error![0m
+[0;31mE (9480) lcd_panel.io.i2c: panel_io_i2c_rx_buffer(145): i2c transaction failed[0m
+[0;31mE (9480) FT5x06: esp_lcd_touch_ft5x06_read_data(186): I2C read error![0m
+[0;31mE (9480) lcd_panel.io.i2c: panel_io_i2c_rx_buffer(145): i2c transaction failed[0m
+[0;31mE (9490) FT5x06: esp_lcd_touch_ft5x06_read_data(186): I2C read error![0m
+[0;31mE (9580) lcd_panel.io.i2c: panel_io_i2c_rx_buffer(145): i2c transaction failed[0m
+[0;31mE (9580) FT5x06: esp_lcd_touch_ft5x06_read_data(186): I2C read error![0m
+[0;31mE (9580) lcd_panel.io.i2c: panel_io_i2c_rx_buffer(145): i2c transaction failed[0m
+[0;31mE (9590) FT5x06: esp_lcd_touch_ft5x06_read_data(186): I2C read error![0m
+[0;31mE (9680) lcd_panel.io.i2c: panel_io_i2c_rx_buffer(145): i2c transaction failed[0m
+[0;31mE (9680) FT5x06: esp_lcd_touch_ft5x06_read_data(186): I2C read error![0m
+[0;31mE (9680) lcd_panel.io.i2c: panel_io_i2c_rx_buffer(145): i2c transaction failed[0m
+[0;31mE (9690) FT5x06: esp_lcd_touch_ft5x06_read_data(186): I2C read error![0m
+[0;31mE (9780) lcd_panel.io.i2c: panel_io_i2c_rx_buffer(145): i2c transaction failed[0m
+[0;31mE (9780) FT5x06: esp_lcd_touch_ft5x06_read_data(186): I2C read error![0m
+[0;31mE (9780) lcd_panel.io.i2c: panel_io_i2c_rx_buffer(145): i2c transaction failed[0m
+[0;31mE (9790) FT5x06: esp_lcd_touch_ft5x06_read_data(186): I2C read error![0m
+[0;31mE (9880) lcd_panel.io.i2c: panel_io_i2c_rx_buffer(145): i2c transaction failed[0m
+[0;31mE (9880) FT5x06: esp_lcd_touch_ft5x06_read_data(186): I2C read error![0m
+[0;31mE (9880) lcd_panel.io.i2c: panel_io_i2c_rx_buffer(145): i2c transaction failed[0m
+[0;31mE (9890) FT5x06: esp_lcd_touch_ft5x06_read_data(186): I2C read error![0m
+[0;31mE (9980) lcd_panel.io.i2c: panel_io_i2c_rx_buffer(145): i2c transaction failed[0m
+[0;31mE (9980) FT5x06: esp_lcd_touch_ft5x06_read_data(186): I2C read error![0m
+[0;31mE (9980) lcd_panel.io.i2c: panel_io_i2c_rx_buffer(145): i2c transaction failed[0m
+[0;31mE (9990) FT5x06: esp_lcd_touch_ft5x06_read_data(186): I2C read error![0m
+[0;31mE (10080) lcd_panel.io.i2c: panel_io_i2c_rx_buffer(145): i2c transaction failed[0m
+[0;31mE (10080) FT5x06: esp_lcd_touch_ft5x06_read_data(186): I2C read error![0m
+[0;31mE (10080) lcd_panel.io.i2c: panel_io_i2c_rx_buffer(145): i2c transaction failed[0m
+[0;31mE (10090) FT5x06: esp_lcd_touch_ft5x06_read_data(186): I2C read error![0m
+[0;31mE (10180) lcd_panel.io.i2c: panel_io_i2c_rx_buffer(145): i2c transaction failed[0m
+[0;31mE (10180) FT5x06: esp_lcd_touch_ft5x06_read_data(186): I2C read error![0m
+[0;31mE (10180) lcd_panel.io.i2c: panel_io_i2c_rx_buffer(145): i2c transaction failed[0m
+[0;31mE (10190) FT5x06: esp_lcd_touch_ft5x06_read_data(186): I2C read error![0m
+[0;31mE (10280) lcd_panel.io.i2c: panel_io_i2c_rx_buffer(145): i2c transaction failed[0m
+[0;31mE (10280) FT5x06: esp_lcd_touch_ft5x06_read_data(186): I2C read error![0m
+[0;31mE (10280) lcd_panel.io.i2c: panel_io_i2c_rx_buffer(145): i2c transaction failed[0m
+[0;31mE (10290) FT5x06: esp_lcd_touch_ft5x06_read_data(186): I2C read error![0m
+[0;31mE (10380) lcd_panel.io.i2c: panel_io_i2c_rx_buffer(145): i2c transaction failed[0m
+[0;31mE (10380) FT5x06: esp_lcd_touch_ft5x06_read_data(186): I2C read error![0m
+[0;31mE (10380) lcd_panel.io.i2c: panel_io_i2c_rx_buffer(145): i2c transaction failed[0m
+[0;31mE (10390) FT5x06: esp_lcd_touch_ft5x06_read_data(186): I2C read error![0m
+[0;31mE (10480) lcd_panel.io.i2c: panel_io_i2c_rx_buffer(145): i2c transaction failed[0m
+[0;31mE (10480) FT5x06: esp_lcd_touch_ft5x06_read_data(186): I2C read error![0m
+[0;31mE (10480) lcd_panel.io.i2c: panel_io_i2c_rx_buffer(145): i2c transaction failed[0m
+[0;31mE (10490) FT5x06: esp_lcd_touch_ft5x06_read_data(186): I2C read error![0m
+[0;31mE (10580) lcd_panel.io.i2c: panel_io_i2c_rx_buffer(145): i2c transaction failed[0m
+[0;31mE (10580) FT5x06: esp_lcd_touch_ft5x06_read_data(186): I2C read error![0m
+[0;31mE (10580) lcd_panel.io.i2c: panel_io_i2c_rx_buffer(145): i2c transaction failed[0m
+[0;31mE (10590) FT5x06: esp_lcd_touch_ft5x06_read_data(186): I2C read error![0m
+[0;31mE (10680) lcd_panel.io.i2c: panel_io_i2c_rx_buffer(145): i2c transaction failed[0m
+[0;31mE (10680) FT5x06: esp_lcd_touch_ft5x06_read_data(186): I2C read error![0m
+[0;31mE (10680) lcd_panel.io.i2c: panel_io_i2c_rx_buffer(145): i2c transaction failed[0m
+[0;31mE (10690) FT5x06: esp_lcd_touch_ft5x06_read_data(186): I2C read error![0m
+[0;31mE (10780) lcd_panel.io.i2c: panel_io_i2c_rx_buffer(145): i2c transaction failed[0m
+[0;31mE (10780) FT5x06: esp_lcd_touch_ft5x06_read_data(186): I2C read error![0m
+[0;31mE (10780) lcd_panel.io.i2c: panel_io_i2c_rx_buffer(145): i2c transaction failed[0m
+[0;31mE (10790) FT5x06: esp_lcd_touch_ft5x06_read_data(186): I2C read error![0m
+[0;31mE (10880) lcd_panel.io.i2c: panel_io_i2c_rx_buffer(145): i2c transaction failed[0m
+[0;31mE (10880) FT5x06: esp_lcd_touch_ft5x06_read_data(186): I2C read error![0m
+[0;31mE (10880) lcd_panel.io.i2c: panel_io_i2c_rx_buffer(145): i2c transaction failed[0m
+[0;31mE (10890) FT5x06: esp_lcd_touch_ft5x06_read_data(186): I2C read error![0m
+[0;31mE (10980) lcd_panel.io.i2c: panel_io_i2c_rx_buffer(145): i2c transaction failed[0m
+[0;31mE (10980) FT5x06: esp_lcd_touch_ft5x06_read_data(186): I2C read error![0m
+[0;31mE (10980) lcd_panel.io.i2c: panel_io_i2c_rx_buffer(145): i2c transaction failed[0m
+[0;31mE (10990) FT5x06: esp_lcd_touch_ft5x06_read_data(186): I2C read error![0m
+[0;31mE (11080) lcd_panel.io.i2c: panel_io_i2c_rx_buffer(145): i2c transaction failed[0m
+[0;31mE (11080) FT5x06: esp_lcd_touch_ft5x06_read_data(186): I2C read error![0m
+[0;31mE (11080) lcd_panel.io.i2c: panel_io_i2c_rx_buffer(145): i2c transaction failed[0m
+[0;31mE (11090) FT5x06: esp_lcd_touch_ft5x06_read_data(186): I2C read error![0m
+[0;31mE (11180) lcd_panel.io.i2c: panel_io_i2c_rx_buffer(145): i2c transaction failed[0m
+[0;31mE (11180) FT5x06: esp_lcd_touch_ft5x06_read_data(186): I2C read error![0m
+[0;31mE (11180) lcd_panel.io.i2c: panel_io_i2c_rx_buffer(145): i2c transaction failed[0m
+[0;31mE (11190) FT5x06: esp_lcd_touch_ft5x06_read_data(186): I2C read error![0m
+[0;31mE (11280) lcd_panel.io.i2c: panel_io_i2c_rx_buffer(145): i2c transaction failed[0m
+[0;31mE (11280) FT5x06: esp_lcd_touch_ft5x06_read_data(186): I2C read error![0m
+[0;31mE (11280) lcd_panel.io.i2c: panel_io_i2c_rx_buffer(145): i2c transaction failed[0m
+[0;31mE (11290) FT5x06: esp_lcd_touch_ft5x06_read_data(186): I2C read error![0m
+[0;31mE (11380) lcd_panel.io.i2c: panel_io_i2c_rx_buffer(145): i2c transaction failed[0m
+[0;31mE (11380) FT5x06: esp_lcd_touch_ft5x06_read_data(186): I2C read error![0m
+[0;31mE (11380) lcd_panel.io.i2c: panel_io_i2c_rx_buffer(145): i2c transaction failed[0m
+[0;31mE (11390) FT5x06: esp_lcd_touch_ft5x06_read_data(186): I2C read error![0m
+[0;31mE (11480) lcd_panel.io.i2c: panel_io_i2c_rx_buffer(145): i2c transaction failed[0m
+[0;31mE (11480) FT5x06: esp_lcd_touch_ft5x06_read_data(186): I2C read error![0m
+[0;31mE (11480) lcd_panel.io.i2c: panel_io_i2c_rx_buffer(145): i2c transaction failed[0m
+[0;31mE (11490) FT5x06: esp_lcd_touch_ft5x06_read_data(186): I2C read error![0m
+[0;31mE (11580) lcd_panel.io.i2c: panel_io_i2c_rx_buffer(145): i2c transaction failed[0m
+[0;31mE (11580) FT5x06: esp_lcd_touch_ft5x06_read_data(186): I2C read error![0m
+[0;31mE (11580) lcd_panel.io.i2c: panel_io_i2c_rx_buffer(145): i2c transaction failed[0m
+[0;31mE (11590) FT5x06: esp_lcd_touch_ft5x06_read_data(186): I2C read error![0m
+[0;31mE (11680) lcd_panel.io.i2c: panel_io_i2c_rx_buffer(145): i2c transaction failed[0m
+[0;31mE (11680) FT5x06: esp_lcd_touch_ft5x06_read_data(186): I2C read error![0m
+[0;31mE (11680) lcd_panel.io.i2c: panel_io_i2c_rx_buffer(145): i2c transaction failed[0m
+[0;31mE (11690) FT5x06: esp_lcd_touch_ft5x06_read_data(186): I2C read error![0m
+[0;31mE (11780) lcd_panel.io.i2c: panel_io_i2c_rx_buffer(145): i2c transaction failed[0m
+[0;31mE (11780) FT5x06: esp_lcd_touch_ft5x06_read_data(186): I2C read error![0m
+[0;31mE (11780) lcd_panel.io.i2c: panel_io_i2c_rx_buffer(145): i2c transaction failed[0m
+[0;31mE (11790) FT5x06: esp_lcd_touch_ft5x06_read_data(186): I2C read error![0m
+[0;31mE (11880) lcd_panel.io.i2c: panel_io_i2c_rx_buffer(145): i2c transaction failed[0m
+[0;31mE (11880) FT5x06: esp_lcd_touch_ft5x06_read_data(186): I2C read error![0m
+[0;31mE (11880) lcd_panel.io.i2c: panel_io_i2c_rx_buffer(145): i2c transaction failed[0m
+[0;31mE (11890) FT5x06: esp_lcd_touch_ft5x06_read_data(186): I2C read error![0m
+[0;31mE (11980) lcd_panel.io.i2c: panel_io_i2c_rx_buffer(145): i2c transaction failed[0m
+[0;31mE (11980) FT5x06: esp_lcd_touch_ft5x06_read_data(186): I2C read error![0m
+[0;31mE (11980) lcd_panel.io.i2c: panel_io_i2c_rx_buffer(145): i2c transaction failed[0m
+[0;31mE (11990) FT5x06: esp_lcd_touch_ft5x06_read_data(186): I2C read error![0m
+[0;31mE (12080) lcd_panel.io.i2c: panel_io_i2c_rx_buffer(145): i2c transaction failed[0m
+[0;31mE (12080) FT5x06: esp_lcd_touch_ft5x06_read_data(186): I2C read error![0m
+[0;31mE (12080) lcd_panel.io.i2c: panel_io_i2c_rx_buffer(145): i2c transaction failed[0m
+[0;31mE (12090) FT5x06: esp_lcd_touch_ft5x06_read_data(186): I2C read error![0m
+[0;31mE (12180) lcd_panel.io.i2c: panel_io_i2c_rx_buffer(145): i2c transaction failed[0m
+[0;31mE (12180) FT5x06: esp_lcd_touch_ft5x06_read_data(186): I2C read error![0m
+[0;31mE (12180) lcd_panel.io.i2c: panel_io_i2c_rx_buffer(145): i2c transaction failed[0m
+[0;31mE (12190) FT5x06: esp_lcd_touch_ft5x06_read_data(186): I2C read error![0m
+[0;31mE (12280) lcd_panel.io.i2c: panel_io_i2c_rx_buffer(145): i2c transaction failed[0m
+[0;31mE (12280) FT5x06: esp_lcd_touch_ft5x06_read_data(186): I2C read error![0m
+[0;31mE (12280) lcd_panel.io.i2c: panel_io_i2c_rx_buffer(145): i2c transaction failed[0m
+[0;31mE (12290) FT5x06: esp_lcd_touch_ft5x06_read_data(186): I2C read error![0m
+[0;31mE (12380) lcd_panel.io.i2c: panel_io_i2c_rx_buffer(145): i2c transaction failed[0m
+[0;31mE (12380) FT5x06: esp_lcd_touch_ft5x06_read_data(186): I2C read error![0m
+[0;31mE (12380) lcd_panel.io.i2c: panel_io_i2c_rx_buffer(145): i2c transaction failed[0m
+[0;31mE (12390) FT5x06: esp_lcd_touch_ft5x06_read_data(186): I2C read error![0m
+[0;31mE (12480) lcd_panel.io.i2c: panel_io_i2c_rx_buffer(145): i2c transaction failed[0m
+[0;31mE (12480) FT5x06: esp_lcd_touch_ft5x06_read_data(186): I2C read error![0m
+[0;31mE (12480) lcd_panel.io.i2c: panel_io_i2c_rx_buffer(145): i2c transaction failed[0m
+[0;31mE (12490) FT5x06: esp_lcd_touch_ft5x06_read_data(186): I2C read error![0m
+[0;31mE (12580) lcd_panel.io.i2c: panel_io_i2c_rx_buffer(145): i2c transaction failed[0m
+[0;31mE (12580) FT5x06: esp_lcd_touch_ft5x06_read_data(186): I2C read error![0m
+[0;31mE (12580) lcd_panel.io.i2c: panel_io_i2c_rx_buffer(145): i2c transaction failed[0m
+[0;31mE (12590) FT5x06: esp_lcd_touch_ft5x06_read_data(186): I2C read error![0m
+[0;31mE (12680) lcd_panel.io.i2c: panel_io_i2c_rx_buffer(145): i2c transaction failed[0m
+[0;31mE (12680) FT5x06: esp_lcd_touch_ft5x06_read_data(186): I2C read error![0m
+[0;31mE (12680) lcd_panel.io.i2c: panel_io_i2c_rx_buffer(145): i2c transaction failed[0m
+[0;31mE (12690) FT5x06: esp_lcd_touch_ft5x06_read_data(186): I2C read error![0m
+[0;31mE (12780) lcd_panel.io.i2c: panel_io_i2c_rx_buffer(145): i2c transaction failed[0m
+[0;31mE (12780) FT5x06: esp_lcd_touch_ft5x06_read_data(186): I2C read error![0m
+[0;31mE (12780) lcd_panel.io.i2c: panel_io_i2c_rx_buffer(145): i2c transaction failed[0m
+[0;31mE (12790) FT5x06: esp_lcd_touch_ft5x06_read_data(186): I2C read error![0m
+[0;31mE (12880) lcd_panel.io.i2c: panel_io_i2c_rx_buffer(145): i2c transaction failed[0m
+[0;31mE (12880) FT5x06: esp_lcd_touch_ft5x06_read_data(186): I2C read error![0m
+[0;31mE (12880) lcd_panel.io.i2c: panel_io_i2c_rx_buffer(145): i2c transaction failed[0m
+[0;31mE (12890) FT5x06: esp_lcd_touch_ft5x06_read_data(186): I2C read error![0m
+[0;31mE (12980) lcd_panel.io.i2c: panel_io_i2c_rx_buffer(145): i2c transaction failed[0m
+[0;31mE (12980) FT5x06: esp_lcd_touch_ft5x06_read_data(186): I2C read error![0m
+[0;31mE (12980) lcd_panel.io.i2c: panel_io_i2c_rx_buffer(145): i2c transaction failed[0m
+[0;31mE (12990) FT5x06: esp_lcd_touch_ft5x06_read_data(186): I2C read error![0m
+[0;31mE (13080) lcd_panel.io.i2c: panel_io_i2c_rx_buffer(145): i2c transaction failed[0m
+[0;31mE (13080) FT5x06: esp_lcd_touch_ft5x06_read_data(186): I2C read error![0m
+[0;31mE (16750) lcd_panel.io.i2c: panel_io_i2c_rx_buffer(145): i2c transaction failed[0m
+[0;31mE (16750) FT5x06: esp_lcd_touch_ft5x06_read_data(186): I2C read error![0m
+[0;31mE (20440) lcd_panel.io.i2c: panel_io_i2c_rx_buffer(145): i2c transaction failed[0m
+[0;31mE (20440) FT5x06: esp_lcd_touch_ft5x06_read_data(186): I2C read error![0m
+[0;31mE (24130) lcd_panel.io.i2c: panel_io_i2c_rx_buffer(145): i2c transaction failed[0m
+[0;31mE (24130) FT5x06: esp_lcd_touch_ft5x06_read_data(186): I2C read error![0m
+[0;31mE (27840) lcd_panel.io.i2c: panel_io_i2c_rx_buffer(145): i2c transaction failed[0m
+[0;31mE (27840) FT5x06: esp_lcd_touch_ft5x06_read_data(186): I2C read error![0m
+[0;31mE (31530) lcd_panel.io.i2c: panel_io_i2c_rx_buffer(145): i2c transaction failed[0m
+[0;31mE (31530) FT5x06: esp_lcd_touch_ft5x06_read_data(186): I2C read error![0m
+[0;31mE (35210) lcd_panel.io.i2c: panel_io_i2c_rx_buffer(145): i2c transaction failed[0m
+[0;31mE (35210) FT5x06: esp_lcd_touch_ft5x06_read_data(186): I2C read error![0m
+[0;31mE (38930) lcd_panel.io.i2c: panel_io_i2c_rx_buffer(145): i2c transaction failed[0m
+[0;31mE (38930) FT5x06: esp_lcd_touch_ft5x06_read_data(186): I2C read error![0m
+

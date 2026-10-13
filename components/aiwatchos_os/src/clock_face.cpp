@@ -95,8 +95,11 @@ namespace {
         // Digital-first face (plan 3.2). The shell has already painted
         // the backdrop and will paint the status zone after us.
         char time_buf[16];
+        // 12-hour readout per the design (g_state.hour is 0..23).
+        const unsigned hour12 =
+            (g_state.hour % 12 == 0) ? 12u : (g_state.hour % 12);
         std::snprintf(time_buf, sizeof(time_buf), "%u:%02u",
-                      static_cast<unsigned>(g_state.hour),
+                      hour12,
                       static_cast<unsigned>(g_state.minute));
         draw_text_aa_centered(fb, kDisplayWidth / 2, 128, time_buf,
                               FontFace::kDisplay, colors::kTextNum);
