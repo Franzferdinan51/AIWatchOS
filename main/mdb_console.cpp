@@ -127,19 +127,25 @@ int usj_getchar(int timeout_ms) {
     return s_rx[s_rx_pos++];
 }
 
-// Write all bytes to the cable. Bounded retries: if no host is
-// draining the port, give up instead of wedging the console task.
+// Write all bytes to the cable. The driver copies each call into
+// its TX ring buffer ALL-OR-NOTHING (xRingbufferSend): a call larger
+// than the ring can never complete and just burns its timeout — the
+// first live dump died exactly that way (4096 B chunks vs a 2048 B
+// ring). Send in slices well under the ring size; each slice waits
+// for the ISR to drain space toward the host. Bounded stalls: if no
+// host is draining the port, give up instead of wedging the task.
 bool usj_write_all(const void* data, size_t len) {
     const uint8_t* p = static_cast<const uint8_t*>(data);
     int stalls = 0;
     while (len > 0) {
-        const int n =
-            usb_serial_jtag_write_bytes(p, len, pdMS_TO_TICKS(1000));
+        const size_t slice = len < 1024 ? len : 1024;
+        const int n = usb_serial_jtag_write_bytes(
+            p, slice, pdMS_TO_TICKS(2000));
         if (n > 0) {
             p += n;
             len -= static_cast<size_t>(n);
             stalls = 0;
-        } else if (++stalls >= 3) {
+        } else if (++stalls >= 5) {
             return false;
         }
     }
@@ -166,6 +172,14 @@ bool read_line(char* out, size_t cap) {
 void out_str(const char* s) { usj_write_all(s, strlen(s)); }
 
 // --- commands ---------------------------------------------------------
+// Log silencer for binary transfers. esp_log_level_set("*", NONE)
+// does NOT mute tags whose level is already in the log cache (every
+// tag that has ever logged — the FT5x06 error pair interleaved into
+// the first live dump and corrupted it). Every log line funnels
+// through the vprintf hook, so swapping in a sink for the duration
+// of the dump is airtight.
+int mdb_sink_vprintf(const char* /*fmt*/, va_list /*ap*/) { return 0; }
+
 void cmd_screenshot() {
     aiwatchos::Board& board = aiwatchos::Board::instance();
     uint16_t* fb = board.framebuffer();
@@ -175,8 +189,10 @@ void cmd_screenshot() {
     }
     constexpr size_t kBytes = static_cast<size_t>(aiwatchos::kDisplayWidth) *
                               aiwatchos::kDisplayHeight * 2;
-    // Keep interleaved log lines out of the binary stream.
-    esp_log_level_set("*", ESP_LOG_NONE);
+    // Keep interleaved log lines out of the binary stream: swap the
+    // log vprintf for a sink (see mdb_sink_vprintf above) — setting
+    // log levels does not mute tags already in the level cache.
+    vprintf_like_t prev_vprintf = esp_log_set_vprintf(&mdb_sink_vprintf);
     char hdr[96];
     snprintf(hdr, sizeof(hdr), "FBDUMP_BEGIN %d %d RGB565 %u\n",
              aiwatchos::kDisplayWidth, aiwatchos::kDisplayHeight,
@@ -192,7 +208,7 @@ void cmd_screenshot() {
         left -= chunk;
         if (left > 0 && (left % (64 * 1024)) == 0) taskYIELD();
     }
-    esp_log_level_set("*", ESP_LOG_INFO);
+    esp_log_set_vprintf(prev_vprintf);
     if (ok) out_str("\nFBDUMP_END\n");
 }
 
@@ -447,7 +463,7 @@ void start() {
     // means the driver is already up — the read/write calls share the
     // same driver object and work identically either way.
     usb_serial_jtag_driver_config_t usj_cfg = {
-        .tx_buffer_size = 2048,
+        .tx_buffer_size = 8192,
         .rx_buffer_size = 2048,
     };
     const esp_err_t usj_err = usb_serial_jtag_driver_install(&usj_cfg);
