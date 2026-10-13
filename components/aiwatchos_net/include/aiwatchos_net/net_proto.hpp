@@ -59,6 +59,15 @@ std::string derive_host(const std::string& explicit_host,
                         const std::string& ws_url, const std::string& vm_id,
                         const std::string& domain);
 
+// Whether a reply event finalizes its message. delta.message_done
+// always does. message.assistant only does when display_text_ready is
+// not explicitly false: the server first patches the message in as
+// not-ready, and finalizing on that patch would settle the turn on
+// partial text (and TTS would speak the partial). Mirrors the SDK
+// on_event condition (esp32 muse_chat_session.cpp):
+//   if (done || !cJSON_IsFalse(ready)) message_done(...)
+bool event_finalizes(bool is_delta_done, bool display_text_ready_false);
+
 // --- Agent / task status (chat subscribe events) ---------------------------
 // The Hatch stream emits agent.status / task.status events whose payload
 // carries an activity_code (the companion's chat.dart falls back to

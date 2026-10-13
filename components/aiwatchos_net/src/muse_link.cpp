@@ -468,11 +468,23 @@ void on_sub_line(const char* line) {
                 } else if (ev == "delta.message_done" ||
                            ev == "message.assistant") {
                     if (RxMsg* m = find_msg(mid, true)) {
-                        std::string full =
-                            json_str_field(p, "display_text", "content");
-                        if (full.empty()) full = json_str_field(p, "text");
-                        if (!full.empty()) m->text = full;
-                        m->done = true;
+                        // A message.assistant patch whose
+                        // display_text_ready is explicitly false is
+                        // not the final text yet (SDK on_event); the
+                        // message stays bound above, but is not done.
+                        const cJSON* ready =
+                            cJSON_GetObjectItemCaseSensitive(
+                                p, "display_text_ready");
+                        if (proto::event_finalizes(
+                                ev == "delta.message_done",
+                                cJSON_IsFalse(ready))) {
+                            std::string full =
+                                json_str_field(p, "display_text", "content");
+                            if (full.empty())
+                                full = json_str_field(p, "text");
+                            if (!full.empty()) m->text = full;
+                            m->done = true;
+                        }
                     }
                 }
                 g_rx.any_event = true;

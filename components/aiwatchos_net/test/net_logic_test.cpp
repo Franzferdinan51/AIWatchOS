@@ -103,6 +103,12 @@ int main() {
     CHECK(derive_host("", "", "vm1", "") == "");
     CHECK(derive_host("", "", "", "") == "");
 
+    // --- event finalization gate (SDK on_event semantics) ---
+    CHECK(event_finalizes(true, false));    // delta.message_done
+    CHECK(event_finalizes(true, true));     // done wins regardless
+    CHECK(event_finalizes(false, false));   // assistant, ready or absent
+    CHECK(!event_finalizes(false, true));   // assistant, ready == false
+
     // --- setup-string parsing ---
     {
         SetupFields f;

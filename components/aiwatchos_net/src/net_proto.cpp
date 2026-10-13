@@ -330,6 +330,10 @@ std::string tts_request_json(const std::string& model, const std::string& voice,
     return out;
 }
 
+bool event_finalizes(bool is_delta_done, bool display_text_ready_false) {
+    return is_delta_done || !display_text_ready_false;
+}
+
 bool agent_status_combine(const char* activity_code, const char* status,
                           const char* label, AgentStatus* out) {
     if (!out) return false;
