@@ -18,37 +18,25 @@ void WeatherApp::render(Framebuffer& fb) {
     // Status bar.
     fb.fill_rect(0, 0, kDisplayWidth - 1, 36, kHeaderCol);
 
-    // Center: large temperature display (e.g. "22°").
+    // Center: large temperature display (e.g. "22C") at font scale 4
+    // (20x28 px glyphs), centered with the real text width.
     char temp_str[8];
     snprintf(temp_str, sizeof(temp_str), "%dC", data_.temperature_c);
-    int temp_width = static_cast<int>(strlen(temp_str)) * 14;   // ~14px per digit (large)
-    int temp_x = (kDisplayWidth - temp_width) / 2;
+    int temp_x = (kDisplayWidth - Framebuffer::text_width(temp_str, 4)) / 2;
     int temp_y = kDisplayHeight / 2 - 30;
-
-    for (size_t i = 0; temp_str[i]; ++i) {
-        int cx = temp_x + static_cast<int>(i) * 15;   // double-width characters
-        fb.fill_rect(cx, temp_y, cx + 13, temp_y + 27, kTempColor);
-    }
+    fb.draw_text(temp_x, temp_y, temp_str, kTempColor, 4);
 
     // Condition text below temperature.
     const char* cond = data_.condition;
-    int cond_x = (kDisplayWidth - static_cast<int>(strlen(cond)) * 9) / 2;
+    int cond_x = (kDisplayWidth - Framebuffer::text_width(cond)) / 2;
     fb.fill_rect(0, temp_y + 48, kDisplayWidth - 1, temp_y + 48 + 36, kBgColor);   // clear band
-
-    for (size_t c = 0; cond[c]; ++c) {
-        int cx = cond_x + static_cast<int>(c) * 9;
-        fb.fill_rect(cx, temp_y + 48, cx + 7, temp_y + 48 + 15, kCondColor);
-    }
+    fb.draw_text(cond_x, temp_y + 48, cond, kCondColor);
 
     // Humidity at bottom.
     char hum_str[16];
     snprintf(hum_str, sizeof(hum_str), "%d%%", data_.humidity);
-    int hum_x = (kDisplayWidth - static_cast<int>(strlen(hum_str)) * 9) / 2;
-
-    for (size_t c = 0; hum_str[c]; ++c) {
-        int cx = hum_x + static_cast<int>(c) * 9;
-        fb.fill_rect(cx, kDisplayHeight - 80, cx + 7, kDisplayHeight - 80 + 15, kHumidityCol);
-    }
+    int hum_x = (kDisplayWidth - Framebuffer::text_width(hum_str)) / 2;
+    fb.draw_text(hum_x, kDisplayHeight - 80, hum_str, kHumidityCol);
 }
 
 bool WeatherApp::on_touch(const TouchEvent& event) {

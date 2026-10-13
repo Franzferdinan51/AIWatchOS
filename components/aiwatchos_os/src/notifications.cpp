@@ -25,15 +25,12 @@ void NotificationManager::add_notification(std::string title, std::string body) 
 
 void NotificationManager::render(Framebuffer& fb) {
     if (notifications_.empty()) {
-        // Empty state: show "No notifications" centered on screen.
+        // Empty state: show "NO NOTIFICATIONS" centered on screen.
         fb.fill(kBgColor);
         const char* msg = "NO NOTIFICATIONS";
-        int x = (kDisplayWidth - static_cast<int>(strlen(msg)) * 9) / 2;
-        int y = kDisplayHeight / 2 - 8;
-        for (size_t i = 0; msg[i]; ++i) {
-            int cx = x + static_cast<int>(i) * 9;
-            fb.fill_rect(cx, y, cx + 7, y + 15, kTitleColor);
-        }
+        int x = (kDisplayWidth - Framebuffer::text_width(msg)) / 2;
+        int y = kDisplayHeight / 2 - Framebuffer::text_height() / 2;
+        fb.draw_text(x, y, msg, kTitleColor);
         return;
     }
 
@@ -43,17 +40,14 @@ void NotificationManager::render(Framebuffer& fb) {
     // Status bar.
     fb.fill_rect(0, 0, kDisplayWidth - 1, 36, kHeaderCol);
 
-    // Title at top of content area.
+    // Title at top of content area (single line, truncated to fit).
+    const int chars_per_line = (kDisplayWidth - 32) / Framebuffer::text_advance();
     int title_y = 52;
-    for (size_t c = 0; n.title[c] && c < 40; ++c) {   // cap at ~40 chars per line
-        int cx = 16 + static_cast<int>(c) * 9;
-        fb.fill_rect(cx, title_y, cx + 7, title_y + 15, kTitleColor);
-    }
+    fb.draw_text(16, title_y, n.title.substr(0, chars_per_line).c_str(), kTitleColor);
 
     // Body text below the title — scroll support via scroll_offset_.
     const int body_start_x = 16;
     const int body_start_y = 84;
-    const int chars_per_line = (kDisplayWidth - 32) / 9;   // ~44 chars at 8px+1gap
 
     // Simple text wrapping: break into lines of chars_per_line.
     std::string remaining = n.body;
@@ -77,15 +71,10 @@ void NotificationManager::render(Framebuffer& fb) {
         }
 
         if (line_y >= body_start_y) {   // only draw lines in the visible area
-            for (size_t c = 0; c < word.length() && c < static_cast<size_t>(chars_per_line); ++c) {
-                int cx = body_start_x + static_cast<int>(c) * 9;
-                if (cx < kDisplayWidth - 16) {
-                    fb.fill_rect(cx, line_y, cx + 7, line_y + 15, kBodiesColor);
-                }
-            }
+            fb.draw_text(body_start_x, line_y, word.c_str(), kBodiesColor);
         }
 
-        line_y += 20;   // ~8px font height + line spacing
+        line_y += 20;   // 14px glyph height at scale 2 + line spacing
     }
 
     (void)n.timestamp_ms;   // timestamp is available but not rendered in this simplified version

@@ -43,6 +43,26 @@ struct Framebuffer {
 
     // Fill a rectangle (inclusive bounds).
     void fill_rect(int x0, int y0, int x1, int y1, uint16_t color);
+
+    // Draw one character of the shared 5x7 bitmap font (font5x7.hpp) with its
+    // top-left corner at (x, y). Each font pixel is a scale x scale block, so a
+    // glyph occupies 5*scale x 7*scale pixels. Lowercase folds to uppercase;
+    // characters outside the charset draw as a hollow box.
+    void draw_char(int x, int y, char c, uint16_t color, int scale = 2);
+
+    // Draw a NUL-terminated string with draw_char(), advancing 6*scale pixels
+    // per character (5 px glyph + 1 px spacing, in font pixels).
+    void draw_text(int x, int y, const char* text, uint16_t color, int scale = 2);
+
+    // Pixel width of a string at the given scale, excluding the trailing
+    // inter-glyph gap. 0 for null/empty text. Use for centering/right-aligning.
+    static int text_width(const char* text, int scale = 2);
+
+    // Pixel height of one line of text at the given scale.
+    static int text_height(int scale = 2) { return 7 * scale; }
+
+    // Horizontal advance per character at the given scale.
+    static int text_advance(int scale = 2) { return 6 * scale; }
 };
 
 // The OS app interface. Each callback is optional except init() — apps provide

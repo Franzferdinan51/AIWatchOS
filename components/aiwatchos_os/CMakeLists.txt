@@ -31,3 +31,12 @@ idf_component_register(
 )
 
 target_compile_options(${COMPONENT_LIB} PRIVATE "-Wall" "-Wextra")
+
+# Clock base: Board::now_ms() starts at the firmware build epoch (+ uptime),
+# so a freshly flashed watch shows roughly the correct time instead of a
+# hardcoded Nov 2023 base. Computed at configure time; a reconfigure (or a
+# clean build) refreshes it. PCF85063 RTC / SNTP sync remains future work.
+string(TIMESTAMP AIWATCHOS_BUILD_EPOCH_S "%s" UTC)
+math(EXPR AIWATCHOS_BUILD_EPOCH_MS "${AIWATCHOS_BUILD_EPOCH_S} * 1000 + 99")
+target_compile_definitions(${COMPONENT_LIB}
+    PRIVATE AIWATCHOS_BUILD_EPOCH_MS=${AIWATCHOS_BUILD_EPOCH_MS})

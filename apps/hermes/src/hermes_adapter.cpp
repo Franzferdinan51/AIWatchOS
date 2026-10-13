@@ -112,11 +112,12 @@ void hermes_render(aiwatchos::Framebuffer& fb) {
     // Draw a header band at the top.
     fb.fill_rect(0, 0, aiwatchos::kDisplayWidth - 1, 36, kHeaderColor);
 
-    // Draw centered placeholder text in the main content area.
+    // Draw the app title centered in the main content area, in the shared
+    // 5x7 font (scale 2 -> 10x14 px glyphs).
     const char* status = "Hermes AI Agent";
-    int text_x = (aiwatchos::kDisplayWidth - static_cast<int>(strlen(status)) * 8) / 2;
-    fb.fill_rect(text_x, aiwatchos::kDisplayHeight / 2 - 30,
-                 text_x + 7, aiwatchos::kDisplayHeight / 2 - 15, kTextColor);
+    int text_x = (aiwatchos::kDisplayWidth -
+                  aiwatchos::Framebuffer::text_width(status)) / 2;
+    fb.draw_text(text_x, aiwatchos::kDisplayHeight / 2 - 30, status, kTextColor);
 
     // Device-health dashboard rows (companion device-screen equivalent):
     // battery outline + proportional fill, charging marker when charging.
