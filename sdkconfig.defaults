@@ -35,3 +35,8 @@ CONFIG_COMPILER_OPTIMIZATION_PERF=y
 # Dynamic SSL buffers: the TLS handshake is the DRAM peak event; dynamic
 # buffers free ~12-16 KB of steady-state DRAM vs fixed 16 KB in/out buffers.
 CONFIG_MBEDTLS_DYNAMIC_BUFFER=y
+
+# Long file names for the baked font/sprite assets (font_display96.bin
+# etc. are > 8.3); the FAT image generator and the device-side VFS
+# mount both need LFN to address them.
+CONFIG_FATFS_LFN_HEAP=y

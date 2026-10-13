@@ -46,9 +46,12 @@ static uint16_t scheme_pack(const float* in) {
     int r = static_cast<int>(in[0] + 0.5f);
     int g = static_cast<int>(in[1] + 0.5f);
     int b = static_cast<int>(in[2] + 0.5f);
-    if (r < 0) r = 0; if (r > 31) r = 31;
-    if (g < 0) g = 0; if (g > 63) g = 63;
-    if (b < 0) b = 0; if (b > 31) b = 31;
+    if (r < 0) r = 0;
+    if (r > 31) r = 31;
+    if (g < 0) g = 0;
+    if (g > 63) g = 63;
+    if (b < 0) b = 0;
+    if (b > 31) b = 31;
     return static_cast<uint16_t>((r << 11) | (g << 5) | b);
 }
 static uint16_t scheme_stop(int idx) { return scheme_pack(g_scheme_cur.ch[idx]); }
