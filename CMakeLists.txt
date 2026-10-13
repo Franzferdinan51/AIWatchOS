@@ -29,4 +29,10 @@ if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/assets/font_body18.bin")
         "in the repo root before building (generates the baked Inter "
         "fonts + sprites into assets/).")
 endif()
-fatfs_create_spiflash_image(aiwatchos_assets assets FLASH_IN_PROJECT)
+# Plain (non-WL) image: the runtime mounts it RAW via
+# esp_vfs_fat_spiflash_mount_ro, so the FAT boot sector must sit at
+# partition offset 0. fatfs_create_spiflash_image wraps the volume in
+# a wear-levelling layer (boot sector at +0x1000) and the raw mount
+# then fails with ESP_FAIL — that mismatch shipped silently because
+# assets_load was compiling its host branch (see font.cpp).
+fatfs_create_partition_image(aiwatchos_assets assets FLASH_IN_PROJECT)
