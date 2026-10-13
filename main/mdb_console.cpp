@@ -9,6 +9,11 @@
 // Everything here compiles to nothing unless the firmware is built
 // with CONFIG_AIWATCHOS_MDB_ENABLE (default ON for bring-up builds).
 #include "mdb.hpp"
+#include "aiwatchos/hal.hpp"   // FIRST: carries the ESP_PLATFORM -> __ESPRESSIF_IDF__ mapping (without it the guard below silently selects the stub start())
+
+#ifdef ESP_PLATFORM
+#include "sdkconfig.h"
+#endif
 
 #if defined(__ESPRESSIF_IDF__) && defined(CONFIG_AIWATCHOS_MDB_ENABLE)
 
@@ -19,11 +24,11 @@
 #include <ctime>
 #include <fcntl.h>
 
-#include "aiwatchos/hal.hpp"
 #include "aiwatchos/weather_app.hpp"
 #include "aiwatchos_hermes.hpp"
 #include "aiwatchos_net/net.hpp"
 #include "aiwatchos_weather/weather_service.hpp"
+#include "driver/usb_serial_jtag.h"
 #include "esp_err.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
@@ -95,14 +100,59 @@ const char* reset_reason_name(esp_reset_reason_t r) {
     }
 }
 
+// --- USB-Serial-JTAG transport ---------------------------------------
+// The operator cable is the S3's native USB port, but this build's
+// PRIMARY console is UART0 and USB-JTAG is only the log-mirroring
+// secondary console — so stdio (getchar/printf) is bound to UART0 pins
+// nothing is connected to, and a stdio-based MDB can neither hear nor
+// answer the cable. MDB therefore talks to the USB-Serial-JTAG driver
+// directly; the driver is installed in start(). (The log path still
+// reaches the cable via the secondary console, which is why boot logs
+// were visible while MDB stayed deaf.)
+const char* kMdbTag = "aiw-mdb";
+
+uint8_t s_rx[256];
+size_t s_rx_pos = 0;
+size_t s_rx_len = 0;
+
+// Next byte from the cable, or -1 when none arrives within timeout_ms.
+int usj_getchar(int timeout_ms) {
+    if (s_rx_pos >= s_rx_len) {
+        const int n = usb_serial_jtag_read_bytes(
+            s_rx, sizeof(s_rx), pdMS_TO_TICKS(timeout_ms));
+        if (n <= 0) return -1;
+        s_rx_pos = 0;
+        s_rx_len = static_cast<size_t>(n);
+    }
+    return s_rx[s_rx_pos++];
+}
+
+// Write all bytes to the cable. Bounded retries: if no host is
+// draining the port, give up instead of wedging the console task.
+bool usj_write_all(const void* data, size_t len) {
+    const uint8_t* p = static_cast<const uint8_t*>(data);
+    int stalls = 0;
+    while (len > 0) {
+        const int n =
+            usb_serial_jtag_write_bytes(p, len, pdMS_TO_TICKS(1000));
+        if (n > 0) {
+            p += n;
+            len -= static_cast<size_t>(n);
+            stalls = 0;
+        } else if (++stalls >= 3) {
+            return false;
+        }
+    }
+    return true;
+}
+
 bool read_line(char* out, size_t cap) {
     size_t n = 0;
     while (true) {
-        const int c = getchar();
-        if (c == EOF) {
-            vTaskDelay(pdMS_TO_TICKS(20));
-            if (n == 0) return false;
-            continue;
+        const int c = usj_getchar(50);
+        if (c < 0) {
+            if (n == 0) return false;   // idle: caller loop re-enters
+            continue;                   // mid-line pause: keep waiting
         }
         if (c == '\n' || c == '\r') {
             if (n == 0) continue;   // swallow CRLF pairs / leading blanks
@@ -113,10 +163,7 @@ bool read_line(char* out, size_t cap) {
     }
 }
 
-void out_str(const char* s) {
-    fputs(s, stdout);
-    fflush(stdout);
-}
+void out_str(const char* s) { usj_write_all(s, strlen(s)); }
 
 // --- commands ---------------------------------------------------------
 void cmd_screenshot() {
@@ -137,19 +184,16 @@ void cmd_screenshot() {
     out_str(hdr);
     const uint8_t* p = reinterpret_cast<const uint8_t*>(fb);
     size_t left = kBytes;
-    while (left > 0) {
+    bool ok = true;
+    while (left > 0 && ok) {
         const size_t chunk = left > 4096 ? 4096 : left;
-        fwrite(p, 1, chunk, stdout);
+        ok = usj_write_all(p, chunk);
         p += chunk;
         left -= chunk;
-        if (left > 0 && (left % (64 * 1024)) == 0) {
-            fflush(stdout);
-            taskYIELD();
-        }
+        if (left > 0 && (left % (64 * 1024)) == 0) taskYIELD();
     }
-    fflush(stdout);
     esp_log_level_set("*", ESP_LOG_INFO);
-    out_str("\nFBDUMP_END\n");
+    if (ok) out_str("\nFBDUMP_END\n");
 }
 
 void cmd_health() {
@@ -256,24 +300,18 @@ void cmd_logs() {
             chunk[i] = s_ring[(start + done + i) % kRingSize];
         }
         portEXIT_CRITICAL(&s_ring_mux);
-        fwrite(chunk, 1, n, stdout);
+        if (!usj_write_all(chunk, n)) return;
         done += n;
     }
-    fflush(stdout);
     out_str("\nMDB_LOGS_END\n");
 }
 
 void cmd_touch() {
     aiwatchos::Board& board = aiwatchos::Board::instance();
     out_str("MDB_TOUCH_BEGIN send-any-byte-to-stop\n");
-    // Non-blocking stdin so a stop byte can be noticed between polls.
-    // (fileno/fcntl on the console VFS fd.)
-    const int fd = fileno(stdin);
-    const int old_flags = fcntl(fd, F_GETFL, 0);
-    fcntl(fd, F_SETFL, old_flags | O_NONBLOCK);
     int last_n = 0;
     while (true) {
-        if (getchar() != EOF) break;   // any byte stops the stream
+        if (usj_getchar(0) >= 0) break;   // any byte stops the stream
         int xs[2] = {0}, ys[2] = {0};
         const int n = board.read_touch(xs, ys);
         if (n != last_n || n > 0) {
@@ -288,7 +326,6 @@ void cmd_touch() {
         }
         vTaskDelay(pdMS_TO_TICKS(50));
     }
-    fcntl(fd, F_SETFL, old_flags);
     out_str("MDB_TOUCH_END\n");
 }
 
@@ -405,11 +442,26 @@ void start() {
     ++s_boot_count;
     if (esp_reset_reason() == ESP_RST_PANIC) ++s_panic_count;
 
+    // Install the USB-Serial-JTAG driver behind the MDB transport
+    // (see the transport note at usj_getchar). ESP_ERR_INVALID_STATE
+    // means the driver is already up — the read/write calls share the
+    // same driver object and work identically either way.
+    usb_serial_jtag_driver_config_t usj_cfg = {
+        .tx_buffer_size = 2048,
+        .rx_buffer_size = 2048,
+    };
+    const esp_err_t usj_err = usb_serial_jtag_driver_install(&usj_cfg);
+    if (usj_err != ESP_OK && usj_err != ESP_ERR_INVALID_STATE) {
+        ESP_LOGW(kMdbTag, "USB-Serial-JTAG install failed: %s",
+                 esp_err_to_name(usj_err));
+    }
+
     s_ring = static_cast<char*>(heap_caps_malloc(kRingSize, MALLOC_CAP_SPIRAM));
     if (s_ring) {
         s_prev_vprintf = esp_log_set_vprintf(&mdb_vprintf);
     }
     xTaskCreate(&mdb_task, "mdb", 6144, nullptr, 5, nullptr);
+    ESP_LOGI(kMdbTag, "MDB ready — USB-Serial-JTAG transport, 'mdb help'");
 }
 
 }  // namespace aiwatchos_mdb
