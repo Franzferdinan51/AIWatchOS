@@ -21,6 +21,11 @@
 //
 // The host build compiles the stub section at the bottom instead: no
 // transport, an in-memory OTA capture sink, deterministic randomness.
+// FIRST: hal.hpp carries the ESP_PLATFORM -> __ESPRESSIF_IDF__ mapping.
+// Without it this TU silently compiled the host-stub branch into device
+// firmware (found by the buddy harvest: the ELF had no pump task at all).
+#include "aiwatchos/hal.hpp"
+
 #include "hermes_internal.hpp"
 #include "hermes_proto.hpp"
 

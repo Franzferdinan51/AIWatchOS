@@ -335,11 +335,11 @@ std::string hermes_health_line() {
             srv_up[i] = (c >= 'a' && c <= 'z') ? static_cast<char>(c - 'a' + 'A') : c;
         }
         srv_up[i] = '\0';
-        char tail[40];
+        char tail[48];
         if (ses[0]) {
-            std::snprintf(tail, sizeof(tail), " SRV %s SES %.8s", srv_up, ses);
+            std::snprintf(tail, sizeof(tail), " SRV %.23s SES %.8s", srv_up, ses);
         } else {
-            std::snprintf(tail, sizeof(tail), " SRV %s", srv_up);
+            std::snprintf(tail, sizeof(tail), " SRV %.23s", srv_up);
         }
         const size_t used = std::strlen(line);
         if (used + 1 < sizeof(line)) {
