@@ -1,0 +1,14 @@
+MDB_HEALTH_BEGIN
+uptime_s=345
+boot_count=12 panic_count=0 reset_reason=other
+heap_free=6422908 heap_min=6369236 psram_free=6344536
+battery_pct=100 battery_mv=4111 charging=0
+wifi_state=CONNECTED wifi_ip=- wifi_rssi=-47
+muse_link=OFFLINE
+hermes_paired=0 hermes_endpoint=lan
+hermes_health=BAT 100% UP 56:36 LINK PAIRING SRV HERMES SES 3d8408ad
+cfg_wifi=1 cfg_hatch_token=0 cfg_vm_token=0 cfg_tts_key=0
+weather_status=connecting weather_age_s=-1 current_app=clock asleep=0
+MDB_HEALTH_END
+[0;31mE (348441) lcd_panel.io.i2c: panel_io_i2c_rx_buffer(145): i2c transaction failed[0m
+[0;31mE (348441) FT5x06: esp_lcd_touch_ft5x06_read_data(186): I2C read error![0m

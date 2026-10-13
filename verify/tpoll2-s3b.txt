@@ -1,0 +1,7 @@
+MDB_TPOLL2_BEGIN
+prod io rx reg02: 10/10 ok
+fresh io rx reg02: 10/10 ok
+bus_reset: ESP_OK
+prod io rx reg02 post-reset: 5/5 ok
+tstat: ok=4124 fail=391 first_fail_ms=20657 last_err=ESP_ERR_INVALID_STATE
+MDB_TPOLL2_END
