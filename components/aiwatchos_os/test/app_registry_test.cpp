@@ -794,20 +794,30 @@ static void test_notification_wrap() {
 
 // --- Test the live mic level meter (companion live-screen pattern) ---
 static void test_muse_level_meter() {
-    // Idle renders flat 4px bars: 24 bars x 12 wide x 5 rows = 1440 px in the
-    // meter band. With a hot mic the RMS level jumps (~0.3 for int16 10000)
-    // and the bars grow; release mutes back to flat.
+    // Muse Gloss face: the level meter is 14 segments INSIDE the stage
+    // (y = 328..336, x = 116..294). Idle segments sit at `faint`
+    // (green 12); a hot mic blends them toward the LISTENING accent
+    // (green 46), peaking near green 27 at full level — the counts
+    // below key on green >= 24 for lit and the `faint` channels for
+    // unlit, not exact pixel totals.
     aiwatchos::TestHal hal;
     aiwatchos::App app = aiwatchos_muse::make_muse_app(hal);
     app.init();
 
     static uint16_t buf[aiwatchos::kDisplayWidth * aiwatchos::kDisplayHeight];
     aiwatchos::Framebuffer fb{buf, aiwatchos::kDisplayWidth, aiwatchos::kDisplayHeight};
-    auto band_px = [&]() {
+    auto band_count = [&](bool hot_green) {
         int n = 0;
-        for (int y = 300; y <= 435; ++y) {
-            for (int x = 0; x < aiwatchos::kDisplayWidth; ++x) {
-                if (buf[y * aiwatchos::kDisplayWidth + x] != 0x0000) ++n;
+        // The segment strip only (y 326..338, x 114..296): the glow
+        // rings pass outside this box, and `faint` (b=11) separates
+        // from the stage tint (b>=15) on the blue channel.
+        for (int y = 326; y <= 338; ++y) {
+            for (int x = 118; x <= 292; ++x) {   // segment interiors (glow ring clips the corners)
+                const uint16_t v = buf[y * aiwatchos::kDisplayWidth + x];
+                const int g = (v >> 5) & 0x3F;
+                const int r = (v >> 11) & 0x1F;
+                const int b = v & 0x1F;
+                if (hot_green ? (g >= 24) : (g <= 20 && r <= 10 && b <= 13)) ++n;
             }
         }
         return n;
@@ -816,7 +826,9 @@ static void test_muse_level_meter() {
     fb.fill(0x0000);
     app.render(fb);
     assert(aiwatchos_muse::muse_mic_level() == 0.0f);
-    assert(band_px() == 1440);   // flat idle bars
+    const int idle_dim = band_count(false);
+    assert(idle_dim >= 800);            // 14 unlit segments at `faint`
+    assert(band_count(true) == 0);      // nothing lit while idle
 
     hal.mic_fill_ = 10000;
     aiwatchos::TouchEvent press{205, 450, aiwatchos::TouchEvent::Press};
@@ -824,20 +836,29 @@ static void test_muse_level_meter() {
     app.tick(40);
     float level = aiwatchos_muse::muse_mic_level();
     assert(level > 0.2f && level < 0.4f);   // RMS(10000) ~= 0.305
+    // ~400 ms of frames: the scheme cross-fade (expEase rate 7) settles
+    // into LISTENING and the segment envelopes rise to the level.
     fb.fill(0x0000);
-    app.render(fb);
-    int hot = band_px();
-    assert(hot > 8000);   // bars tracked the live level
+    for (int i = 0; i < 10; ++i) {
+        app.tick(40);
+        app.render(fb);
+    }
+    const int hot_lit = band_count(true);
+    assert(hot_lit >= 100);             // centre segments lit toward accent
+    assert(band_count(false) < idle_dim - 300);
 
     aiwatchos::TouchEvent release{205, 450, aiwatchos::TouchEvent::Release};
     assert(app.on_touch(release) == true);
     app.tick(40);
     assert(aiwatchos_muse::muse_mic_level() == 0.0f);   // muted while idle
     fb.fill(0x0000);
-    app.render(fb);
-    assert(band_px() == 1440);
+    for (int i = 0; i < 6; ++i) {
+        app.tick(40);
+        app.render(fb);
+    }
+    assert(band_count(false) >= 700);   // envelopes decayed back to faint
 
-    printf("test_muse_level_meter: PASSED (level %.3f, hot %d px)\n", level, hot);
+    printf("test_muse_level_meter: PASSED (level %.3f, hot %d px)\n", level, hot_lit);
 }
 
 // --- Test the Hermes device-health dashboard (companion device-screen pattern) ---

@@ -4,6 +4,8 @@
 // Muse/Hermes server, push-to-talk voice capture (ES7210 mic), and reply playback
 // (ES8311 speaker). This adapter decomposes that into init/tick/render callbacks.
 #include "aiwatchos_muse.hpp"
+#include "aiwatchos/colors.hpp"
+#include "aiwatchos/font.hpp"
 #include "minimp3.h"
 #include <cmath>
 #include <cstdlib>
@@ -18,15 +20,91 @@ namespace aiwatchos_muse {
 
 constexpr uint32_t kTickRateMs = 40;   // match LVGL frame rate from board_waveshare_s3_206.c
 
-// RGB565 colours for the Muse voice interaction UI.
-constexpr uint16_t kMuseBg      = 0x0000;   // black (AMOLED power saving)
-constexpr uint16_t kPromptText  = 0xFFFF;   // white prompt text
-constexpr uint16_t kStatusColor = 0x7BCF;   // status bar / indicators
-
 // File-scope state for the callback-based app interface.
 static MuseState g_state;
 // Hal driven by this adapter (Board on device, injected fake in tests).
 static aiwatchos::Hal* g_hal = nullptr;
+
+// --- Muse Gloss face state (DESIGN_TOKENS sections 3+6, plan 3.3) ---
+// The state scheme cross-fades with an exponential ease (tokens: rate
+// 7/s) so colour changes bloom instead of snapping. Channels are kept
+// as floats in 565 space (r/b 0..31, g 0..63): 5 stops x 3 channels.
+struct SchemeF {
+    float ch[5][3];
+};
+static SchemeF g_scheme_cur = {};
+static bool g_scheme_init = false;
+static uint64_t g_anim_ms = 0;          // face animation clock (tick-driven)
+static float g_seg[14] = {};            // level-meter segment envelopes
+
+static void scheme_unpack(uint16_t c, float* out) {
+    out[0] = static_cast<float>((c >> 11) & 0x1F);
+    out[1] = static_cast<float>((c >> 5) & 0x3F);
+    out[2] = static_cast<float>(c & 0x1F);
+}
+static uint16_t scheme_pack(const float* in) {
+    int r = static_cast<int>(in[0] + 0.5f);
+    int g = static_cast<int>(in[1] + 0.5f);
+    int b = static_cast<int>(in[2] + 0.5f);
+    if (r < 0) r = 0; if (r > 31) r = 31;
+    if (g < 0) g = 0; if (g > 63) g = 63;
+    if (b < 0) b = 0; if (b > 31) b = 31;
+    return static_cast<uint16_t>((r << 11) | (g << 5) | b);
+}
+static uint16_t scheme_stop(int idx) { return scheme_pack(g_scheme_cur.ch[idx]); }
+
+// The face's logical state + its state word. Accent-bearing elements
+// (word, ring, meter, glow) follow this and nothing else does.
+static aiwatchos::MuseState muse_face_state(const char** word_out) {
+    if (g_state.listening) {
+        *word_out = "LISTENING";
+        return aiwatchos::MuseState::kListening;
+    }
+    if (muse_outbox_depth() > 0 || g_state.turn_bytes > 0) {
+        *word_out = "THINKING";
+        return aiwatchos::MuseState::kThinking;
+    }
+#ifdef __ESPRESSIF_IDF__
+    switch (aiwatchos_net::muse_link_state()) {
+        case aiwatchos_net::LinkState::kLinked:
+            *word_out = "READY";
+            return aiwatchos::MuseState::kReady;
+        case aiwatchos_net::LinkState::kConnecting:
+        case aiwatchos_net::LinkState::kWaitingWifi:
+        case aiwatchos_net::LinkState::kBackoff:
+            *word_out = "LINKING";
+            return aiwatchos::MuseState::kBoot;
+        case aiwatchos_net::LinkState::kOff:
+            break;
+    }
+#endif
+    *word_out = "READY";
+    return aiwatchos::MuseState::kReady;
+}
+
+// Advance the cross-fade + animation clock. Called from muse_tick.
+static void muse_face_anim(uint32_t elapsed_ms) {
+    g_anim_ms += elapsed_ms;
+    const char* word = nullptr;
+    const aiwatchos::StateScheme& target =
+        aiwatchos::state_scheme(muse_face_state(&word));
+    const uint16_t stops[5] = {target.f0, target.f1, target.f2,
+                               target.f3, target.accent};
+    if (!g_scheme_init) {
+        for (int i = 0; i < 5; ++i) scheme_unpack(stops[i], g_scheme_cur.ch[i]);
+        g_scheme_init = true;
+        return;
+    }
+    const float k = 1.0f - std::exp(-7.0f * static_cast<float>(elapsed_ms) / 1000.0f);
+    for (int i = 0; i < 5; ++i) {
+        float t[3];
+        scheme_unpack(stops[i], t);
+        for (int c = 0; c < 3; ++c) {
+            g_scheme_cur.ch[i][c] += (t[c] - g_scheme_cur.ch[i][c]) * k;
+        }
+    }
+}
+
 // Turn buffer: heap-allocated (PSRAM on device) so 240 KB never lands in DRAM.
 // Holds the current turn's ADPCM until the Noise transport drains it; freed
 // when the next turn begins.
@@ -187,6 +265,7 @@ void muse_tick(uint32_t elapsed_ms) {
     g_state.last_tick_ms += elapsed_ms;
     if (g_state.last_tick_ms < kTickRateMs) return;
     g_state.last_tick_ms = 0;
+    muse_face_anim(elapsed_ms);
 
     // In the original code, muse_app_run() calls:
     // - muse_pmu_poll_key(): poll AXP2101 for BOOT/PWR button presses
@@ -246,59 +325,221 @@ void muse_tick(uint32_t elapsed_ms) {
     }
 }
 
+namespace {
+
+// Pixel-width word wrap for the caption (Caption face, <= 2 lines).
+// Returns the line count; lines are written into `lines`.
+int caption_wrap(const char* text, int max_w, char lines[][64], int max_lines) {
+    using namespace aiwatchos;
+    int n_lines = 0;
+    const char* p = text;
+    while (*p && n_lines < max_lines) {
+        char* out = lines[n_lines];
+        int out_len = 0;
+        int width = 0;
+        const char* word_start = p;
+        while (*p && *p != '\n') {
+            const char* w = p;
+            while (*p && *p != ' ' && *p != '\n') ++p;
+            const int word_len = static_cast<int>(p - w);
+            char word_buf[64];
+            const int copy_len = word_len < 63 ? word_len : 63;
+            std::memcpy(word_buf, w, copy_len);
+            word_buf[copy_len] = '\0';
+            const int word_w = text_width_aa(word_buf, FontFace::kCaption);
+            const int add = (out_len > 0 ? text_width_aa(" ", FontFace::kCaption) : 0) + word_w;
+            if (out_len > 0 && width + add > max_w) {
+                p = w;   // reprocess this word on the next line
+                break;
+            }
+            if (out_len > 0) {
+                out[out_len++] = ' ';
+                width += text_width_aa(" ", FontFace::kCaption);
+            }
+            std::memcpy(out + out_len, word_buf, copy_len);
+            out_len += copy_len;
+            width += word_w;
+            while (*p == ' ') ++p;
+            word_start = p;
+        }
+        (void)word_start;
+        out[out_len] = '\0';
+        ++n_lines;
+        if (*p == '\n') ++p;
+    }
+    return n_lines;
+}
+
+// The interim Jolly (plan 3.3 checkpoint): the locked character drawn
+// from primitives in its FIXED palette — body, belly, face, dot eyes
+// with a ~4.5 s blink, smile, blush, breathing bob. The muse_pixel.c
+// sprite port is the follow-up that replaces this wholesale.
+void draw_jolly(aiwatchos::Framebuffer& fb, int cx, int cy) {
+    using namespace aiwatchos;
+    const int bob = static_cast<int>(
+        std::sin(static_cast<float>(g_anim_ms) * 6.28318f / 3000.0f) * 2.0f);
+    const bool blink = (g_anim_ms % 4500) < 120;
+    const int by = cy + bob;
+    // Proportions are the locked character at 0.82 scale, centred
+    // high enough that the meter row fits inside the stage below it.
+    // Feet + arms (behind the body).
+    fb.fill_circle(cx - 34, by + 79, 12, jolly::kFurMid);
+    fb.fill_circle(cx + 34, by + 79, 12, jolly::kFurMid);
+    fb.fill_circle(cx - 72, by + 25, 13, jolly::kFurMid);
+    fb.fill_circle(cx + 72, by + 25, 13, jolly::kFurMid);
+    // Body + belly.
+    fb.fill_circle(cx, by + 13, 72, jolly::kFurMid);
+    fb.fill_circle(cx, by + 36, 46, jolly::kFurLight);
+    // Face: pale oval (two discs), lighter at the top.
+    fb.fill_circle(cx, by - 23, 43, jolly::kSkin);
+    fb.fill_circle(cx, by - 28, 33, jolly::kSkinLight);
+    // Blush (pre-blended solid discs read as soft cheeks).
+    const uint16_t blush =
+        blend565(jolly::kSkin, jolly::kBlush, 90);
+    fb.fill_circle(cx - 30, by - 11, 7, blush);
+    fb.fill_circle(cx + 30, by - 11, 7, blush);
+    // Eyes: dot eyes, or 3px lines mid-blink.
+    if (blink) {
+        fb.fill_round_rect(cx - 21, by - 27, 9, 3, 1, jolly::kOutline);
+        fb.fill_round_rect(cx + 12, by - 27, 9, 3, 1, jolly::kOutline);
+    } else {
+        fb.fill_circle(cx - 16, by - 26, 4, jolly::kOutline);
+        fb.fill_circle(cx + 16, by - 26, 4, jolly::kOutline);
+    }
+    // Smile: a shallow arc (ring segment through the bottom quadrant).
+    fb.arc(cx, by - 13, 13, 2, 30.0f, 120.0f, jolly::kOutline);
+}
+
+}  // namespace
+
 void muse_render(aiwatchos::Framebuffer& fb) {
     if (!g_state.initialized) return;
+    using namespace aiwatchos;
 
-    // Clear to black (AMOLED native — saves power).
-    fb.fill(kMuseBg);
+    const int kCx = kDisplayWidth / 2;   // 205
+    const int kCy = 232;                 // face centre (tokens section 6)
+    constexpr int kRingR = 188;
+    constexpr int kStageR = 138;
 
-    // Phase prompt, mirroring the companion live session phases: idle,
-    // listening, or a buffered turn waiting for the transport ("READY").
-    // Idle reflects the link state so the user can tell offline / linking /
-    // linked at a glance (device builds; host builds have no net stack and
-    // keep the plain prompt).
-    const char* prompt = "HOLD TO TALK";
-    if (g_state.listening) {
-        prompt = "LISTENING";
-    } else if (g_state.turn_bytes > 0) {
-        prompt = "READY";
+    const char* word = nullptr;
+    const aiwatchos::MuseState face_state = muse_face_state(&word);
+    const uint16_t accent = scheme_stop(4);
+    if (!g_scheme_init) muse_face_anim(0);
+
+    // State word (Headline, accent) at the top of the content zone.
+    draw_text_aa_centered(fb, kCx, 50, word, FontFace::kHeadline, accent);
+
+    // G6 glow: 8 rings between the stage and the bezel, scheme stops
+    // f3 (outer) -> f0 (inner) in pairs.
+    for (int i = 0; i < 8; ++i) {
+        fb.ring(kCx, kCy, kStageR + 24 - 3 * i, 3, scheme_stop(3 - (i * 4) / 8));
     }
-#ifdef __ESPRESSIF_IDF__
-    else {
-        switch (aiwatchos_net::muse_link_state()) {
-            case aiwatchos_net::LinkState::kLinked: prompt = "LINKED - HOLD TO TALK"; break;
-            case aiwatchos_net::LinkState::kConnecting: prompt = "CONNECTING"; break;
-            case aiwatchos_net::LinkState::kWaitingWifi: prompt = "WAITING FOR WIFI"; break;
-            case aiwatchos_net::LinkState::kBackoff: prompt = "LINK RETRYING"; break;
-            case aiwatchos_net::LinkState::kOff: break;  // plain prompt
+
+    // Bezel ring + G7 gloss arc (always on, state-independent).
+    fb.ring(kCx, kCy, kRingR, 6, colors::kRingTrack);
+    fb.arc(kCx, kCy, kRingR - 1, 2, 207.0f, 90.0f,
+           blend565(colors::kRingTrack, colors::kWhite, 153));
+
+    // State ring overlays: LISTENING progress (muse_progress of the
+    // turn buffer), THINKING spinner (60 degrees at 300 deg/s).
+    if (face_state == aiwatchos::MuseState::kListening) {
+        fb.arc(kCx, kCy, kRingR, 6, 270.0f, muse_progress() * 360.0f,
+               accent);
+    } else if (face_state == aiwatchos::MuseState::kThinking) {
+        const float spin =
+            static_cast<float>(g_anim_ms % 1200) * 360.0f / 1200.0f;
+        fb.arc(kCx, kCy, kRingR, 6, 270.0f + spin, 60.0f, accent);
+    }
+
+    // Stage disc: scheme f3 darkened toward black, faint top gloss.
+    const uint16_t stage = lerp565(scheme_stop(3), colors::kBlack, 102);
+    fb.fill_circle(kCx, kCy, kStageR, stage);
+    fb.arc(kCx, kCy, kStageR - 8, 2, 200.0f, 110.0f,
+           blend565(stage, colors::kWhite, 40));
+
+    draw_jolly(fb, kCx, kCy - 14);
+
+    // Level meter INSIDE the stage (tokens: 14 segments 9x9 r3, gap 4):
+    // lit = accent blended by the segment envelope, else faint.
+    {
+        const float env = g_state.listening ? g_state.mic_level : 0.0f;
+        constexpr int kSegs = 14;
+        constexpr int kSegW = 9, kSegGap = 4;
+        const int x0 = kCx - (kSegs * (kSegW + kSegGap) - kSegGap) / 2;
+        const int y = kCy + 96;   // inside the stage (half-width 92 there)
+        for (int i = 0; i < kSegs; ++i) {
+            const float shape =
+                1.0f - std::fabs(static_cast<float>(i) - 6.5f) / 7.5f;
+            float target = env * 1.6f * shape;
+            if (target > 1.0f) target = 1.0f;
+            g_seg[i] += (target - g_seg[i]) * 0.5f;
+            const uint16_t c = lerp565(colors::kFaint, accent,
+                                       static_cast<int>(g_seg[i] * 256.0f));
+            fb.fill_round_rect(x0 + i * (kSegW + kSegGap), y, kSegW, kSegW,
+                               3, c);
         }
     }
+
+    // Caption bubble: the latest reply (device) or the latest turn
+    // (host), in Caption `caption`; hint text when neither exists.
+    char caption[256];
+    caption[0] = '\0';
+#ifdef __ESPRESSIF_IDF__
+    char reply[240];
+    if (aiwatchos_net::muse_link_last_reply(reply, sizeof(reply)) &&
+        reply[0]) {
+        std::snprintf(caption, sizeof(caption), "%s", reply);
+    }
 #endif
-    int text_x = (aiwatchos::kDisplayWidth -
-                  aiwatchos::Framebuffer::text_width(prompt)) / 2;
-    int text_y = aiwatchos::kDisplayHeight / 2 - 30;
-
-    // Phase prompt in the shared 5x7 font (scale 2 -> 10x14 px glyphs).
-    fb.draw_text(text_x, text_y, prompt, kPromptText);
-
-    // Live level meter: 24 bars across the lower half, heights from the
-    // smoothed mic RMS (flat while idle). Companion live-screen equivalent.
-    constexpr int kBars = 24;
-    constexpr int kBarW = 12;
-    constexpr int kGap = 4;
-    constexpr int kBaseY = 430;
-    constexpr int kMaxH = 120;
-    const int meter_x0 = (aiwatchos::kDisplayWidth - (kBars * (kBarW + kGap) - kGap)) / 2;
-    for (int b = 0; b < kBars; ++b) {
-        int h = 4 + static_cast<int>(g_state.mic_level * kMaxH);
-        if (h > kMaxH + 4) h = kMaxH + 4;
-        int bx = meter_x0 + b * (kBarW + kGap);
-        fb.fill_rect(bx, kBaseY - h, bx + kBarW - 1, kBaseY, kStatusColor);
+    if (!caption[0]) {
+        MuseTurn last = {};
+        if (muse_turn_at(0, &last)) {
+            std::snprintf(caption, sizeof(caption),
+                          "LAST TURN %u.%us - %u KB",
+                          static_cast<unsigned>(last.duration_ms / 1000),
+                          static_cast<unsigned>((last.duration_ms % 1000) / 100),
+                          static_cast<unsigned>(last.bytes / 1024));
+        } else if (g_state.listening) {
+            std::snprintf(caption, sizeof(caption), "Listening...");
+        } else {
+            std::snprintf(caption, sizeof(caption),
+                          "Hold to talk - Muse answers here.");
+        }
+    }
+    {
+        char lines[2][64];
+        const int n = caption_wrap(caption, 300, lines, 2);
+        int text_w = 0;
+        for (int i = 0; i < n; ++i) {
+            const int w = text_width_aa(lines[i], FontFace::kCaption);
+            if (w > text_w) text_w = w;
+        }
+        const int bw = text_w + 24;
+        const int bh = n * font_line_height(FontFace::kCaption) + 12;
+        const int bx = kCx - bw / 2;
+        const int by = 374;
+        // No sprite shadow: the baked card shadow is sized for the
+        // 392px notification cards; the caption bubble is content-sized.
+        BubbleStyle style = bubble_style();
+        fb.draw_bubble(bx, by, bw, bh, 16, style);
+        for (int i = 0; i < n; ++i) {
+            draw_text_aa(fb, bx + 12,
+                         by + 6 + i * font_line_height(FontFace::kCaption),
+                         lines[i], FontFace::kCaption, colors::kCaption);
+        }
     }
 
-    // Status bar at top showing battery and connection state.
-    aiwatchos::PowerStatus ps = g_hal ? g_hal->read_power() : aiwatchos::PowerStatus{};
-    (void)ps;  // power display is handled by the OS shell status bar
+    // PTT disc (touch target unchanged: Press with y > H-100 starts,
+    // Release ends — the shell now delivers real Release events).
+    {
+        BubbleStyle ptt = bubble_style_filled();
+        fb.draw_bubble(kCx - 36, 424, 72, 72, 36, ptt);
+        if (face_state == aiwatchos::MuseState::kListening) {
+            fb.ring(kCx, 460, 40, 3, accent);
+        }
+        draw_icon(fb, kCx - 20, 440, Icon::kMic, FontFace::kIcon40,
+                  colors::kMist);
+    }
 }
 
 bool muse_on_touch(const aiwatchos::TouchEvent& event) {
