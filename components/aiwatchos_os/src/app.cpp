@@ -8,7 +8,14 @@
 namespace aiwatchos {
 
 void Framebuffer::fill(uint16_t color) {
-    for (int i = 0; i < width * height; ++i) {
+    // Perf (audit suspect #2): direct span writes — the old fill /
+    // hline / fill_rect chain funnelled every pixel through the
+    // bounds-checked put_pixel, which made even the static backdrop
+    // cost ~206k checked writes per frame. These paths clip ONCE and
+    // then write through a raw row pointer (same discipline as
+    // fill_span below).
+    const int n = width * height;
+    for (int i = 0; i < n; ++i) {
         pixels[i] = color;
     }
 }
@@ -16,24 +23,39 @@ void Framebuffer::fill(uint16_t color) {
 void Framebuffer::hline(int x0, int x1, int y, uint16_t color) {
     if (y < 0 || y >= height) return;
     if (x0 > x1) { int t = x0; x0 = x1; x1 = t; }
+    if (x1 < 0 || x0 >= width) return;
+    if (x0 < 0) x0 = 0;
+    if (x1 >= width) x1 = width - 1;
+    uint16_t* row = pixels + y * width;
     for (int x = x0; x <= x1; ++x) {
-        put_pixel(x, y, color);
+        row[x] = color;
     }
 }
 
 void Framebuffer::vline(int x, int y0, int y1, uint16_t color) {
     if (x < 0 || x >= width) return;
     if (y0 > y1) { int t = y0; y0 = y1; y1 = t; }
+    if (y1 < 0 || y0 >= height) return;
+    if (y0 < 0) y0 = 0;
+    if (y1 >= height) y1 = height - 1;
     for (int y = y0; y <= y1; ++y) {
-        put_pixel(x, y, color);
+        pixels[y * width + x] = color;
     }
 }
 
 void Framebuffer::fill_rect(int x0, int y0, int x1, int y1, uint16_t color) {
     if (x0 > x1) { int t = x0; x0 = x1; x1 = t; }
     if (y0 > y1) { int t = y0; y0 = y1; y1 = t; }
+    if (x1 < 0 || x0 >= width || y1 < 0 || y0 >= height) return;
+    if (x0 < 0) x0 = 0;
+    if (x1 >= width) x1 = width - 1;
+    if (y0 < 0) y0 = 0;
+    if (y1 >= height) y1 = height - 1;
     for (int y = y0; y <= y1; ++y) {
-        hline(x0, x1, y, color);
+        uint16_t* row = pixels + y * width;
+        for (int x = x0; x <= x1; ++x) {
+            row[x] = color;
+        }
     }
 }
 
