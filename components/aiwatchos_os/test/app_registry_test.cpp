@@ -1999,6 +1999,62 @@ static void test_notifications_actionable() {
     printf("test_notifications_actionable: PASSED\n");
 }
 
+// --- Hermes -> OS Notifications bridge (H10) ---
+static void test_hermes_notifications_bridge() {
+    using namespace aiwatchos_hermes;
+    aiwatchos::TestHal hal;
+    aiwatchos::NotificationManager mgr(hal);
+    aiwatchos::set_active_notifications(&mgr);
+    hermes_linked(hal);
+
+    // A prompt posts ONE actionable entry, deduped across pumps.
+    hermes_test_inject_text(
+        "{\"type\":\"prompt\",\"id\":\"pr1\",\"title\":\"Approve?\","
+        "\"text\":\"Run the thing?\",\"ttl_s\":60}");
+    hermes_pump(hal.now_ms());
+    assert(mgr.count() == 1);
+    assert(mgr.has_action("hermes", "pr1"));
+    assert(mgr.at(0).action_app == "hermes");
+    assert(mgr.at(0).expires_ms == 60000);
+    hermes_pump(hal.now_ms());
+    assert(mgr.count() == 1);
+
+    // Answering in the Hermes app retires the entry.
+    assert(hermes_answer_prompt(true));
+    hermes_pump(hal.now_ms());
+    assert(mgr.count() == 0);
+    assert(!mgr.has_action("hermes", "pr1"));
+
+    // A display card and a notice each post ONE plain entry.
+    hermes_test_inject_text(
+        "{\"type\":\"display\",\"title\":\"Deploy\",\"body\":\"v2 shipped\",\"ttl_s\":30}");
+    hermes_test_inject_text(
+        "{\"type\":\"notice\",\"text\":\"Heads up\",\"ttl_s\":8}");
+    hermes_pump(hal.now_ms());
+    assert(mgr.count() == 2);
+    hermes_pump(hal.now_ms());
+    assert(mgr.count() == 2);
+
+    // TTL lapse: the entry STAYS and reads expired — it is never
+    // retired as if answered, and never actionable again.
+    hermes_test_inject_text(
+        "{\"type\":\"prompt\",\"id\":\"pr2\",\"title\":\"Quick\","
+        "\"text\":\"Yes?\",\"ttl_s\":5}");
+    hermes_pump(hal.now_ms());
+    assert(mgr.count() == 3);
+    hal.advance_ms(6000);
+    hermes_pump(hal.now_ms());
+    assert(mgr.count() == 3);
+    assert(mgr.has_action("hermes", "pr2"));
+    bool saw_expired = false;
+    for (size_t i = 0; i < mgr.count(); ++i) {
+        if (mgr.at(i).action_id == "pr2") saw_expired = mgr.expired(mgr.at(i));
+    }
+    assert(saw_expired);
+    aiwatchos::set_active_notifications(nullptr);
+    printf("test_hermes_notifications_bridge: PASSED\n");
+}
+
 int main() {
     test_aa_text();                      // baked Inter AA renderer against real assets
     test_touch_synth();                  // Press/Move/Release from the point stream
@@ -2044,6 +2100,7 @@ int main() {
     test_hermes_talk();                  // Hermes push-to-talk framing + SAY HELLO
     test_hermes_ota();                   // Hermes OTA offer/begin/stream/verify
     test_hermes_auth_failure();          // Hermes auth lockout + heartbeat death
+    test_hermes_notifications_bridge();  // H10: prompts/cards/notices -> OS notifications
 
     printf("\nAll AppManager tests PASSED.\n");
     return 0;

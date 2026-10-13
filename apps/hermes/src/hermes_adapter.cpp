@@ -7,6 +7,7 @@
 // owns WiFi + the WebSocket and feeds frames into the client from its own
 // task, so the session stays alive while other apps are foregrounded.
 #include "aiwatchos_hermes.hpp"
+#include "aiwatchos/notifications.hpp"  // H10 bridge target
 #include "hermes_internal.hpp"
 
 #include "aiwatchos/colors.hpp"
@@ -374,9 +375,97 @@ bool hermes_answer_prompt(bool yes) {
     return g_client->answer_prompt(yes);
 }
 
+// --- H10: Hermes events -> OS Notifications ---------------------------------
+// Runs inside hermes_pump (the link task's cadence on device) so events
+// post even while another app is foregrounded. Edge-detected against
+// the client view: a prompt posts ONE actionable entry (deduped by
+// prompt id in the manager), a card/notice posts once per activation.
+bool g_bridge_prompt_posted = false;
+char g_bridge_prompt_id[32] = {};
+uint64_t g_bridge_prompt_since_ms = 0;
+bool g_bridge_card_on = false;
+uint64_t g_bridge_card_until_ms = 0;
+char g_bridge_card_title[96] = {};
+char g_bridge_notice[160] = {};
+uint64_t g_bridge_notice_until_ms = 0;
+
+void hermes_notify_bridge(const HermesView& v, uint64_t now) {
+    aiwatchos::NotificationManager* nm = aiwatchos::active_notifications();
+    if (!nm) return;
+
+    // Prompt: post/refresh while active; retire when it closes BEFORE
+    // its TTL (answered or dismissed). If the TTL lapses first, the
+    // entry stays — its deadline makes the manager render it EXPIRED,
+    // never actionable.
+    if (v.prompt_active && v.prompt_id[0]) {
+        const bool ttl_lapsed = v.prompt_ttl_s > 0 &&
+            now - v.prompt_since_ms >=
+                static_cast<uint64_t>(v.prompt_ttl_s) * 1000ULL;
+        if (ttl_lapsed) {
+            g_bridge_prompt_posted = false;   // leave the entry, expired
+        } else if (!g_bridge_prompt_posted ||
+                   std::strcmp(g_bridge_prompt_id, v.prompt_id) != 0 ||
+                   g_bridge_prompt_since_ms != v.prompt_since_ms) {
+            const uint64_t expires = v.prompt_ttl_s > 0
+                ? v.prompt_since_ms +
+                      static_cast<uint64_t>(v.prompt_ttl_s) * 1000ULL
+                : 0;
+            nm->add_actionable(
+                v.prompt_title[0] ? v.prompt_title : "Hermes prompt",
+                v.prompt_text[0] ? v.prompt_text
+                                 : "Hermes needs your answer.",
+                "hermes", v.prompt_id, expires);
+            std::snprintf(g_bridge_prompt_id, sizeof(g_bridge_prompt_id),
+                          "%s", v.prompt_id);
+            g_bridge_prompt_since_ms = v.prompt_since_ms;
+            g_bridge_prompt_posted = true;
+        }
+    } else if (g_bridge_prompt_posted) {
+        nm->retire_action("hermes", g_bridge_prompt_id);
+        g_bridge_prompt_posted = false;
+        g_bridge_prompt_id[0] = '\0';
+        g_bridge_prompt_since_ms = 0;
+    }
+
+    // Display / image card: one plain entry per activation identity.
+    const bool card_on = v.card_active || v.image_active;
+    const uint64_t card_until =
+        v.card_active ? v.card_until_ms : v.image_until_ms;
+    if (card_on) {
+        if (!g_bridge_card_on || card_until != g_bridge_card_until_ms ||
+            std::strcmp(g_bridge_card_title, v.card_title) != 0) {
+            nm->add_notification(
+                v.card_title[0] ? v.card_title : "Hermes",
+                v.card_body[0] ? v.card_body : v.status);
+            std::snprintf(g_bridge_card_title, sizeof(g_bridge_card_title),
+                          "%s", v.card_title);
+            g_bridge_card_until_ms = card_until;
+        }
+        g_bridge_card_on = true;
+    } else {
+        g_bridge_card_on = false;
+        g_bridge_card_until_ms = 0;
+    }
+
+    // Notice banner: one entry per (text, deadline).
+    if (v.notice[0] && v.notice_until_ms) {
+        if (std::strcmp(g_bridge_notice, v.notice) != 0 ||
+            g_bridge_notice_until_ms != v.notice_until_ms) {
+            nm->add_notification("Hermes", v.notice);
+            std::snprintf(g_bridge_notice, sizeof(g_bridge_notice), "%s",
+                          v.notice);
+            g_bridge_notice_until_ms = v.notice_until_ms;
+        }
+    }
+}
+
 void hermes_pump(uint64_t now_ms) {
     if (!g_client) return;
     LockGuard lock;
+    // H10 bridge BEFORE tick(): tick() clears an expired prompt from
+    // the view, and the bridge must see it first to leave its entry in
+    // place as EXPIRED rather than retiring it as if answered.
+    hermes_notify_bridge(g_client->view(), now_ms);
     g_client->tick(now_ms);
 }
 
