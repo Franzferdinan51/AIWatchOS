@@ -12,6 +12,7 @@
 #include "aiwatchos/battery_display.hpp"
 #include "aiwatchos/hal.hpp"
 #include "aiwatchos/display_power.hpp"
+#include "aiwatchos/boot_escape.hpp"
 
 #include "aiwatchos/settings_page.hpp"
 #include "aiwatchos/notifications.hpp"
@@ -333,6 +334,9 @@ extern "C" void app_main(void) {
 
     // Touch event synthesis (Press/Move/Release from the FT3168 point
     // stream) and band-based dirty flushing (plan 1.6/1.7).
+    // BOOT-hold escape detector (shell gesture; applied in the loop
+    // at the input sampling point, above app dispatch).
+    static aiwatchos::BootEscape g_boot_escape;
     static aiwatchos::TouchSynth g_touch_synth;
     static aiwatchos::BandFlush g_band_flush;
     // App-switch brightness dip state (plan 3.0 transition).
@@ -352,6 +356,19 @@ extern "C" void app_main(void) {
         // indistinguishable from physical input downstream.
         aiwatchos_mdb::detail::apply_frame(&n_points, touch_xs, touch_ys,
                                            &buttons);
+
+        // BOOT-hold escape (shell gesture, above app dispatch): BOOT
+        // is also an app key (PTT / barge-in) and a capture-mode app
+        // owns it completely, so the escape cannot live in any app.
+        // Holding BOOT >= 2 s fires once per hold: switch to the
+        // launcher, and swallow the rest of the hold (bit masked) so
+        // no app ever acts on this press. Short presses pass through
+        // untouched. Runs asleep too: the power policy below still
+        // wakes the panel on the initial press, as before.
+        if (g_boot_escape.update((buttons & 0x01u) != 0, frame_now_ms)) {
+            g_app_mgr.switch_to("launcher");
+        }
+        if (g_boot_escape.latched()) buttons &= ~0x01u;
 
         // Display power transitions. On wake, execution falls through and
         // renders below, so the panel immediately shows the current frame;

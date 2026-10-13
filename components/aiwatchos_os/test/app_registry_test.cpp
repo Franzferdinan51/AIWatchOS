@@ -26,7 +26,8 @@
 #include "aiwatchos/battery_display.hpp"   // for status-bar time rendering verification
 #include "aiwatchos/notifications.hpp"   // for notification wrap verification
 #include "aiwatchos/color_test.hpp"      // for colour-test pattern verification
-#include "aiwatchos/touch_synth.hpp"     // for Press/Move/Release synthesis verification
+#include "aiwatchos/touch_synth.hpp"
+#include "aiwatchos/boot_escape.hpp"   // for BOOT-hold escape verification     // for Press/Move/Release synthesis verification
 #include "aiwatchos/band_flush.hpp"      // for dirty-band flush verification
 #include "aiwatchos/font.hpp"            // for AA text/icon rendering verification
 #include "aiwatchos_hermes.hpp"   // for device-health dashboard verification
@@ -2506,9 +2507,87 @@ static void test_hermes_reply_notify() {
     printf("test_hermes_reply_notify: PASSED\n");
 }
 
+
+// --- BOOT-hold shell escape (stage-2 trap fix) ---
+// The detector is a pure state machine like DisplayPower; the wiring
+// case below scripts the exact app_main seam: a capture-mode app in
+// the foreground, BOOT held, and at the firing frame the shell
+// switches to the launcher and masks the bit for the rest of the hold.
+static void test_boot_escape() {
+    using aiwatchos::BootEscape;
+
+    // Short press (500 ms): never fires, never latches.
+    {
+        BootEscape esc;
+        assert(!esc.update(true, 1000));
+        assert(!esc.update(true, 1400));
+        assert(!esc.latched());
+        assert(!esc.update(false, 1500));
+        assert(!esc.latched());
+    }
+    // Hold: fires exactly once, on the frame that crosses 2000 ms;
+    // release clears the latch and a fresh hold fires again.
+    {
+        BootEscape esc;
+        assert(!esc.update(true, 2000));
+        assert(!esc.update(true, 3999));   // 1999 ms in: not yet
+        assert(esc.update(true, 4000));    // 2000 ms in: fires
+        assert(esc.latched());
+        assert(!esc.update(true, 4100));   // still held: no second fire
+        assert(esc.latched());
+        assert(!esc.update(false, 4200));
+        assert(!esc.latched());
+        assert(!esc.update(true, 5000));
+        assert(esc.update(true, 7000));    // second hold fires too
+    }
+    // Bounce resets the timer: a broken hold never accumulates.
+    {
+        BootEscape esc;
+        assert(!esc.update(true, 0));
+        assert(!esc.update(true, 1900));
+        assert(!esc.update(false, 1950));  // released at 1950 ms
+        assert(!esc.update(true, 2000));   // new press starts over
+        assert(!esc.update(true, 3900));   // 1900 ms into the new press
+        assert(esc.update(true, 4000));    // 2000 ms into the new press
+    }
+    // Wiring, exactly as app_main runs it: foreground capture app,
+    // BOOT scripted down at the 40 ms frame cadence for 2.4 s.
+    {
+        aiwatchos::TestHal hal;
+        aiwatchos::AppManager mgr(hal);
+        aiwatchos::App capture_app = aiwatchos::make_app("muse");
+        aiwatchos::App launcher_app = aiwatchos::make_app("launcher");
+        assert(mgr.register_app(&capture_app, true));
+        assert(mgr.register_app(&launcher_app));
+        assert(std::string(mgr.current_app_id()) == "muse");
+        BootEscape esc;
+        uint64_t t = 10000;
+        bool saw_fire = false;
+        for (int frame = 0; frame < 60; ++frame) {
+            uint32_t buttons = 0x01u;      // BOOT held the whole time
+            if (esc.update((buttons & 0x01u) != 0, t)) {
+                mgr.switch_to("launcher");
+                saw_fire = true;
+            }
+            if (esc.latched()) buttons &= ~0x01u;   // swallowed
+            if (frame < 50) {   // 50 frames * 40 ms = 2000 ms: fire is frame 50
+                assert(std::string(mgr.current_app_id()) == "muse");
+                assert(buttons == 0x01u);          // not yet swallowed
+            } else {
+                assert(std::string(mgr.current_app_id()) == "launcher");
+                assert(buttons == 0x00u);          // swallowed after firing
+            }
+            t += 40;
+        }
+        assert(saw_fire);
+    }
+    printf("test_boot_escape: PASSED\n");
+}
+
 int main() {
     test_aa_text();                      // baked Inter AA renderer against real assets
-    test_touch_synth();                  // Press/Move/Release from the point stream
+    test_touch_synth();
+    test_boot_escape();                  // shell BOOT-hold escape: >= 2 s hold -> launcher, press swallowed
     test_band_flush();                   // dirty-band hash change detection
     test_color_test_pattern();           // pure bands + accents for the byte-order check
     test_gloss_color_math();             // Muse Gloss token/blend/gradient math
