@@ -17,6 +17,7 @@ set(COMPONENT_SRCS
     src/color_test.cpp
     src/touch_synth.cpp
     src/band_flush.cpp
+    src/font.cpp
 )
 
 set(COMPONENT_ADD_INCLUDEDIRS include)
@@ -31,7 +32,7 @@ idf_component_register(
     # gone); these make driver/gpio.h, driver/spi_master.h, driver/i2c_master.h
     # and the esp_lcd panel headers visible to the HAL drivers. esp_driver_i2c
     # is public because hal.hpp exposes the shared-bus accessor to dependents.
-    PRIV_REQUIRES esp_driver_gpio esp_driver_spi esp_lcd esp_driver_i2s esp_timer
+    PRIV_REQUIRES esp_driver_gpio esp_driver_spi esp_lcd esp_driver_i2s esp_timer fatfs
     REQUIRES esp_driver_i2c
 )
 

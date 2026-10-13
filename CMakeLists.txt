@@ -9,3 +9,11 @@ set(EXTRA_COMPONENT_DIRS $ENV{IDF_PATH}/examples/common_components/protocol_exam
 # no components, no project_description.json).
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 project(aiwatchos)
+
+# Bake the UI assets (baked Inter fonts + shadow sprites from
+# tools/gen_font.py, committed under assets/) into the aiwatchos_assets
+# FAT partition at build time. FLASH_IN_PROJECT makes the partition
+# image part of `idf.py flash`, so the fonts land with the firmware
+# while the app slots stay untouched. The OS mounts the partition
+# read-only at boot (font.cpp) and loads the assets into PSRAM.
+fatfs_create_spiflash_image(aiwatchos_assets assets FLASH_IN_PROJECT)

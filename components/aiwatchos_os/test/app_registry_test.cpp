@@ -27,6 +27,7 @@
 #include "aiwatchos/color_test.hpp"      // for colour-test pattern verification
 #include "aiwatchos/touch_synth.hpp"     // for Press/Move/Release synthesis verification
 #include "aiwatchos/band_flush.hpp"      // for dirty-band flush verification
+#include "aiwatchos/font.hpp"            // for AA text/icon rendering verification
 #include "aiwatchos_hermes.hpp"   // for device-health dashboard verification
 #include "aiwatchos_muse.hpp"   // for push-to-talk turn buffering verification
 #include "muse_adpcm.h"         // for IMA-ADPCM round-trip verification
@@ -1663,7 +1664,59 @@ static void test_band_flush() {
     printf("test_band_flush: PASSED\n");
 }
 
+// --- Test the baked-font AA renderer (loads the real committed assets) ----
+static void test_aa_text() {
+    using namespace aiwatchos;
+    static uint16_t buf[kDisplayWidth * kDisplayHeight];
+    Framebuffer fb{buf, kDisplayWidth, kDisplayHeight};
+    fb.fill(0x0000);
+    if (!assets_ready()) {
+        printf("test_aa_text: SKIPPED (assets not found from cwd)\n");
+        return;
+    }
+    assert(font_available(FontFace::kBody));
+    // Tabular digits: equal widths for different times (no jitter).
+    const int w1 = text_width_aa("1:11", FontFace::kDisplay);
+    const int w2 = text_width_aa("8:88", FontFace::kDisplay);
+    assert(w1 == w2 && w1 > 150);
+    // Lowercase is preserved and narrower than the same caps would be is
+    // NOT asserted (metrics, not taste) — but width must be positive and
+    // the word must ink pixels.
+    const int wtext = text_width_aa("Listening", FontFace::kBody);
+    assert(wtext > 40);
+    draw_text_aa(fb, 20, 60, "Listening", FontFace::kBody, 0xFFFF);
+    int inked = 0;
+    for (int y = 55; y < 90; ++y)
+        for (int x = 15; x < 15 + wtext + 10; ++x)
+            if (buf[y * kDisplayWidth + x] != 0) ++inked;
+    assert(inked > 200);   // real glyph ink, AA edges included
+    // AA means some pixels are partial (not just 0 / 0xFFFF).
+    int partial = 0;
+    for (int y = 55; y < 90; ++y)
+        for (int x = 15; x < 15 + wtext + 10; ++x) {
+            uint16_t v = buf[y * kDisplayWidth + x];
+            if (v != 0 && v != 0xFFFF) ++partial;
+        }
+    assert(partial > 20);
+    // Icons draw through the same path.
+    fb.fill(0x0000);
+    draw_icon(fb, 20, 120, Icon::kBell, FontFace::kIcon40, 0xFFFF);
+    int icon_ink = 0;
+    for (int y = 115; y < 170; ++y)
+        for (int x = 15; x < 70; ++x)
+            if (buf[y * kDisplayWidth + x] != 0) ++icon_ink;
+    assert(icon_ink > 100);
+    // Shadow sprites loaded with their anchors.
+    assert(shadow_tile() != nullptr && shadow_tile()->alpha != nullptr);
+    assert(shadow_card() != nullptr && shadow_card()->w == 424);
+    int ct = 0, cb = 0;
+    card_shadow_caps(ct, cb);
+    assert(ct == 54 && cb == 40);
+    printf("test_aa_text: PASSED\n");
+}
+
 int main() {
+    test_aa_text();                      // baked Inter AA renderer against real assets
     test_touch_synth();                  // Press/Move/Release from the point stream
     test_band_flush();                   // dirty-band hash change detection
     test_color_test_pattern();           // pure bands + accents for the byte-order check

@@ -4,6 +4,7 @@
 #include "aiwatchos/app.hpp"
 #include "aiwatchos/app_manager.hpp"
 #include "aiwatchos/band_flush.hpp"
+#include "aiwatchos/font.hpp"
 #include "aiwatchos/touch_synth.hpp"
 #include "aiwatchos/clock_face.hpp"
 #include "aiwatchos/launcher_ui.hpp"
@@ -111,6 +112,11 @@ extern "C" void app_main(void) {
     // way: unconfigured WiFi leaves the app in its NO DATA YET state.
     aiwatchos_weather::weather_service_start();
 #endif
+
+    // Load the baked font/sprite assets into PSRAM (mounted from the
+    // aiwatchos_assets FAT partition on device). Failure leaves the UI
+    // in the 5x7 fallback — degraded, never textless.
+    aiwatchos::assets_load();
 
     // --- 4. Main event loop (replaces Arduino's loop()) ---
     const uint32_t kFrameMs = 40;   // ~25 FPS, matching LVGL frame rate from board config
