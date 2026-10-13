@@ -1,4 +1,4 @@
-set(COMPONENT_SRCS src/muse_adapter.cpp src/muse_adpcm.c)
+set(COMPONENT_SRCS src/muse_adapter.cpp src/muse_adpcm.c src/muse_pixel.c)
 
 set(COMPONENT_ADD_INCLUDEDIRS include)
 

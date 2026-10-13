@@ -5,6 +5,7 @@
 // (ES8311 speaker). This adapter decomposes that into init/tick/render callbacks.
 #include "aiwatchos_muse.hpp"
 #include "muse_captions.hpp"  // companion caption/activity ports (M1/M2/M3)
+#include "muse_pixel.h"       // muse-gadget-206 pixel avatar (M19)
 #include "aiwatchos/colors.hpp"
 #include "aiwatchos/font.hpp"
 #include "minimp3.h"
@@ -36,6 +37,14 @@ struct SchemeF {
 static SchemeF g_scheme_cur = {};
 static bool g_scheme_init = false;
 static uint64_t g_anim_ms = 0;          // face animation clock (tick-driven)
+
+// muse_pixel avatar (M19): init is tried once; on allocation failure
+// the interim primitives avatar (draw_jolly) stands in permanently.
+static bool g_pixel_tried = false;
+static bool g_pixel_ok = false;
+static aiwatchos::MuseState g_pose_state = aiwatchos::MuseState::kReady;
+static uint64_t g_pose_since_ms = 0;
+static uint64_t g_happy_until_ms = 0;   // pet reaction envelope (g_hal time)
 static float g_seg[14] = {};            // level-meter segment envelopes
 
 static void scheme_unpack(uint16_t c, float* out) {
@@ -517,7 +526,42 @@ void muse_render(aiwatchos::Framebuffer& fb) {
     fb.arc(kCx, kCy, kStageR - 8, 2, 200.0f, 110.0f,
            blend565(stage, colors::kWhite, 40));
 
-    draw_jolly(fb, kCx, kCy - 14);
+    // Avatar (M19): the real muse_pixel renderer — a 256px blow-up of
+    // its 64x64 grid centred where the interim avatar sat, background
+    // cells transparent over the stage disc. Falls back to the interim
+    // primitives if the PSRAM block could not be allocated.
+    if (!g_pixel_tried) {
+        g_pixel_tried = true;
+        g_pixel_ok = muse_pixel_init();
+        if (g_pixel_ok) muse_pixel_set_size(256);
+    }
+    if (g_pixel_ok) {
+        const uint64_t now = g_hal ? g_hal->now_ms() : 0;
+        if (face_state != g_pose_state) {
+            g_pose_state = face_state;
+            g_pose_since_ms = now;
+        }
+        muse_pose_t pose{};
+        switch (face_state) {
+            case aiwatchos::MuseState::kListening: pose.mode = MUSE_MODE_LISTENING; break;
+            case aiwatchos::MuseState::kThinking:  pose.mode = MUSE_MODE_THINKING; break;
+            case aiwatchos::MuseState::kSpeaking:  pose.mode = MUSE_MODE_SPEAKING; break;
+            case aiwatchos::MuseState::kError:     pose.mode = MUSE_MODE_ERROR; break;
+            case aiwatchos::MuseState::kBoot:      pose.mode = MUSE_MODE_BOOT; break;
+            default:                               pose.mode = MUSE_MODE_IDLE; break;
+        }
+        pose.t = static_cast<float>(g_anim_ms) / 1000.0f;
+        pose.mode_t = static_cast<float>(now - g_pose_since_ms) / 1000.0f;
+        pose.level = g_state.listening ? g_state.mic_level : 0.0f;
+        pose.happy = now < g_happy_until_ms
+            ? static_cast<float>(g_happy_until_ms - now) / 1200.0f
+            : 0.0f;
+        muse_pixel_render(&pose);
+        muse_pixel_scale(fb.pixels + (kCy - 14 - 128) * fb.width + (kCx - 128),
+                         fb.width, 0, 255, 0, 255);
+    } else {
+        draw_jolly(fb, kCx, kCy - 14);
+    }
 
     // Level meter INSIDE the stage (tokens: 14 segments 9x9 r3, gap 4):
     // lit = accent blended by the segment envelope, else faint.
@@ -628,6 +672,18 @@ void muse_render(aiwatchos::Framebuffer& fb) {
 
 bool muse_on_touch(const aiwatchos::TouchEvent& event) {
     if (!g_state.initialized) return false;
+
+    // Pet the avatar (M19): a tap on the character inside the stage
+    // disc triggers muse_pixel's happy reaction (~1.2 s decay). The
+    // stage (centre 205,232, r 138) never overlaps the PTT strip.
+    if (event.type == aiwatchos::TouchEvent::Press) {
+        const int dx = event.x - 205;
+        const int dy = event.y - 232;
+        if (dx * dx + dy * dy < 138 * 138) {
+            g_happy_until_ms = (g_hal ? g_hal->now_ms() : 0) + 1200;
+            return true;   // consumed
+        }
+    }
 
     // On this board, "touch" maps to BOOT/PWR via the touch panel. A press in
     // the bottom-center of the screen acts as push-to-talk (hold while speaking).

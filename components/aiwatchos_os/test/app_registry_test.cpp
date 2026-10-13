@@ -8,7 +8,8 @@
 //     -I components/minimp3/include -I $MBEDTLS/include \
 //     components/aiwatchos_os/test/app_registry_test.cpp \
 //     components/aiwatchos_os/src/*.cpp apps/muse/src/muse_adapter.cpp \
-//     apps/muse/src/muse_adpcm.c apps/hermes/src/hermes_adapter.cpp \
+//     apps/muse/src/muse_adpcm.c apps/muse/src/muse_pixel.c \
+//     apps/hermes/src/hermes_adapter.cpp \
 //     apps/hermes/src/hermes_proto.cpp apps/hermes/src/hermes_crypto.cpp \
 //     apps/hermes/src/hermes_link.cpp apps/hermes/src/cJSON.c \
 //     components/noise_core/src/PsaCryptoBackend.cpp \
@@ -30,6 +31,7 @@
 #include "aiwatchos/font.hpp"            // for AA text/icon rendering verification
 #include "aiwatchos_hermes.hpp"   // for device-health dashboard verification
 #include "muse_captions.hpp"        // for companion caption/activity ports (M2/M3)
+#include "muse_pixel.h"           // for the muse_pixel avatar port (M19)
 #include "aiwatchos_muse.hpp"   // for push-to-talk turn buffering verification
 #include "muse_adpcm.h"         // for IMA-ADPCM round-trip verification
 #include "minimp3.h"            // for MP3 reply decode verification
@@ -1877,6 +1879,57 @@ static void test_muse_captions() {
     printf("test_muse_captions: PASSED\n");
 }
 
+// --- muse_pixel avatar port (M19): heap-block renderer, host build ---
+static void test_muse_pixel() {
+    // Init allocates the frame/mask/LUT block (malloc on host, PSRAM on
+    // device) — the renderer must be inert before it and live after.
+    assert(muse_pixel_init());
+    assert(muse_pixel_ready());
+    assert(muse_pixel_init());   // idempotent
+
+    static uint16_t buf[256 * 256];
+    const uint16_t kSentinel = 0xDEAD;
+    for (auto& px : buf) px = kSentinel;
+    muse_pixel_set_size(256);
+
+    muse_pose_t pose{};
+    pose.mode = MUSE_MODE_IDLE;
+    pose.t = 0.5f;
+    pose.mode_t = 0.5f;
+    muse_pixel_render(&pose);
+    muse_pixel_scale(buf, 256, 0, 255, 0, 255);
+
+    int drawn = 0, kept = 0;
+    for (uint16_t px : buf) {
+        if (px == kSentinel) ++kept; else ++drawn;
+    }
+    // The character occupies a good share of the grid, and the corners
+    // stay TRANSPARENT (sentinel) — the gloss stage shows through.
+    assert(drawn > 8000);
+    assert(kept > 20000);
+    assert(buf[0] == kSentinel && buf[255] == kSentinel);
+    assert(buf[255 * 256] == kSentinel && buf[255 * 256 + 255] == kSentinel);
+    // The body centre is drawn (not the sentinel, not black).
+    const uint16_t centre = buf[150 * 256 + 128];
+    assert(centre != kSentinel && centre != 0x0000);
+
+    // A different mode renders a different frame (scheme + pose move).
+    muse_pose_t think{};
+    think.mode = MUSE_MODE_THINKING;
+    think.t = 0.5f;
+    think.mode_t = 0.5f;
+    muse_pixel_render(&think);
+    static uint16_t buf2[256 * 256];
+    for (auto& px : buf2) px = kSentinel;
+    muse_pixel_scale(buf2, 256, 0, 255, 0, 255);
+    int diff = 0;
+    for (int i = 0; i < 256 * 256; ++i) {
+        if (buf[i] != buf2[i]) ++diff;
+    }
+    assert(diff > 1000);
+    printf("test_muse_pixel: PASSED\n");
+}
+
 int main() {
     test_aa_text();                      // baked Inter AA renderer against real assets
     test_touch_synth();                  // Press/Move/Release from the point stream
@@ -1910,6 +1963,7 @@ int main() {
     test_muse_turn_log();                // drives the voice turn activity log
     test_muse_outbox();                  // drives the offline turn outbox
     test_muse_captions();                // companion caption/activity ports (M2/M3)
+    test_muse_pixel();                   // muse_pixel avatar port: heap block, transparency (M19)
     test_rtc_bcd_and_validity();         // drives the PCF85063 BCD codec + validity rules
     test_rtc_epoch_civil();              // drives civil <-> epoch conversions on known vectors
     test_rtc_registers();                // drives PCF85063 register pack/unpack + OS flag
