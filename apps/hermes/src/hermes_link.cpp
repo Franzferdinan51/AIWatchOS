@@ -1,7 +1,13 @@
 // Hermes link layer — everything ESP-IDF in the Hermes app lives here:
-// NVS identity, WiFi STA, the WebSocket to the Hermes hub, the OTA flash
-// backend, and the pump task that feeds frames into the protocol client
+// NVS identity, the WebSocket to the Hermes hub, the OTA flash backend,
+// and the pump task that feeds frames into the protocol client
 // (hermes_proto.cpp) via the hermes_core_* entry points in the adapter.
+//
+// WiFi itself is NOT owned here: components/aiwatchos_net (net_start() in
+// app_main) is the single WiFi/SNTP owner. This layer only observes
+// aiwatchos_net::wifi_connected() and runs the WebSocket while the shared
+// STA link is up; credentials come from the shared net config (Kconfig /
+// NVS namespace "aiwnet"), never from Hermes-private settings.
 //
 // Memory discipline (ESP32-S3: internal SRAM is the scarce resource):
 //   - the protocol client object and this layer's frame buffers live in
@@ -25,16 +31,15 @@
 #ifdef __ESPRESSIF_IDF__
 
 #include "aiwatchos/hal.hpp"
+#include "aiwatchos_net/net.hpp"   // wifi_connected(), net_config() — shared net owner
 #include "cJSON.h"
 #include "esp_event.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
-#include "esp_netif.h"
 #include "esp_ota_ops.h"
 #include "esp_random.h"
 #include "esp_system.h"
 #include "esp_websocket_client.h"
-#include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
@@ -47,12 +52,6 @@ namespace {
 
 const char* TAG = "hermes-link";
 
-#ifndef CONFIG_HERMES_WIFI_SSID
-#define CONFIG_HERMES_WIFI_SSID ""
-#endif
-#ifndef CONFIG_HERMES_WIFI_PASSWORD
-#define CONFIG_HERMES_WIFI_PASSWORD ""
-#endif
 #ifndef CONFIG_HERMES_HOST
 #define CONFIG_HERMES_HOST "192.168.1.96"
 #endif
@@ -67,7 +66,6 @@ constexpr uint32_t kBackoffMaxMs = 30000;
 
 bool g_nvs_ready = false;
 bool g_started = false;
-bool g_have_ip = false;
 bool g_ws_up = false;
 bool g_ever_connected = false;
 uint32_t g_backoff_ms = kBackoffMinMs;
@@ -191,39 +189,6 @@ void ws_start() {
     }
 }
 
-void wifi_event_handler(void*, esp_event_base_t base, int32_t event_id, void* event_data) {
-    if (base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
-        esp_wifi_connect();
-    } else if (base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
-        g_have_ip = false;
-        esp_wifi_connect();   // WiFi-level retry; WS reconnect is the pump's job
-    } else if (base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
-        g_have_ip = true;
-        g_next_attempt_ms = 0;
-    }
-}
-
-bool wifi_start() {
-    if (std::strlen(CONFIG_HERMES_WIFI_SSID) == 0) {
-        ESP_LOGW(TAG, "no WiFi SSID configured (Kconfig) — Hermes stays offline");
-        return false;
-    }
-    esp_netif_init();
-    esp_event_loop_create_default();
-    esp_netif_create_default_wifi_sta();
-    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-    if (esp_wifi_init(&cfg) != ESP_OK) return false;
-    esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &wifi_event_handler, nullptr);
-    esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &wifi_event_handler, nullptr);
-    wifi_config_t wc = {};
-    std::snprintf(reinterpret_cast<char*>(wc.sta.ssid), sizeof(wc.sta.ssid), "%s", CONFIG_HERMES_WIFI_SSID);
-    std::snprintf(reinterpret_cast<char*>(wc.sta.password), sizeof(wc.sta.password), "%s",
-                  CONFIG_HERMES_WIFI_PASSWORD);
-    wc.sta.threshold.authmode = std::strlen(CONFIG_HERMES_WIFI_PASSWORD) ? WIFI_AUTH_WPA2_PSK : WIFI_AUTH_OPEN;
-    esp_wifi_set_mode(WIFI_MODE_STA);
-    esp_wifi_set_config(WIFI_IF_STA, &wc);
-    return esp_wifi_start() == ESP_OK;
-}
 
 // --- pump task ---------------------------------------------------------------
 
@@ -252,7 +217,7 @@ void pump_task(void*) {
         // failure the client says wants_reconnect()==false and we stop
         // until reboot — the owner must forget the device on the host.
         int64_t now = now_ms64();
-        if (g_have_ip && !g_ws_up && now >= g_next_attempt_ms &&
+        if (aiwatchos_net::wifi_connected() && !g_ws_up && now >= g_next_attempt_ms &&
             (!g_ever_connected || hermes_core_wants_reconnect())) {
             ws_start();
             g_next_attempt_ms = now + g_backoff_ms;
@@ -336,7 +301,12 @@ bool hermes_link_start() {
         ESP_LOGE(TAG, "PSRAM alloc failed — Hermes link disabled");
         return false;
     }
-    wifi_start();   // no SSID is a valid, offline-by-config outcome
+    // No WiFi bring-up here (single owner: aiwatchos_net). The pump task
+    // below idles offline until the shared link reports connected; an
+    // unconfigured net is a valid, offline-by-config outcome.
+    if (!aiwatchos_net::net_config().wifi_configured()) {
+        ESP_LOGW(TAG, "shared net has no WiFi credentials - Hermes stays offline");
+    }
     return xTaskCreate(&pump_task, "hermes_link", kPumpStackBytes, nullptr, 5, nullptr) == pdPASS;
 }
 
@@ -356,7 +326,14 @@ bool hermes_link_send_binary(const uint8_t* data, size_t len) {
 bool hermes_link_ota_begin(uint32_t size) {
     g_ota_part = esp_ota_get_next_update_partition(nullptr);
     if (!g_ota_part) return false;
-    if (size > g_ota_part->size) return false;   // this tree: slots < protocol max
+    // Two-sided validation: the advertised protocol cap (kHermesOtaMaxSize,
+    // enforced again in the protocol core at offer time) AND the actual
+    // size of the next update partition, read at runtime — the integrated
+    // partition table gives 2 MB slots (2,097,152 B), above the protocol
+    // cap (2,031,616 B), so the cap binds first; nothing here hardcodes a
+    // slot size.
+    if (size > kHermesOtaMaxSize) return false;
+    if (size > g_ota_part->size) return false;
     if (esp_ota_begin(g_ota_part, size, &g_ota_handle) != ESP_OK) return false;
     g_ota_active = true;
     return true;

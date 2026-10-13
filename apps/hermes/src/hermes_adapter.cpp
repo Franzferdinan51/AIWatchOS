@@ -163,79 +163,29 @@ const char* link_word(HermesLinkState s) {
     return "OFFLINE";
 }
 
-// --- 3x5 micro font (A-Z, 0-9, basic punctuation; lowercase folds up) -----
-// Each glyph is 5 rows of 3 bits, MSB = left pixel. This is a stopgap until
-// the OS-wide font lands; it keeps every Hermes string — pairing code
-// included — actually readable, unlike the placeholder block renderer.
-const uint8_t* glyph3x5(char c) {
-    struct Glyph { char c; uint8_t rows[5]; };
-    static const Glyph kGlyphs[] = {
-        {'A', {0x2, 0x5, 0x7, 0x5, 0x5}}, {'B', {0x6, 0x5, 0x6, 0x5, 0x6}},
-        {'C', {0x3, 0x4, 0x4, 0x4, 0x3}}, {'D', {0x6, 0x5, 0x5, 0x5, 0x6}},
-        {'E', {0x7, 0x4, 0x6, 0x4, 0x7}}, {'F', {0x7, 0x4, 0x6, 0x4, 0x4}},
-        {'G', {0x3, 0x4, 0x5, 0x5, 0x3}}, {'H', {0x5, 0x5, 0x7, 0x5, 0x5}},
-        {'I', {0x7, 0x2, 0x2, 0x2, 0x7}}, {'J', {0x1, 0x1, 0x1, 0x5, 0x2}},
-        {'K', {0x5, 0x5, 0x6, 0x5, 0x5}}, {'L', {0x4, 0x4, 0x4, 0x4, 0x7}},
-        {'M', {0x5, 0x7, 0x5, 0x5, 0x5}}, {'N', {0x5, 0x7, 0x7, 0x5, 0x5}},
-        {'O', {0x2, 0x5, 0x5, 0x5, 0x2}}, {'P', {0x6, 0x5, 0x6, 0x4, 0x4}},
-        {'Q', {0x2, 0x5, 0x5, 0x2, 0x1}}, {'R', {0x6, 0x5, 0x6, 0x5, 0x5}},
-        {'S', {0x3, 0x4, 0x2, 0x1, 0x6}}, {'T', {0x7, 0x2, 0x2, 0x2, 0x2}},
-        {'U', {0x5, 0x5, 0x5, 0x5, 0x7}}, {'V', {0x5, 0x5, 0x5, 0x5, 0x2}},
-        {'W', {0x5, 0x5, 0x5, 0x7, 0x5}}, {'X', {0x5, 0x5, 0x2, 0x5, 0x5}},
-        {'Y', {0x5, 0x5, 0x2, 0x2, 0x2}}, {'Z', {0x7, 0x1, 0x2, 0x4, 0x7}},
-        {'0', {0x7, 0x5, 0x5, 0x5, 0x7}}, {'1', {0x2, 0x6, 0x2, 0x2, 0x7}},
-        {'2', {0x6, 0x1, 0x2, 0x4, 0x7}}, {'3', {0x6, 0x1, 0x2, 0x1, 0x6}},
-        {'4', {0x5, 0x5, 0x7, 0x1, 0x1}}, {'5', {0x7, 0x4, 0x6, 0x1, 0x6}},
-        {'6', {0x3, 0x4, 0x6, 0x5, 0x2}}, {'7', {0x7, 0x1, 0x1, 0x2, 0x2}},
-        {'8', {0x2, 0x5, 0x2, 0x5, 0x2}}, {'9', {0x2, 0x5, 0x3, 0x1, 0x6}},
-        {'.', {0x0, 0x0, 0x0, 0x0, 0x2}}, {',', {0x0, 0x0, 0x0, 0x2, 0x4}},
-        {':', {0x0, 0x2, 0x0, 0x2, 0x0}}, {'!', {0x2, 0x2, 0x2, 0x0, 0x2}},
-        {'?', {0x6, 0x1, 0x2, 0x0, 0x2}}, {'\'', {0x2, 0x2, 0x0, 0x0, 0x0}},
-        {'"', {0x5, 0x5, 0x0, 0x0, 0x0}}, {'-', {0x0, 0x0, 0x7, 0x0, 0x0}},
-        {'+', {0x0, 0x2, 0x7, 0x2, 0x0}}, {'/', {0x1, 0x1, 0x2, 0x4, 0x4}},
-        {'(', {0x1, 0x2, 0x2, 0x2, 0x1}}, {')', {0x4, 0x2, 0x2, 0x2, 0x4}},
-        {'%', {0x5, 0x1, 0x2, 0x4, 0x5}}, {'<', {0x1, 0x2, 0x4, 0x2, 0x1}},
-        {'>', {0x4, 0x2, 0x1, 0x2, 0x4}}, {'=', {0x0, 0x7, 0x0, 0x7, 0x0}},
-        {'*', {0x0, 0x5, 0x2, 0x5, 0x0}}, {'#', {0x5, 0x7, 0x5, 0x7, 0x5}},
-        {'@', {0x2, 0x5, 0x7, 0x4, 0x3}}, {'_', {0x0, 0x0, 0x0, 0x0, 0x7}},
-    };
-    if (c >= 'a' && c <= 'z') c = static_cast<char>(c - 'a' + 'A');
-    for (const Glyph& g : kGlyphs) {
-        if (g.c == c) return g.rows;
-    }
-    return nullptr;   // blank for anything else (server folds to ASCII)
-}
+// --- Text rendering: the shared OS 5x7 font ------------------------------
+// All Hermes text goes through Framebuffer::draw_text (the OS-wide font in
+// aiwatchos/font5x7.hpp) — the same glyphs and metrics as every other app.
+// This file originally carried a private 3x5 micro-font, written as a
+// stopgap before the shared font existed; it was deleted in integration
+// round 2. The helpers below keep the render code's call shapes and layer
+// this app's word-wrap on the shared metrics.
 
-void draw_char(aiwatchos::Framebuffer& fb, int x, int y, char c, int scale, uint16_t color) {
-    const uint8_t* rows = glyph3x5(c);
-    if (!rows) return;
-    for (int r = 0; r < 5; ++r) {
-        for (int col = 0; col < 3; ++col) {
-            if (rows[r] & (0x4 >> col)) {
-                fb.fill_rect(x + col * scale, y + r * scale,
-                             x + col * scale + scale - 1, y + r * scale + scale - 1, color);
-            }
-        }
-    }
+void draw_text(aiwatchos::Framebuffer& fb, int x, int y, const char* s,
+               int scale, uint16_t color) {
+    fb.draw_text(x, y, s, color, scale);
 }
 
 int text_w(const char* s, int scale) {
-    return static_cast<int>(std::strlen(s)) * 4 * scale;
-}
-
-void draw_text(aiwatchos::Framebuffer& fb, int x, int y, const char* s, int scale, uint16_t color) {
-    int pen = x;
-    for (const char* p = s; *p; ++p) {
-        draw_char(fb, pen, y, *p, scale, color);
-        pen += 4 * scale;
-    }
+    return aiwatchos::Framebuffer::text_width(s, scale);
 }
 
 // Word-wrapped text block; returns the y just past the last drawn line.
-int draw_wrapped(aiwatchos::Framebuffer& fb, int x, int y, int max_w, const char* s,
-                 int scale, uint16_t color, int max_lines) {
-    const int advance = 4 * scale;
-    const int line_step = 6 * scale + 2;
+int draw_wrapped(aiwatchos::Framebuffer& fb, int x, int y, int max_w,
+                 const char* s, int scale, uint16_t color, int max_lines) {
+    if (scale < 1) scale = 1;
+    const int advance = aiwatchos::Framebuffer::text_advance(scale);
+    const int line_step = aiwatchos::Framebuffer::text_height(scale) + 2;
     const int chars_per_line = max_w / advance;
     if (chars_per_line <= 0 || !s) return y;
     int lines = 0;
@@ -250,9 +200,13 @@ int draw_wrapped(aiwatchos::Framebuffer& fb, int x, int y, int max_w, const char
         }
         int take = len;
         if (p[len] && p[len] != '\n' && last_space > 0) take = last_space;
-        for (int i = 0; i < take; ++i) {
-            draw_char(fb, x + i * advance, y, p[i], scale, color);
+        char line[80];
+        if (take >= static_cast<int>(sizeof(line))) {
+            take = static_cast<int>(sizeof(line)) - 1;
         }
+        std::memcpy(line, p, static_cast<size_t>(take));
+        line[take] = '\0';
+        fb.draw_text(x, y, line, color, scale);
         y += line_step;
         ++lines;
         p += take;
@@ -441,7 +395,7 @@ void hermes_init() {
     if (!g_lock) g_lock = xSemaphoreCreateMutex();
 #endif
     ensure_client();
-    hermes_link_start();   // device: WiFi + WS task; host: stub (returns false)
+    hermes_link_start();   // device: WS link task (WiFi owned by aiwatchos_net); host: stub
 }
 
 void hermes_tick(uint32_t elapsed_ms) {
@@ -508,7 +462,7 @@ void hermes_render(aiwatchos::Framebuffer& fb) {
                      2, kDimColor, 8);
     } else if (v.prompt_active) {
         draw_wrapped(fb, 16, kContentY, kContentW, v.prompt_title, 3, kAmberColor, 2);
-        draw_wrapped(fb, 16, kContentY + 44, kContentW, v.prompt_text, 2, kTextColor, 8);
+        draw_wrapped(fb, 16, kContentY + 48, kContentW, v.prompt_text, 2, kTextColor, 8);
         // YES / NO targets.
         fb.fill_rect(16, 380, 197, 440, kGreenColor);
         fb.fill_rect(213, 380, 394, 440, kRedColor);
@@ -521,12 +475,18 @@ void hermes_render(aiwatchos::Framebuffer& fb) {
                   v.pairing_code, 6, kAmberColor);
         draw_wrapped(fb, 16, kContentY + 76, kContentW,
                      "APPROVE ON THE HERMES HOST:", 2, kDimColor, 2);
-        draw_wrapped(fb, 16, kContentY + 104, kContentW,
-                     v.pairing_cmd[0] ? v.pairing_cmd : "HERMES PAIRING APPROVE GADGET <CODE>",
+        char fallback_cmd[64];
+        const char* cmd = v.pairing_cmd;
+        if (!cmd[0]) {
+            std::snprintf(fallback_cmd, sizeof(fallback_cmd),
+                          "HERMES PAIRING APPROVE GADGET %s", v.pairing_code);
+            cmd = fallback_cmd;
+        }
+        draw_wrapped(fb, 16, kContentY + 104, kContentW, cmd,
                      2, kTextColor, 6);
     } else if (v.card_active) {
         draw_wrapped(fb, 16, kContentY, kContentW, v.card_title, 3, kTextColor, 2);
-        draw_wrapped(fb, 16, kContentY + 44, kContentW, v.card_body, 2, kDimColor, 12);
+        draw_wrapped(fb, 16, kContentY + 48, kContentW, v.card_body, 2, kDimColor, 12);
     } else if (v.image_active && image_px && image_w > 0 && image_h > 0) {
         // Nearest-neighbour fit into the content area, aspect preserved.
         int max_w = kContentW, max_h = 280;
@@ -554,7 +514,7 @@ void hermes_render(aiwatchos::Framebuffer& fb) {
         }
         if (v.busy || v.status[0]) {
             char status_line[176];
-            std::snprintf(status_line, sizeof(status_line), "> %s",
+            std::snprintf(status_line, sizeof(status_line), "%s",
                           v.status[0] ? v.status : "THINKING");
             y = draw_wrapped(fb, 16, y, kContentW, status_line, 2, kAmberColor, 2);
             y += 6;

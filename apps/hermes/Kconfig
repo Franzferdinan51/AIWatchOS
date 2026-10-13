@@ -1,18 +1,10 @@
 menu "Hermes Gadget Client"
 
-config HERMES_WIFI_SSID
-    string "WiFi SSID for the Hermes link"
-    default ""
-    help
-        Network the watch joins to reach the Hermes hub. Empty (the
-        default) keeps the Hermes app fully offline, as before.
-
-config HERMES_WIFI_PASSWORD
-    string "WiFi password"
-    default ""
-    help
-        WPA2-PSK password for HERMES_WIFI_SSID. Stored in the firmware
-        image / NVS config only; never sent anywhere except the AP join.
+# WiFi is owned by the shared network component (components/aiwatchos_net):
+# this app keeps NO WiFi settings of its own. The watch joins the network
+# configured under "AIWatchOS Network" (Kconfig) or provisioned into the
+# NVS namespace "aiwnet"; with no WiFi configured there, the Hermes app
+# stays fully offline (LINK OFFLINE), as before.
 
 config HERMES_HOST
     string "Hermes hub host"
