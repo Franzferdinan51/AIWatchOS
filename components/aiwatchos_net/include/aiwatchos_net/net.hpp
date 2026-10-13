@@ -31,6 +31,13 @@ struct NetConfig {
     std::string domain;         // for "<vm>.<domain>" derivation
     std::string sntp_server;
 
+    // Spoken replies (TTS): an OpenAI-shaped speech provider. All four
+    // are plain config — no provider or key is baked in as mandatory.
+    std::string tts_base_url;   // full API prefix, e.g. https://openrouter.ai/api
+    std::string tts_api_key;    // bearer key; EMPTY = spoken replies off
+    std::string tts_model;
+    std::string tts_voice;
+
     // True when a Muse session is even attemptable: WiFi credentials and
     // either an account token or a direct VM token.
     bool muse_configured() const {
@@ -38,6 +45,8 @@ struct NetConfig {
                (!hatch_token.empty() || !vm_token.empty());
     }
     bool wifi_configured() const { return !wifi_ssid.empty(); }
+    // Spoken replies are opt-in: no key, no speech — and no requests.
+    bool tts_configured() const { return !tts_api_key.empty(); }
 };
 
 // Current resolved config (after net_start; before that, Kconfig defaults).
@@ -115,6 +124,23 @@ bool muse_link_agent_status(MuseAgentStatus* out);
 // by delta; muse_link_reply_streaming() says whether it is still moving.
 bool muse_link_live_reply(char* out, size_t cap);
 bool muse_link_reply_streaming();
+
+// --- Spoken replies (TTS) ----------------------------------------------------
+// When a speech provider is configured (NetConfig::tts_configured()),
+// the link fetches an MP3 of each completed Muse reply from the
+// provider and hands it to the registered sink — the Muse app
+// registers a sink that plays it via muse_play_reply. The sink runs on
+// the link task and blocks until playback finishes; that blocking is
+// what paces the SPEAKING face state. The buffer is PSRAM owned by the
+// link and valid only for the duration of the call. No sink or no key:
+// replies stay text, exactly as before.
+using SpeechSinkFn = bool (*)(const uint8_t* mp3, size_t len, void* ctx);
+void muse_link_set_speech_sink(SpeechSinkFn fn, void* ctx);
+
+// True while a fetched reply clip is actually playing back. The Muse
+// face drives its SPEAKING state from this — the real signal, not an
+// inference from agent status codes.
+bool muse_link_speaking();
 
 // Starts WiFi + SNTP + the Muse link task. Idempotent. Safe to call when
 // unconfigured (everything stays off; muse_link_state() == kOff).
