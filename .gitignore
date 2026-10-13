@@ -6,6 +6,9 @@ build/
 sdkconfig
 sdkconfig.old
 *.bin
+# ...but the baked UI assets are source, not build output (see the
+# CMakeLists guard): they must be committable.
+!assets/*.bin
 *.elf
 partitions_singleapp.csv
 partition_table/

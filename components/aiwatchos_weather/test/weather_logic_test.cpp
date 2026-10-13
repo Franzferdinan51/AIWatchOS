@@ -148,6 +148,178 @@ static const char kObs[] =
     "    \"amount\": \"SCT\"\n            },\n            {\n                \"base\": {\n                    \"unitCode\": \"wmoUnit:m\",\n"
     "                    \"value\": 5490\n                },\n                \"amount\": \"SCT\"\n            }\n        ]\n    }\n}";
 // Mutations of kObs, generated from the same verbatim response:
+
+// REAL lagging payload, captured live from api.weather.gov
+// (stations/KFFO/observations/latest) on 2026-10-13: a valid
+// observation whose measured fields are ALL null (qualityControl
+// "Z") with only textDescription populated — the exact shape the
+// watch received on first boot, when the old code logged
+// "unparseable/lagging observation response" and degraded.
+static const char kObsLaggingReal[] = R"AIWJSON({
+    "@context": [
+        "https://geojson.org/geojson-ld/geojson-context.jsonld",
+        {
+            "@version": "1.1",
+            "wx": "https://api.weather.gov/ontology#",
+            "s": "https://schema.org/",
+            "geo": "http://www.opengis.net/ont/geosparql#",
+            "unit": "http://codes.wmo.int/common/unit/",
+            "@vocab": "https://api.weather.gov/ontology#",
+            "geometry": {
+                "@id": "s:GeoCoordinates",
+                "@type": "geo:wktLiteral"
+            },
+            "city": "s:addressLocality",
+            "state": "s:addressRegion",
+            "distance": {
+                "@id": "s:Distance",
+                "@type": "s:QuantitativeValue"
+            },
+            "bearing": {
+                "@type": "s:QuantitativeValue"
+            },
+            "value": {
+                "@id": "s:value"
+            },
+            "unitCode": {
+                "@id": "s:unitCode",
+                "@type": "@id"
+            },
+            "forecastOffice": {
+                "@type": "@id"
+            },
+            "forecastGridData": {
+                "@type": "@id"
+            },
+            "publicZone": {
+                "@type": "@id"
+            },
+            "county": {
+                "@type": "@id"
+            }
+        }
+    ],
+    "id": "https://api.weather.gov/stations/KFFO/observations/2026-10-13T17:55:00+00:00",
+    "type": "Feature",
+    "geometry": {
+        "type": "Point",
+        "coordinates": [
+            -84.05,
+            39.83
+        ]
+    },
+    "properties": {
+        "@id": "https://api.weather.gov/stations/KFFO/observations/2026-10-13T17:55:00+00:00",
+        "@type": "wx:ObservationStation",
+        "elevation": {
+            "unitCode": "wmoUnit:m",
+            "value": 251
+        },
+        "station": "https://api.weather.gov/stations/KFFO",
+        "stationId": "KFFO",
+        "stationName": "Dayton / Wright-Patterson Air Force Base",
+        "timestamp": "2026-10-13T17:55:00+00:00",
+        "rawMessage": "KFFO 131755Z 24011KT 10SM SCT100 SCT160 29/16 A2991 RMK AO2A SLP125 WND DATA ESTMD P0000 60000 T02910159 10291 20183 55007",
+        "textDescription": "Partly Cloudy",
+        "icon": "https://api.weather.gov/icons/land/day/sct?size=medium",
+        "presentWeather": [],
+        "temperature": {
+            "unitCode": "wmoUnit:degC",
+            "value": null,
+            "qualityControl": "Z"
+        },
+        "dewpoint": {
+            "unitCode": "wmoUnit:degC",
+            "value": null,
+            "qualityControl": "Z"
+        },
+        "windDirection": {
+            "unitCode": "wmoUnit:degree_(angle)",
+            "value": null,
+            "qualityControl": "Z"
+        },
+        "windSpeed": {
+            "unitCode": "wmoUnit:km_h-1",
+            "value": null,
+            "qualityControl": "Z"
+        },
+        "windGust": {
+            "unitCode": "wmoUnit:km_h-1",
+            "value": null,
+            "qualityControl": "Z"
+        },
+        "barometricPressure": {
+            "unitCode": "wmoUnit:Pa",
+            "value": null,
+            "qualityControl": "Z"
+        },
+        "seaLevelPressure": {
+            "unitCode": "wmoUnit:Pa",
+            "value": null,
+            "qualityControl": "Z"
+        },
+        "visibility": {
+            "unitCode": "wmoUnit:m",
+            "value": 16090,
+            "qualityControl": "C"
+        },
+        "maxTemperatureLast24Hours": {
+            "unitCode": "wmoUnit:degC",
+            "value": null
+        },
+        "minTemperatureLast24Hours": {
+            "unitCode": "wmoUnit:degC",
+            "value": null
+        },
+        "precipitationLastHour": {
+            "unitCode": "wmoUnit:mm",
+            "value": 0,
+            "qualityControl": "C"
+        },
+        "precipitationLast3Hours": {
+            "unitCode": "wmoUnit:mm",
+            "value": null,
+            "qualityControl": "Z"
+        },
+        "precipitationLast6Hours": {
+            "unitCode": "wmoUnit:mm",
+            "value": 0,
+            "qualityControl": "C"
+        },
+        "relativeHumidity": {
+            "unitCode": "wmoUnit:percent",
+            "value": null,
+            "qualityControl": "Z"
+        },
+        "windChill": {
+            "unitCode": "wmoUnit:degC",
+            "value": null,
+            "qualityControl": "Z"
+        },
+        "heatIndex": {
+            "unitCode": "wmoUnit:degC",
+            "value": null,
+            "qualityControl": "Z"
+        },
+        "cloudLayers": [
+            {
+                "base": {
+                    "unitCode": "wmoUnit:m",
+                    "value": 3050
+                },
+                "amount": "SCT"
+            },
+            {
+                "base": {
+                    "unitCode": "wmoUnit:m",
+                    "value": 4880
+                },
+                "amount": "SCT"
+            }
+        ]
+    }
+})AIWJSON";
+
 static const char kObsNullTemp[] =   // temperature.value -> null
     "{\n    \"@context\": [\n        \"https://geojson.org/geojson-ld/geojson-context.jsonld\",\n        {\n            \"@version\": \""
     "1.1\",\n            \"wx\": \"https://api.weather.gov/ontology#\",\n            \"s\": \"https://schema.org/\",\n            \"geo\": "
@@ -303,31 +475,46 @@ int main() {
     float temp_f = 0;
     int humidity = -1;
     bool has_humidity = false;
+    bool lagging = false;
     char desc[48];
     CHECK(weather_nws_parse_observation(kObs, &temp_f, &humidity,
-                                        &has_humidity, desc, sizeof(desc)));
+                                        &has_humidity, desc, sizeof(desc), &lagging));
     CHECK(near(temp_f, 76.0f));          // 24.7 C -> 76 F
     CHECK(has_humidity);
     CHECK(humidity == 57);               // 56.9548... rounds to 57
     CHECK(std::strcmp(desc, "Partly Cloudy") == 0);
 
-    // --- Null temperature: the station has not reported — hard failure ---
+    // --- Null temperature: valid-but-lagging (2026-10-13 fix) --------------
+    // Not a parse success (no reading exists) and NOT garbage either:
+    // out_lagging must say so, and the description must survive so the
+    // service can log what the station is reporting.
+    lagging = false;
     CHECK(!weather_nws_parse_observation(kObsNullTemp, &temp_f, &humidity,
-                                         &has_humidity, desc, sizeof(desc)));
+                                         &has_humidity, desc, sizeof(desc), &lagging));
+    CHECK(lagging);
+    CHECK(std::strcmp(desc, "Partly Cloudy") == 0);
+
+    // --- The real captured lagging payload behaves identically ------------
+    lagging = false;
+    desc[0] = '\0';
+    CHECK(!weather_nws_parse_observation(kObsLaggingReal, &temp_f, &humidity,
+                                         &has_humidity, desc, sizeof(desc), &lagging));
+    CHECK(lagging);
+    CHECK(std::strcmp(desc, "Partly Cloudy") == 0);
 
     // --- Null humidity: valid reading, just no humidity to show -----------
     humidity = -1;
     has_humidity = true;               // must be reset by the parser
     desc[0] = '\0';
     CHECK(weather_nws_parse_observation(kObsNullHum, &temp_f, &humidity,
-                                        &has_humidity, desc, sizeof(desc)));
+                                        &has_humidity, desc, sizeof(desc), &lagging));
     CHECK(near(temp_f, 76.0f));
     CHECK(!has_humidity);
     CHECK(std::strcmp(desc, "Partly Cloudy") == 0);
 
     // --- Missing textDescription: valid, description stays empty ----------
     CHECK(weather_nws_parse_observation(kObsNoDesc, &temp_f, &humidity,
-                                        &has_humidity, desc, sizeof(desc)));
+                                        &has_humidity, desc, sizeof(desc), &lagging));
     CHECK(near(temp_f, 76.0f));
     CHECK(has_humidity && humidity == 57);
     CHECK(desc[0] == '\0');
@@ -343,7 +530,7 @@ int main() {
     trunc_obs.resize(temp_at + 20);   // inside the temperature object
     CHECK(!weather_nws_parse_observation(trunc_obs.c_str(), &temp_f,
                                          &humidity, &has_humidity, desc,
-                                         sizeof(desc)));
+                                         sizeof(desc), &lagging));
     std::string trunc_points = kPoints;
     trunc_points.resize(trunc_points.size() / 2);
     CHECK(!weather_nws_parse_stations_url(trunc_points.c_str(), url,
@@ -356,18 +543,20 @@ int main() {
     // --- Garbage inputs -----------------------------------------------------
     const char* kJunk[] = {"", "{", "{}", "null", "not json"};
     for (const char* j : kJunk) {
+        lagging = false;
         CHECK(!weather_nws_parse_stations_url(j, url, sizeof(url)));
         CHECK(!weather_nws_parse_station_id(j, station, sizeof(station)));
         CHECK(!weather_nws_parse_observation(j, &temp_f, &humidity,
                                              &has_humidity, desc,
-                                             sizeof(desc)));
+                                             sizeof(desc), &lagging));
+        CHECK(!lagging);   // garbage is a parse failure, never "lagging"
     }
     CHECK(!weather_nws_parse_stations_url(nullptr, url, sizeof(url)));
     CHECK(!weather_nws_parse_station_id(nullptr, station, sizeof(station)));
     CHECK(!weather_nws_parse_observation(nullptr, &temp_f, &humidity,
-                                         &has_humidity, desc, sizeof(desc)));
+                                         &has_humidity, desc, sizeof(desc), &lagging));
     CHECK(!weather_nws_parse_observation(kObs, nullptr, &humidity,
-                                         &has_humidity, desc, sizeof(desc)));
+                                         &has_humidity, desc, sizeof(desc), &lagging));
 
     // Undersized output buffers fail rather than truncating silently.
     char tiny[8];

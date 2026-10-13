@@ -1,0 +1,15 @@
+// Host-test Kconfig values. Placeholders only — never real credentials.
+#pragma once
+#define CONFIG_AIWATCHOS_NET_WIFI_SSID "HomeWiFi"
+#define CONFIG_AIWATCHOS_NET_WIFI_PASSWORD "placeholder-pass"
+#define CONFIG_AIWATCHOS_NET_HATCH_TOKEN ""
+#define CONFIG_AIWATCHOS_NET_HATCH_VM_TOKEN ""
+#define CONFIG_AIWATCHOS_NET_HATCH_VM ""
+#define CONFIG_AIWATCHOS_NET_HATCH_HOST ""
+#define CONFIG_AIWATCHOS_NET_HATCH_DOMAIN "example.invalid"
+#define CONFIG_AIWATCHOS_NET_SNTP_SERVER "pool.ntp.org"
+#define CONFIG_AIWATCHOS_NET_TTS_URL ""
+#define CONFIG_AIWATCHOS_NET_TTS_KEY ""
+#define CONFIG_AIWATCHOS_NET_TTS_MODEL ""
+#define CONFIG_AIWATCHOS_NET_TTS_VOICE ""
+#define CONFIG_AIWATCHOS_NET_TTS_SPEAK 0

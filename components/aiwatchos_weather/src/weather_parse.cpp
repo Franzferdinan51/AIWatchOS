@@ -187,7 +187,9 @@ bool weather_nws_parse_observation(const char* json, float* out_temp_f,
                                    int* out_humidity_pct,
                                    bool* out_has_humidity,
                                    char* out_description,
-                                   size_t desc_cap) {
+                                   size_t desc_cap,
+                                   bool* out_lagging) {
+    if (out_lagging) *out_lagging = false;
     if (!json || !out_temp_f || !out_humidity_pct || !out_has_humidity ||
         !out_description || desc_cap == 0) {
         return false;
@@ -195,16 +197,37 @@ bool weather_nws_parse_observation(const char* json, float* out_temp_f,
     out_description[0] = '\0';
     *out_has_humidity = false;
     const char* props = properties(json);
+    if (!props) return false;
 
-    // Temperature is the one mandatory datum: a null temperature means
-    // the station has not reported (NWS stations lag) — the fetch fails
-    // honestly rather than substituting anything else.
+    // Description is display text straight from NWS ("Partly Cloudy").
+    // Extract it BEFORE the temperature gate: a lagging observation
+    // (below) still proves the document was a real observation, and the
+    // caller wants the description evidence for its log/diagnostics.
+    {
+        char desc[64];
+        if (string_field(props, "textDescription", desc, sizeof(desc))) {
+            std::strncpy(out_description, desc, desc_cap - 1);
+            out_description[desc_cap - 1] = '\0';
+        }
+    }
+
+    // Temperature is the one mandatory datum for a READING: a null
+    // temperature means the station has not reported measurements in
+    // its latest observation (NWS stations lag — the live KFFO payload
+    // of 2026-10-13 had temperature/dewpoint/humidity/wind/pressure
+    // ALL null with only textDescription populated). That is not a
+    // corrupt document and not a reading: flag it as lagging and let
+    // the caller keep its last-good snapshot (whose age then renders
+    // STALE honestly) instead of crying parse error.
     double temp_c = 0;
     bool temp_null = false;
     if (!object_number_field(props, "temperature", &temp_c, &temp_null)) {
         return false;
     }
-    if (temp_null) return false;
+    if (temp_null) {
+        if (out_lagging) *out_lagging = true;
+        return false;
+    }
 
     // Humidity may legitimately be null: report "not measured" instead
     // of inventing 0%.
@@ -216,13 +239,6 @@ bool weather_nws_parse_observation(const char* json, float* out_temp_f,
         *out_has_humidity = true;
     }
 
-    // Description is display text straight from NWS ("Partly Cloudy").
-    // Optional: absent means an empty string, not a failed reading.
-    char desc[64];
-    if (string_field(props, "textDescription", desc, sizeof(desc))) {
-        std::strncpy(out_description, desc, desc_cap - 1);
-        out_description[desc_cap - 1] = '\0';
-    }
 
     *out_temp_f = static_cast<float>(weather_fahrenheit_from_celsius(temp_c));
     return true;

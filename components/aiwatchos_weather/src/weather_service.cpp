@@ -78,6 +78,10 @@ bool snapshot_fn(aiwatchos::WeatherSnapshot* out) {
     return true;
 }
 
+bool weather_service_snapshot(aiwatchos::WeatherSnapshot* out) {
+    return snapshot_fn(out);
+}
+
 void refresh_fn() { g_refresh_requested = true; }   // nudge only; the task fetches
 
 struct BodySink {
@@ -196,9 +200,10 @@ bool do_fetch() {
         int humidity = 0;
         bool has_humidity = false;
         char desc[aiwatchos::WeatherSnapshot::kConditionTextCap];
+        bool lagging = false;
         if (weather_nws_parse_observation(body, &temp_f, &humidity,
                                           &has_humidity, desc,
-                                          sizeof(desc))) {
+                                          sizeof(desc), &lagging)) {
             aiwatchos::WeatherSnapshot snap = current();
             snap.has_data = true;
             snap.temperature_f = temp_f;
@@ -213,11 +218,20 @@ bool do_fetch() {
             ESP_LOGI(kTag, "weather: %.0fF, humidity %s, \"%s\"", temp_f,
                      has_humidity ? "reported" : "n/a", desc);
             ok = true;
+        } else if (lagging) {
+            // Valid observation, but the station's latest report
+            // carries no measurements (temperature null). NOT a fetch
+            // failure: keep the last-good snapshot untouched — its
+            // fetched_epoch_ms keeps aging, so the app renders STALE
+            // by the normal rule — keep the chain URL cached (nothing
+            // about it is stale), and don't degrade the status.
+            ESP_LOGW(kTag, "station lagging: latest observation has no "
+                           "temperature (\"%s\"); keeping last-good",
+                     desc);
+            ok = true;
         } else {
-            // Includes the null-temperature case (station lagging): the
-            // chain itself may be stale too — re-derive next cycle.
-            ESP_LOGW(kTag, "unparseable/lagging observation response");
-            g_obs_url[0] = '\0';
+            ESP_LOGW(kTag, "unparseable observation response");
+            g_obs_url[0] = '\0';   // chain may be stale — re-derive
         }
     }
     heap_caps_free(body);

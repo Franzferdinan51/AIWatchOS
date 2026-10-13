@@ -3,6 +3,7 @@
 // launcher, muse voice, hermes agent), and starts the AppManager event loop.
 #include "aiwatchos/app.hpp"
 #include "aiwatchos/app_manager.hpp"
+#include "mdb.hpp"
 #include "aiwatchos/band_flush.hpp"
 #include "aiwatchos/font.hpp"
 #include "aiwatchos/touch_synth.hpp"
@@ -33,7 +34,133 @@
 #include "freertos/task.h"
 #endif
 
+
+// ---------------------------------------------------------------------------
+// MDB control hooks (docs/mdb.md). The console task fills this state;
+// the main loop consumes it at its normal input sampling point via
+// aiwatchos_mdb::detail::apply_frame(), so injected input travels the
+// exact path physical input travels (DisplayPower -> TouchSynth ->
+// AppManager). Single producer (console task) / single consumer (main
+// loop) ring; the state is debug-grade by design.
+// ---------------------------------------------------------------------------
+namespace aiwatchos_mdb {
+namespace {
+
+struct InjFrame {
+    int n = 0;
+    int x = 0;
+    int y = 0;
+};
+InjFrame g_inj_frames[48];
+volatile int g_inj_head = 0;   // consumer position
+volatile int g_inj_tail = 0;   // producer position
+volatile uint32_t g_inj_button_mask = 0;
+volatile int g_inj_button_frames = 0;
+char g_inj_switch[24] = {};
+volatile bool g_inj_switch_pending = false;
+
+
+void inj_push(int n, int x, int y) {
+    const int next = (g_inj_tail + 1) % 48;
+    if (next == g_inj_head) return;   // full: drop (debug input)
+    g_inj_frames[g_inj_tail].n = n;
+    g_inj_frames[g_inj_tail].x = x;
+    g_inj_frames[g_inj_tail].y = y;
+    g_inj_tail = next;
+}
+
+}  // namespace
+
+namespace detail {
+aiwatchos::DisplayPower* g_power_hook = nullptr;
+aiwatchos::AppManager* g_apps_hook = nullptr;
+}  // namespace detail
+
+void inject_tap(int x, int y) {
+    // ~120 ms down (3 frames at the 40 ms loop cadence), then a
+    // release frame so TouchSynth emits Press + Release.
+    for (int i = 0; i < 3; ++i) inj_push(1, x, y);
+    inj_push(0, 0, 0);
+}
+
+void inject_swipe(int x1, int y1, int x2, int y2, int duration_ms) {
+    int steps = duration_ms / 40;
+    if (steps < 2) steps = 2;
+    if (steps > 24) steps = 24;
+    for (int i = 0; i < steps; ++i) {
+        const int x = x1 + (x2 - x1) * i / (steps - 1);
+        const int y = y1 + (y2 - y1) * i / (steps - 1);
+        inj_push(1, x, y);
+    }
+    inj_push(0, 0, 0);
+}
+
+void inject_button(uint32_t mask) {
+    // 5 frames ~ 200 ms: inside DisplayPower's short-press window
+    // (30..1000 ms) for PWR, a clean tap for BOOT.
+    g_inj_button_mask = mask;
+    g_inj_button_frames = 5;
+}
+
+void request_switch_app(const char* app_id) {
+    if (!app_id) return;
+    std::strncpy(g_inj_switch, app_id, sizeof(g_inj_switch) - 1);
+    g_inj_switch[sizeof(g_inj_switch) - 1] = '\0';
+    g_inj_switch_pending = true;
+}
+
+void request_wake() {
+    // A touch wakes the panel, and DisplayPower swallows the waking
+    // press until release — a centre tap therefore cannot hit any UI.
+    if (display_asleep()) {
+        inject_tap(aiwatchos::kDisplayWidth / 2, aiwatchos::kDisplayHeight / 2);
+    }
+}
+
+void request_sleep() {
+    // PWR short press toggles sleep on release (DisplayPower policy).
+    if (detail::g_power_hook && !detail::g_power_hook->asleep()) inject_button(0x02);
+}
+
+bool display_asleep() {
+    return detail::g_power_hook && detail::g_power_hook->asleep();
+}
+
+const char* current_app_id() {
+    return detail::g_apps_hook ? detail::g_apps_hook->current_app_id()
+                               : nullptr;
+}
+
+namespace detail {
+void apply_frame(int* n_points, int* xs, int* ys, uint32_t* buttons) {
+    if (g_inj_switch_pending) {
+        g_inj_switch_pending = false;
+        if (g_apps_hook) g_apps_hook->switch_to(g_inj_switch);
+    }
+    if (g_inj_head != g_inj_tail) {
+        const InjFrame& f = g_inj_frames[g_inj_head];
+        g_inj_head = (g_inj_head + 1) % 48;
+        *n_points = f.n;
+        if (f.n > 0) {
+            xs[0] = f.x;
+            ys[0] = f.y;
+        }
+    }
+    if (g_inj_button_frames > 0) {
+        *buttons |= g_inj_button_mask;
+        g_inj_button_frames = g_inj_button_frames - 1;
+        if (g_inj_button_frames == 0) g_inj_button_mask = 0;
+    }
+}
+}  // namespace detail
+}  // namespace aiwatchos_mdb
+
 extern "C" void app_main(void) {
+    // --- 0. MDB (Muse Developer Bridge, docs/mdb.md): log ring +
+    // console task first, so the ring captures hardware init too.
+    // No-op unless CONFIG_AIWATCHOS_MDB_ENABLE.
+    aiwatchos_mdb::start();
+
     // --- 1. Hardware initialization via HAL ---
     aiwatchos::Board& board = aiwatchos::Board::instance();
     board.begin();   // CO5300 display, FT3168 touch, ES8311/ES7210 audio, AXP2101 PMU
@@ -63,6 +190,7 @@ extern "C" void app_main(void) {
     static aiwatchos::AppManager g_app_mgr(board);
 
     // System UI: clock face (launched on boot) and launcher for app switching.
+    aiwatchos_mdb::detail::g_apps_hook = &g_app_mgr;
     aiwatchos::App clock_app = aiwatchos::ClockFace::make_app();
     g_app_mgr.register_app(&clock_app, true);   // launch the clock face on boot
 
@@ -201,6 +329,7 @@ extern "C" void app_main(void) {
     const uint32_t kDisplaySleepTimeoutMs = 30000;   // matches the Kconfig default
 #endif
     static aiwatchos::DisplayPower g_power(kDisplaySleepTimeoutMs);
+    aiwatchos_mdb::detail::g_power_hook = &g_power;
 
     // Touch event synthesis (Press/Move/Release from the FT3168 point
     // stream) and band-based dirty flushing (plan 1.6/1.7).
@@ -217,7 +346,12 @@ extern "C" void app_main(void) {
         const uint64_t frame_now_ms = board.now_ms();
         int touch_xs[2] = {0}, touch_ys[2] = {0};
         int n_points = board.read_touch(touch_xs, touch_ys);
-        const uint32_t buttons = board.read_buttons();
+        uint32_t buttons = board.read_buttons();
+        // MDB input injection (docs/mdb.md): applied here, before the
+        // power policy samples the frame, so synthetic input is
+        // indistinguishable from physical input downstream.
+        aiwatchos_mdb::detail::apply_frame(&n_points, touch_xs, touch_ys,
+                                           &buttons);
 
         // Display power transitions. On wake, execution falls through and
         // renders below, so the panel immediately shows the current frame;
