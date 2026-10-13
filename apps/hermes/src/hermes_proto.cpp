@@ -72,7 +72,10 @@ void HermesClient::init(const HermesSinks& sinks, const HermesConfig& cfg) {
     wants_reconnect_ = false;
     battery_pct_ = -1;
     battery_sent_ = -2;
-    has_pending_text_ = false;
+    charging_ = -1;
+    charging_sent_ = -2;
+    outbox_head_ = 0;
+    outbox_count_ = 0;
     capturing_ = false;
     play_stream_ = -1;
     img_stream_ = -1;
@@ -115,17 +118,37 @@ void HermesClient::send_state(uint64_t now_ms) {
     cJSON_AddStringToObject(root, "type", "state");
     cJSON* sensors = cJSON_AddObjectToObject(root, "sensors");
     if (battery_pct_ >= 0) cJSON_AddNumberToObject(sensors, "battery_pct", battery_pct_);
+    if (charging_ >= 0) cJSON_AddBoolToObject(sensors, "charging", charging_ != 0);
     send_json(root);
     battery_sent_ = battery_pct_;
+    charging_sent_ = charging_;
     last_state_ms_ = now_ms;
 }
 
-void HermesClient::flush_pending_text() {
-    if (!has_pending_text_ || !view_.paired) return;
-    char text[sizeof(pending_text_)];
-    copy_capped(text, sizeof(text), pending_text_);
-    has_pending_text_ = false;
-    send_chat_text(text);
+void HermesClient::flush_pending_text(uint64_t now_ms) {
+    if (!view_.paired) return;
+    int sent = 0;
+    while (outbox_count_ > 0) {
+        char text[sizeof(outbox_[0])];
+        copy_capped(text, sizeof(text), outbox_[outbox_head_]);
+        outbox_head_ = static_cast<uint8_t>((outbox_head_ + 1) % kOutboxMax);
+        --outbox_count_;
+        ++outbox_version_;
+        send_text_frame(text);
+        ++sent;
+    }
+    view_.queued = 0;
+    if (sent > 0) {
+        char msg[48];
+        std::snprintf(msg, sizeof(msg), "SENT %d QUEUED MESSAGE%s", sent,
+                      sent == 1 ? "" : "S");
+        show_notice(msg, 8, now_ms);
+    }
+}
+
+const char* HermesClient::outbox_at(int i) const {
+    if (i < 0 || i >= outbox_count_) return "";
+    return outbox_[(outbox_head_ + i) % kOutboxMax];
 }
 
 // ---------------------------------------------------------------------------
@@ -177,9 +200,10 @@ void HermesClient::on_transport_open(uint64_t now_ms) {
     cJSON* ota = cJSON_AddObjectToObject(caps, "ota");
     cJSON_AddNumberToObject(ota, "max_size", kHermesOtaMaxSize);
     cJSON_AddArrayToObject(root, "actions");
-    if (battery_pct_ >= 0) {
+    if (battery_pct_ >= 0 || charging_ >= 0) {
         cJSON* sensors = cJSON_AddObjectToObject(root, "sensors");
-        cJSON_AddNumberToObject(sensors, "battery_pct", battery_pct_);
+        if (battery_pct_ >= 0) cJSON_AddNumberToObject(sensors, "battery_pct", battery_pct_);
+        if (charging_ >= 0) cJSON_AddBoolToObject(sensors, "charging", charging_ != 0);
     }
     send_json(root);
 }
@@ -242,10 +266,12 @@ void HermesClient::on_text(const char* json, size_t len, uint64_t now_ms) {
         bool paired = false;
         json_bool(root, "paired", &paired);
         view_.paired = paired;
+        copy_capped(view_.server, sizeof(view_.server), json_str(root, "server"));
+        copy_capped(view_.session, sizeof(view_.session), json_str(root, "session"));
         view_.error[0] = '\0';
         set_link(paired ? HermesLinkState::Linked : HermesLinkState::Pairing);
         send_state(now_ms);
-        flush_pending_text();
+        flush_pending_text(now_ms);
     } else if (std::strcmp(type, "pairing") == 0) {
         copy_capped(view_.pairing_code, sizeof(view_.pairing_code), json_str(root, "code"));
         copy_capped(view_.pairing_cmd, sizeof(view_.pairing_cmd), json_str(root, "command"));
@@ -254,7 +280,7 @@ void HermesClient::on_text(const char* json, size_t len, uint64_t now_ms) {
         view_.paired = true;
         view_.pairing_code[0] = '\0';
         set_link(HermesLinkState::Linked);
-        flush_pending_text();
+        flush_pending_text(now_ms);
     } else if (std::strcmp(type, "unpaired") == 0) {
         view_.paired = false;
         set_link(HermesLinkState::Pairing);
@@ -549,13 +575,7 @@ void HermesClient::ota_fail(const char* code, const char* message, uint64_t now_
 // User intents
 // ---------------------------------------------------------------------------
 
-bool HermesClient::send_chat_text(const char* text) {
-    if (!text || !text[0]) return false;
-    if (!welcomed_ || !view_.paired) {
-        copy_capped(pending_text_, sizeof(pending_text_), text);
-        has_pending_text_ = true;
-        return true;   // queued; flushed on welcome/paired
-    }
+void HermesClient::send_text_frame(const char* text) {
     char id[16];
     std::snprintf(id, sizeof(id), "t%u", ++msg_counter_);
     cJSON* root = cJSON_CreateObject();
@@ -563,6 +583,25 @@ bool HermesClient::send_chat_text(const char* text) {
     cJSON_AddStringToObject(root, "id", id);
     cJSON_AddStringToObject(root, "text", text);
     send_json(root);
+}
+
+bool HermesClient::send_chat_text(const char* text) {
+    if (!text || !text[0]) return false;
+    if (!welcomed_ || !view_.paired) {
+        // Offline outbox (buddy-harvest): bounded FIFO; a full queue
+        // evicts the oldest text so the newest intent always survives.
+        if (outbox_count_ >= kOutboxMax) {
+            outbox_head_ = static_cast<uint8_t>((outbox_head_ + 1) % kOutboxMax);
+            --outbox_count_;
+        }
+        const int slot = (outbox_head_ + outbox_count_) % kOutboxMax;
+        copy_capped(outbox_[slot], sizeof(outbox_[slot]), text);
+        ++outbox_count_;
+        ++outbox_version_;
+        view_.queued = static_cast<uint8_t>(outbox_count_);
+        return true;   // queued; flushed in order on welcome/paired
+    }
+    send_text_frame(text);
     return true;
 }
 
@@ -696,12 +735,34 @@ void HermesClient::talk_cancel() {
     send_json(root);
 }
 
-void HermesClient::set_battery(int pct, uint64_t now_ms) {
+void HermesClient::set_battery(int pct, int charging, uint64_t now_ms) {
     battery_pct_ = pct;
+    charging_ = charging;
     if (!welcomed_) return;
     bool changed = battery_sent_ >= 0 && pct >= 0 && (pct - battery_sent_ >= 2 || battery_sent_ - pct >= 2);
+    bool chg_changed = charging_ != charging_sent_;
     bool stale = now_ms - last_state_ms_ >= 60000;
-    if (changed || stale || (battery_sent_ < 0 && pct >= 0)) send_state(now_ms);
+    if (changed || chg_changed || stale || (battery_sent_ < 0 && pct >= 0)) send_state(now_ms);
+}
+
+void HermesClient::forget() {
+    welcomed_ = false;
+    view_.paired = false;
+    view_.busy = false;
+    view_.pairing_code[0] = '\0';
+    view_.pairing_cmd[0] = '\0';
+    view_.error[0] = '\0';
+    view_.prompt_active = false;
+    dismiss_card();
+    // The adapter installs the fresh key via set_key() around this call;
+    // clearing the AuthFailed latch is what lets the link layer dial again.
+    set_link(transport_up_ ? HermesLinkState::Connecting : HermesLinkState::Offline);
+    wants_reconnect_ = true;
+}
+
+void HermesClient::restore_conversation(const char* transcript, const char* reply) {
+    copy_capped(view_.transcript, sizeof(view_.transcript), transcript);
+    copy_capped(view_.reply, sizeof(view_.reply), reply);
 }
 
 // ---------------------------------------------------------------------------

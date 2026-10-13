@@ -85,6 +85,9 @@ enum class HermesLinkState : uint8_t {
 struct HermesView {
     HermesLinkState link = HermesLinkState::Offline;
     bool paired = false;
+    uint8_t queued = 0;            // offline outbox depth (buddy-harvest)
+    char server[24] = {};          // welcome "server" (hub: "hermes")
+    char session[40] = {};         // welcome "session" id
     char pairing_code[16] = {};    // 8-char code while Pairing
     char pairing_cmd[96] = {};     // full approve command from the server
     char status[160] = {};         // live working-state phrase ("" = idle)
@@ -182,7 +185,21 @@ class HermesClient {
     void talk_stop(uint64_t now_ms);
     void talk_cancel();                      // discard the in-progress utterance
     bool talk_active() const { return capturing_; }
-    void set_battery(int pct, uint64_t now_ms);   // -1 = unknown
+    // pct -1 = unknown; charging -1 = unknown, 0 = not charging, 1 = charging.
+    void set_battery(int pct, int charging, uint64_t now_ms);
+
+    // Forget the rejected identity after an auth failure (companion of
+    // set_key() with a fresh key, driven by the adapter's forget flow):
+    // clears the AuthFailed latch so the link may reconnect and re-enroll.
+    void forget();
+    // Restore the persisted conversation pair at boot (buddy-harvest:
+    // chat persistence, watch scale — the transcript+reply pair IS the
+    // watch's conversation state).
+    void restore_conversation(const char* transcript, const char* reply);
+    // Offline outbox introspection for the persistence layer.
+    int outbox_count() const { return outbox_count_; }
+    const char* outbox_at(int i) const;   // i = 0 is the oldest queued text
+    uint32_t outbox_version() const { return outbox_version_; }
 
     HermesLinkState state() const { return view_.link; }
     bool paired() const { return view_.paired; }
@@ -196,7 +213,8 @@ class HermesClient {
  private:
     void send_json(void* root);   // a cJSON* (kept opaque: no cJSON in this header)
     void send_state(uint64_t now_ms);
-    void flush_pending_text();
+    void send_text_frame(const char* text);
+    void flush_pending_text(uint64_t now_ms);
     void set_link(HermesLinkState s);
     void show_notice(const char* text, uint32_t ttl_s, uint64_t now_ms);
     void ota_fail(const char* code, const char* message, uint64_t now_ms);
@@ -218,11 +236,20 @@ class HermesClient {
 
     int battery_pct_ = -1;
     int battery_sent_ = -2;                  // last value reported via state{}
+    int charging_ = -1;                      // -1 unknown, 0 no, 1 yes
+    int charging_sent_ = -2;                 // last value reported via state{}
     uint64_t last_state_ms_ = 0;
 
     unsigned msg_counter_ = 0;
-    char pending_text_[512] = {};            // 1-deep queue while not yet paired
-    bool has_pending_text_ = false;
+    // Offline outbox (buddy-harvest): bounded FIFO, flushed in order once
+    // paired. Depth is watch-scale (no keyboard — sends are rare and
+    // programmatic); a full queue evicts the OLDEST text. The link layer
+    // persists the ring via outbox_at()/outbox_version().
+    static constexpr int kOutboxMax = 4;
+    char outbox_[kOutboxMax][512] = {};
+    uint8_t outbox_head_ = 0;
+    uint8_t outbox_count_ = 0;
+    uint32_t outbox_version_ = 0;            // bumps on every queue mutation
 
     // Mic capture (device -> server, channel 1).
     bool capturing_ = false;
