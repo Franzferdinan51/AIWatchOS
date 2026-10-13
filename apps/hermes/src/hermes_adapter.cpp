@@ -305,9 +305,13 @@ std::string hermes_health_line() {
     uint64_t now = g_hal ? g_hal->now_ms() : 0;
     hermes_uptime_str(now, up, sizeof(up));
     HermesLinkState st = HermesLinkState::Offline;
+    char srv[24] = {};
+    char ses[40] = {};
     if (g_client) {
         LockGuard lock;
         st = g_client->state();
+        std::snprintf(srv, sizeof(srv), "%s", g_client->view().server);
+        std::snprintf(ses, sizeof(ses), "%s", g_client->view().session);
     }
     char line[64] = {};
     if (g_hal) {
@@ -320,6 +324,27 @@ std::string hermes_health_line() {
         }
     } else {
         std::snprintf(line, sizeof(line), "BAT -- UP %s LINK %s", up, link_word(st));
+    }
+    // Diagnostics (buddy-harvest): the hub's server identity + our
+    // session id, as welcomed. Session truncated to its first 8 chars.
+    if (srv[0]) {
+        char srv_up[24];
+        size_t i = 0;
+        for (; i < sizeof(srv_up) - 1 && srv[i]; ++i) {
+            const char c = srv[i];
+            srv_up[i] = (c >= 'a' && c <= 'z') ? static_cast<char>(c - 'a' + 'A') : c;
+        }
+        srv_up[i] = '\0';
+        char tail[40];
+        if (ses[0]) {
+            std::snprintf(tail, sizeof(tail), " SRV %s SES %.8s", srv_up, ses);
+        } else {
+            std::snprintf(tail, sizeof(tail), " SRV %s", srv_up);
+        }
+        const size_t used = std::strlen(line);
+        if (used + 1 < sizeof(line)) {
+            std::strncat(line, tail, sizeof(line) - used - 1);
+        }
     }
     return std::string(line);
 }
@@ -366,7 +391,11 @@ const char* hermes_pairing_command() {
 bool hermes_send_text(const char* text) {
     if (!ensure_client()) return false;
     LockGuard lock;
-    return g_client->send_chat_text(text);
+    const bool ok = g_client->send_chat_text(text);
+    // Buddy parity: sending (or queueing) pokes the reconnect loop out
+    // of its backoff instead of waiting it out.
+    if (ok) hermes_link_wake_reconnect();
+    return ok;
 }
 
 bool hermes_answer_prompt(bool yes) {
@@ -378,7 +407,28 @@ bool hermes_answer_prompt(bool yes) {
 bool hermes_new_session() {
     if (!g_client) return false;
     LockGuard lock;
-    return g_client->new_session(now_ms());
+    const bool ok = g_client->new_session(now_ms());
+    // The persisted conversation pair belongs to the old session.
+    if (ok) hermes_link_clear_conversation();
+    return ok;
+}
+
+// Buddy-harvest device-key reset (the phone's Settings button, mapped
+// to the watch): erase the stored identity, mint + store a fresh key,
+// and clear the client's AuthFailed latch so the link reconnects and
+// re-enrolls — the hub will issue a new pairing code. Triggered by the
+// BOOT long-hold on the AUTH FAIL screen (see hermes_tick).
+bool hermes_forget_device() {
+    if (!ensure_client()) return false;
+    LockGuard lock;
+    hermes_link_erase_key();
+    uint8_t key[32];
+    hermes_link_fill_random(key, sizeof(key));
+    g_client->set_key(key);
+    hermes_link_store_key(key);
+    g_client->forget();
+    hermes_link_wake_reconnect();
+    return true;
 }
 
 // --- H10: Hermes events -> OS Notifications ---------------------------------
@@ -394,6 +444,13 @@ uint64_t g_bridge_card_until_ms = 0;
 char g_bridge_card_title[96] = {};
 char g_bridge_notice[160] = {};
 uint64_t g_bridge_notice_until_ms = 0;
+// Buddy-harvest: completed-reply notifications + persistence sync.
+bool g_bridge_reply_busy = false;
+char g_bridge_reply_sig[80] = {};   // first chars of the last notified reply
+uint64_t g_fg_tick_ms = 0;          // last hermes_tick (app foregrounded)
+bool g_fg_seen = false;
+uint32_t g_outbox_saved_version = 0;
+bool g_conv_prev_busy = false;
 
 void hermes_notify_bridge(const HermesView& v, uint64_t now) {
     aiwatchos::NotificationManager* nm = aiwatchos::active_notifications();
@@ -453,6 +510,23 @@ void hermes_notify_bridge(const HermesView& v, uint64_t now) {
         g_bridge_card_until_ms = 0;
     }
 
+    // Completed reply while the Hermes app is backgrounded
+    // (buddy-harvest): post it to OS Notifications like the phone does.
+    // Edge = busy fall with reply text; a fresh turn re-arms (the
+    // signature clears on the busy rise) so an identical later reply
+    // still notifies. Foreground = hermes_tick ran within 600 ms.
+    const bool fg = g_fg_seen && now >= g_fg_tick_ms && now - g_fg_tick_ms <= 600;
+    if (v.busy) {
+        if (!g_bridge_reply_busy) g_bridge_reply_sig[0] = '\0';
+    } else if (g_bridge_reply_busy && v.reply[0] && !fg &&
+               std::strncmp(v.reply, g_bridge_reply_sig,
+                            sizeof(g_bridge_reply_sig) - 1) != 0) {
+        nm->add_notification("Hermes", v.reply);
+        std::snprintf(g_bridge_reply_sig, sizeof(g_bridge_reply_sig),
+                      "%s", v.reply);
+    }
+    g_bridge_reply_busy = v.busy;
+
     // Notice banner: one entry per (text, deadline).
     if (v.notice[0] && v.notice_until_ms) {
         if (std::strcmp(g_bridge_notice, v.notice) != 0 ||
@@ -473,6 +547,25 @@ void hermes_pump(uint64_t now_ms) {
     // place as EXPIRED rather than retiring it as if answered.
     hermes_notify_bridge(g_client->view(), now_ms);
     g_client->tick(now_ms);
+
+    // Buddy-harvest persistence sync (same lock, link-task cadence).
+    // Outbox: rewrite the stored ring whenever the queue mutated —
+    // enqueue, eviction, and the post-pairing flush all bump the
+    // version, so the NVS copy always mirrors the live ring.
+    if (g_client->outbox_version() != g_outbox_saved_version) {
+        const char* texts[4];  // kOutboxMax, mirrored
+        const int n = g_client->outbox_count();
+        for (int i = 0; i < n; ++i) texts[i] = g_client->outbox_at(i);
+        hermes_link_save_outbox(texts, n);
+        g_outbox_saved_version = g_client->outbox_version();
+    }
+    // Conversation: persist the transcript+reply pair when a turn
+    // settles (busy fall) — one NVS write per turn, never per delta.
+    const HermesView& v = g_client->view();
+    if (g_conv_prev_busy && !v.busy) {
+        hermes_link_save_conversation(v.transcript, v.reply);
+    }
+    g_conv_prev_busy = v.busy;
 }
 
 // ---------------------------------------------------------------------------
@@ -523,10 +616,10 @@ void hermes_core_talk_feed(const int16_t* pcm, size_t frames) {
     g_client->talk_feed(pcm, frames);
 }
 
-void hermes_core_set_battery(int pct) {
+void hermes_core_set_battery(int pct, int charging) {
     if (!g_client) return;
     LockGuard lock;
-    g_client->set_battery(pct, now_ms());
+    g_client->set_battery(pct, charging, now_ms());
 }
 
 bool hermes_core_ota_reboot_pending() {
@@ -542,6 +635,41 @@ void hermes_core_ota_reboot_consumed() {
 }
 
 // ---------------------------------------------------------------------------
+// Buddy-harvest: boot restore of the persisted Hermes state
+// ---------------------------------------------------------------------------
+// One-time PSRAM scratch for the stored blobs (never DRAM): the saved
+// conversation pair and outbox ring are re-injected into the fresh
+// client exactly as if the reboot had not happened.
+char* g_scratch_t = nullptr;
+char* g_scratch_r = nullptr;
+char (*g_scratch_q)[512] = nullptr;
+
+bool hermes_scratch_ok() {
+    if (!g_scratch_t) {
+        g_scratch_t = static_cast<char*>(sink_alloc_big(nullptr, 512));
+    }
+    if (!g_scratch_r) {
+        g_scratch_r = static_cast<char*>(sink_alloc_big(nullptr, 4096));
+    }
+    if (!g_scratch_q) {
+        g_scratch_q = static_cast<char(*)[512]>(sink_alloc_big(nullptr, 4 * 512));
+    }
+    return g_scratch_t && g_scratch_r && g_scratch_q;
+}
+
+void hermes_restore_persisted() {
+    if (!g_client || !hermes_scratch_ok()) return;
+    LockGuard lock;
+    if (hermes_link_load_conversation(g_scratch_t, 512, g_scratch_r, 4096)) {
+        g_client->restore_conversation(g_scratch_t, g_scratch_r);
+    }
+    const int n = hermes_link_load_outbox(g_scratch_q, 4);
+    for (int i = 0; i < n; ++i) {
+        if (g_scratch_q[i][0]) g_client->send_chat_text(g_scratch_q[i]);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // App lifecycle
 // ---------------------------------------------------------------------------
 
@@ -553,6 +681,7 @@ void hermes_init() {
 #endif
     ensure_client();
     hermes_link_start();   // device: WS link task (WiFi owned by aiwatchos_net); host: stub
+    hermes_restore_persisted();
 }
 
 // H5 gesture state: BOOT held in the Hermes app. Hint at 600 ms,
@@ -566,6 +695,14 @@ uint32_t g_boot_hint_ms = 0;
 void hermes_tick(uint32_t elapsed_ms) {
     (void)elapsed_ms;
     const uint64_t now = now_ms();
+    // Foreground tracking for the notification bridge, plus the buddy
+    // wakeup: returning to the app after a gap pokes the link layer
+    // out of its reconnect backoff.
+    if (g_fg_seen && now > g_fg_tick_ms && now - g_fg_tick_ms > 1500) {
+        hermes_link_wake_reconnect();
+    }
+    g_fg_seen = true;
+    g_fg_tick_ms = now;
     if (g_hal) {
         const bool down = (g_hal->read_buttons() & 1u) != 0;   // BOOT
         if (down) {
@@ -577,7 +714,15 @@ void hermes_tick(uint32_t elapsed_ms) {
             g_boot_hint_ms = static_cast<uint32_t>(now - g_boot_since_ms);
             if (!g_boot_fired && g_boot_hint_ms >= 2000) {
                 g_boot_fired = true;
-                hermes_new_session();
+                // Context-aware (buddy-harvest): on the AUTH FAIL
+                // screen the same hold forgets the rejected identity
+                // and re-enrolls instead of starting a session.
+                if (g_client &&
+                    g_client->state() == HermesLinkState::AuthFailed) {
+                    hermes_forget_device();
+                } else {
+                    hermes_new_session();
+                }
             }
         } else {
             g_boot_held = false;
@@ -643,8 +788,13 @@ void hermes_render(aiwatchos::Framebuffer& fb) {
         // Micro row: uptime left, device id right.
         char up_buf[16];
         hermes_uptime_str(now_ms(), up_buf, sizeof(up_buf));
-        char up_line[32];
-        std::snprintf(up_line, sizeof(up_line), "UP %s", up_buf);
+        char up_line[48];
+        if (v.queued) {
+            std::snprintf(up_line, sizeof(up_line), "UP %s - %u QUEUED",
+                          up_buf, v.queued);
+        } else {
+            std::snprintf(up_line, sizeof(up_line), "UP %s", up_buf);
+        }
         aiwatchos::draw_text_aa(fb, 16, 146, up_line,
                                 aiwatchos::FontFace::kMicro, kDimColor);
         if (g_client) {
@@ -661,7 +811,7 @@ void hermes_render(aiwatchos::Framebuffer& fb) {
     if (v.link == HermesLinkState::AuthFailed) {
         draw_wrapped(fb, 16, kContentY, kContentW, v.error, 2, aiwatchos::colors::kDanger, 3);
         draw_wrapped(fb, 16, kContentY + 60, kContentW,
-                     "ON THE HERMES HOST RUN: HERMES GADGET FORGET THIS DEVICE, THEN REBOOT THE WATCH TO RE-ENROLL.",
+                     "HOLD BOOT 2S TO FORGET THIS DEVICE AND RE-ENROLL WITH A FRESH KEY. (OR RUN HERMES GADGET FORGET ON THE HOST.)",
                      2, kDimColor, 8);
     } else if (v.prompt_active) {
         draw_wrapped(fb, 16, kContentY, kContentW, v.prompt_title, 3, kAmberColor, 2);
@@ -791,7 +941,10 @@ void hermes_render(aiwatchos::Framebuffer& fb) {
     if (g_boot_hint_ms >= 600 && !g_boot_fired) {
         const uint32_t left_ms = 2000 - g_boot_hint_ms;
         char hold[48];
-        std::snprintf(hold, sizeof(hold), "KEEP HOLDING: NEW SESSION IN %u.%us",
+        std::snprintf(hold, sizeof(hold), "KEEP HOLDING: %s IN %u.%us",
+                      v.link == HermesLinkState::AuthFailed
+                          ? "FORGET + RE-ENROLL"
+                          : "NEW SESSION",
                       static_cast<unsigned>(left_ms / 1000),
                       static_cast<unsigned>((left_ms % 1000) / 100));
         draw_text(fb, 16, aiwatchos::kDisplayHeight - 60, hold, 2, kAmberColor);
@@ -864,6 +1017,8 @@ aiwatchos::App make_hermes_app(aiwatchos::Hal& hal) {
 // ---------------------------------------------------------------------------
 
 #ifndef __ESPRESSIF_IDF__
+void hermes_test_restore() { hermes_restore_persisted(); }
+
 void hermes_test_reset(const uint8_t key[32]) {
     ensure_client();
     if (!g_client) return;

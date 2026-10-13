@@ -44,12 +44,19 @@ const char* hermes_pairing_code();
 const char* hermes_pairing_command();
 
 // Queue/send a chat text. When the link is down or pairing is pending the
-// latest text is held and flushed once the session is paired. Returns false
-// only for empty text.
+// text joins a bounded FIFO outbox (depth 4, oldest evicted) that is
+// persisted across reboots and flushed in order once the session is
+// paired. Returns false only for empty text.
 bool hermes_send_text(const char* text);
 
 // Answer the active yes/no prompt (false when none is active).
 bool hermes_answer_prompt(bool yes);
+
+// Buddy-harvest device-key reset: erase the stored identity, mint a
+// fresh key, and clear the AuthFailed latch so the link re-enrolls
+// (new pairing code). Fired by the BOOT long-hold on the AUTH FAIL
+// screen; harmless to call in other states.
+bool hermes_forget_device();
 // H5: start a fresh Hermes session (sends session.new; see
 // HermesClient::new_session). False when not paired+linked.
 bool hermes_new_session();
@@ -93,6 +100,7 @@ aiwatchos::App make_hermes_app(aiwatchos::Hal& hal = aiwatchos::Board::instance(
 // They mirror the repo's existing test seams (board_inject_touch etc.).
 
 void hermes_test_reset(const uint8_t key[32]);   // fresh client with a known key
+void hermes_test_restore();                       // run the boot restore (persisted state)
 void hermes_test_transport_up();                  // simulate WS connect
 void hermes_test_transport_down();                // simulate WS disconnect
 void hermes_test_inject_text(const char* json);   // one inbound text frame
