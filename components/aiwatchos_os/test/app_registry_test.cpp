@@ -1287,6 +1287,35 @@ static void hermes_linked(aiwatchos::TestHal& hal) {
     hermes_test_clear_outbound();
 }
 
+// --- Buddy-harvest: capture sinks for direct HermesClient tests ---------------
+static std::string g_bh_cap;
+static bool bh_cap_text(void*, const char* json, size_t len) {
+    g_bh_cap.append(json, len);
+    g_bh_cap += '\n';
+    return true;
+}
+static bool bh_cap_bin(void*, const uint8_t*, size_t) { return true; }
+static void bh_cap_rand(void*, uint8_t* out, size_t len) {
+    for (size_t i = 0; i < len; ++i) out[i] = static_cast<uint8_t>(0xA0 + i);
+}
+static void* bh_cap_alloc(void*, size_t n) { return std::malloc(n); }
+static void bh_cap_free(void*, void* p) { std::free(p); }
+
+static aiwatchos_hermes::HermesSinks bh_sinks() {
+    aiwatchos_hermes::HermesSinks s{};
+    s.send_text = &bh_cap_text;
+    s.send_binary = &bh_cap_bin;
+    s.fill_random = &bh_cap_rand;
+    s.alloc_big = &bh_cap_alloc;
+    s.free_big = &bh_cap_free;
+    return s;
+}
+
+static void bh_inject(aiwatchos_hermes::HermesClient& c, const char* json,
+                      uint64_t now) {
+    c.on_text(json, std::strlen(json), now);
+}
+
 static bool outbound_has(const char* needle) {
     using namespace aiwatchos_hermes;
     for (size_t i = 0; i < hermes_test_outbound_count(); ++i) {
@@ -2120,6 +2149,215 @@ static void test_hermes_new_session() {
     printf("test_hermes_new_session: PASSED\n");
 }
 
+// --- Buddy-harvest, proto level: charging sensor, welcome retention, -------
+// --- FIFO outbox, forget() ---------------------------------------------------
+static void test_hermes_proto_harvest() {
+    using namespace aiwatchos_hermes;
+    HermesConfig cfg{};
+    uint8_t key[32];
+    for (int i = 0; i < 32; ++i) key[i] = static_cast<uint8_t>(i);
+
+    // Charging rides the hello sensors and every state frame; a flip
+    // re-sends state at an unchanged percentage.
+    {
+        HermesClient c;
+        c.init(bh_sinks(), cfg);
+        c.set_key(key);
+        c.set_battery(80, 1, 0);
+        g_bh_cap.clear();
+        c.on_transport_open(0);
+        assert(g_bh_cap.find("\"type\":\"hello\"") != std::string::npos);
+        assert(g_bh_cap.find("\"battery_pct\":80") != std::string::npos);
+        assert(g_bh_cap.find("\"charging\":true") != std::string::npos);
+
+        g_bh_cap.clear();
+        bh_inject(c,
+                  "{\"type\":\"welcome\",\"session\":\"sess-42\",\"paired\":true,"
+                  "\"heartbeat_s\":20,\"server\":\"hermes\",\"proto\":1}",
+                  0);
+        assert(std::string(c.view().server) == "hermes");
+        assert(std::string(c.view().session) == "sess-42");
+        assert(g_bh_cap.find("\"type\":\"state\"") != std::string::npos);
+        assert(g_bh_cap.find("\"charging\":true") != std::string::npos);
+
+        g_bh_cap.clear();
+        c.set_battery(80, 0, 1000);
+        assert(g_bh_cap.find("\"charging\":false") != std::string::npos);
+    }
+
+    // FIFO outbox: queued while unpaired, flushed in order on paired,
+    // with the buddy-style completion notice.
+    {
+        HermesClient c;
+        c.init(bh_sinks(), cfg);
+        c.set_key(key);
+        c.on_transport_open(0);
+        bh_inject(c, "{\"type\":\"welcome\",\"session\":\"s1\",\"paired\":false,\"heartbeat_s\":20}", 0);
+        assert(c.send_chat_text("one"));
+        assert(c.send_chat_text("two"));
+        assert(c.send_chat_text("three"));
+        assert(c.view().queued == 3);
+        assert(c.outbox_count() == 3);
+        g_bh_cap.clear();
+        bh_inject(c, "{\"type\":\"paired\"}", 100);
+        const size_t p1 = g_bh_cap.find("\"text\":\"one\"");
+        const size_t p2 = g_bh_cap.find("\"text\":\"two\"");
+        const size_t p3 = g_bh_cap.find("\"text\":\"three\"");
+        assert(p1 != std::string::npos && p2 != std::string::npos &&
+               p3 != std::string::npos);
+        assert(p1 < p2 && p2 < p3);
+        assert(c.view().queued == 0);
+        assert(std::string(c.view().notice).find("SENT 3 QUEUED") == 0);
+    }
+
+    // A full ring evicts the oldest text, never the newest.
+    {
+        HermesClient c;
+        c.init(bh_sinks(), cfg);
+        c.set_key(key);
+        c.on_transport_open(0);
+        bh_inject(c, "{\"type\":\"welcome\",\"session\":\"s1\",\"paired\":false,\"heartbeat_s\":20}", 0);
+        for (const char* m : {"m1", "m2", "m3", "m4", "m5"}) {
+            assert(c.send_chat_text(m));
+        }
+        assert(c.outbox_count() == 4);
+        assert(std::string(c.outbox_at(0)) == "m2");
+        assert(std::string(c.outbox_at(3)) == "m5");
+        assert(c.view().queued == 4);
+    }
+
+    // forget(): the auth_failed latch clears and reconnect is wanted.
+    {
+        HermesClient c;
+        c.init(bh_sinks(), cfg);
+        c.set_key(key);
+        c.on_transport_open(0);
+        bh_inject(c, "{\"type\":\"challenge\",\"nonce\":\"bm9uY2Utbm9uY2Utbm9uY2U=\",\"enrolled\":true}", 0);
+        bh_inject(c, "{\"type\":\"error\",\"code\":\"auth_failed\",\"message\":\"bad mac\"}", 10);
+        assert(c.state() == HermesLinkState::AuthFailed);
+        assert(!c.wants_reconnect());
+        uint8_t key2[32];
+        for (int i = 0; i < 32; ++i) key2[i] = static_cast<uint8_t>(0x40 + i);
+        c.set_key(key2);
+        c.forget();
+        assert(c.state() != HermesLinkState::AuthFailed);
+        assert(c.wants_reconnect());
+        assert(c.view().error[0] == '\0');
+    }
+    printf("test_hermes_proto_harvest: PASSED\n");
+}
+
+// --- Buddy-harvest: the outbox ring survives a reboot (link stubs) -----------
+static void test_hermes_outbox_persist() {
+    using namespace aiwatchos_hermes;
+    aiwatchos::TestHal hal;
+    hermes_linked(hal);
+
+    hermes_test_transport_down();
+    assert(hermes_send_text("q-one"));
+    assert(hermes_send_text("q-two"));
+    assert(hermes_view().queued == 2);
+    hermes_pump(hal.now_ms());   // persistence sync writes the ring
+
+    uint8_t key[32];
+    for (int i = 0; i < 32; ++i) key[i] = static_cast<uint8_t>(i);
+    hermes_test_reset(key);      // simulated reboot: fresh client
+    assert(hermes_view().queued == 0);
+    hermes_test_restore();       // the boot restore path
+    assert(hermes_view().queued == 2);
+
+    hermes_test_transport_up();
+    hermes_test_inject_text(
+        "{\"type\":\"challenge\",\"nonce\":\"bm9uY2Utbm9uY2Utbm9uY2U=\",\"enrolled\":false}");
+    hermes_test_inject_text(
+        "{\"type\":\"welcome\",\"session\":\"s2\",\"paired\":true,\"heartbeat_s\":20}");
+    std::string all;
+    for (size_t i = 0; i < hermes_test_outbound_count(); ++i) {
+        if (!hermes_test_outbound_is_binary(i)) {
+            all += hermes_test_outbound_text(i);
+            all += '\n';
+        }
+    }
+    const size_t p1 = all.find("\"text\":\"q-one\"");
+    const size_t p2 = all.find("\"text\":\"q-two\"");
+    assert(p1 != std::string::npos && p2 != std::string::npos && p1 < p2);
+    assert(hermes_view().queued == 0);
+    printf("test_hermes_outbox_persist: PASSED\n");
+}
+
+// --- Buddy-harvest: the conversation pair survives a reboot -------------------
+static void test_hermes_conversation_persist() {
+    using namespace aiwatchos_hermes;
+    aiwatchos::TestHal hal;
+    hermes_linked(hal);
+
+    hermes_test_inject_text("{\"type\":\"turn.start\",\"turn\":\"t1\"}");
+    hermes_pump(hal.now_ms());
+    hermes_test_inject_text("{\"type\":\"transcript\",\"text\":\"hi there\"}");
+    hermes_test_inject_text(
+        "{\"type\":\"reply\",\"turn\":\"t1\",\"text\":\"hello\"}");
+    hermes_test_inject_text(
+        "{\"type\":\"turn.end\",\"turn\":\"t1\",\"outcome\":\"success\"}");
+    hermes_pump(hal.now_ms());   // busy fall -> pair persisted
+
+    uint8_t key[32];
+    for (int i = 0; i < 32; ++i) key[i] = static_cast<uint8_t>(i);
+    hermes_test_reset(key);
+    assert(hermes_view().transcript[0] == '\0');
+    assert(hermes_view().reply[0] == '\0');
+    hermes_test_restore();
+    assert(std::string(hermes_view().transcript) == "hi there");
+    assert(std::string(hermes_view().reply) == "hello");
+    printf("test_hermes_conversation_persist: PASSED\n");
+}
+
+// --- Buddy-harvest: completed replies notify only in the background ------------
+static void test_hermes_reply_notify() {
+    using namespace aiwatchos_hermes;
+    aiwatchos::TestHal hal;
+    aiwatchos::NotificationManager mgr(hal);
+    aiwatchos::set_active_notifications(&mgr);
+    hermes_linked(hal);
+    aiwatchos::App app = make_hermes_app(hal);
+
+    // Background turn (no app tick — the app is not foregrounded).
+    hermes_test_inject_text("{\"type\":\"turn.start\",\"turn\":\"t1\"}");
+    hermes_pump(hal.now_ms());
+    hermes_test_inject_text(
+        "{\"type\":\"reply\",\"turn\":\"t1\",\"text\":\"answer one\"}");
+    hermes_test_inject_text(
+        "{\"type\":\"turn.end\",\"turn\":\"t1\",\"outcome\":\"success\"}");
+    hermes_pump(hal.now_ms());
+    assert(mgr.count() == 1);
+    assert(mgr.at(0).title == "Hermes");
+    assert(mgr.at(0).body == "answer one");
+
+    // Foreground turn: the tick marks the app visible; no notification.
+    app.tick(16);
+    hermes_test_inject_text("{\"type\":\"turn.start\",\"turn\":\"t2\"}");
+    hermes_pump(hal.now_ms());
+    hermes_test_inject_text(
+        "{\"type\":\"reply\",\"turn\":\"t2\",\"text\":\"answer two\"}");
+    hermes_test_inject_text(
+        "{\"type\":\"turn.end\",\"turn\":\"t2\",\"outcome\":\"success\"}");
+    hermes_pump(hal.now_ms());
+    assert(mgr.count() == 1);
+
+    // Background again (clock runs past the foreground window): a new
+    // reply notifies again.
+    hal.advance_ms(5000);
+    hermes_test_inject_text("{\"type\":\"turn.start\",\"turn\":\"t3\"}");
+    hermes_pump(hal.now_ms());
+    hermes_test_inject_text(
+        "{\"type\":\"reply\",\"turn\":\"t3\",\"text\":\"answer three\"}");
+    hermes_test_inject_text(
+        "{\"type\":\"turn.end\",\"turn\":\"t3\",\"outcome\":\"success\"}");
+    hermes_pump(hal.now_ms());
+    assert(mgr.count() == 2);
+    aiwatchos::set_active_notifications(nullptr);
+    printf("test_hermes_reply_notify: PASSED\n");
+}
+
 int main() {
     test_aa_text();                      // baked Inter AA renderer against real assets
     test_touch_synth();                  // Press/Move/Release from the point stream
@@ -2167,6 +2405,10 @@ int main() {
     test_hermes_auth_failure();          // Hermes auth lockout + heartbeat death
     test_hermes_notifications_bridge();  // H10: prompts/cards/notices -> OS notifications
     test_hermes_new_session();           // H5: session.new wire + BOOT long-press
+    test_hermes_proto_harvest();         // buddy harvest: charging, diag retention, FIFO outbox, forget
+    test_hermes_outbox_persist();        // buddy harvest: outbox ring survives reboot
+    test_hermes_conversation_persist();  // buddy harvest: conversation pair survives reboot
+    test_hermes_reply_notify();          // buddy harvest: background reply notifications
 
     printf("\nAll AppManager tests PASSED.\n");
     return 0;
