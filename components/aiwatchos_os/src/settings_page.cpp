@@ -1,136 +1,199 @@
-// Settings page renderer — touch-driven menu for watch configuration.
-// Layout optimized for the 410x502 portrait AMOLED: a status bar at top, a list of
-// settings items in the middle (each ~64px tall for finger-friendly tap targets),
-// and the selected item's value shown on the right edge. Touch areas are sized
-// generously (>= 48dp equivalent) per accessibility guidelines adapted for embedded.
+// Settings page — Muse Gloss rows with real controls. See
+// settings_page.hpp for the row inventory.
 #include "aiwatchos/settings_page.hpp"
 #include "aiwatchos/hal.hpp"
+#include "aiwatchos/colors.hpp"
+#include "aiwatchos/color_test.hpp"
+#include "aiwatchos/font.hpp"
 #include <cstdio>
 
 namespace aiwatchos {
+namespace {
 
-constexpr uint16_t kBgColor      = 0x0000;   // black (AMOLED native, power saving)
-constexpr uint16_t kHeaderColor  = 0x294A;   // dark blue header band
-constexpr uint16_t kItemColor    = 0x18E3;   // dark gray item background
-constexpr uint16_t kSelectedCol  = 0x52AA;   // blue highlight for selected item
-constexpr uint16_t kTextColor    = 0xFFFF;   // white text
-constexpr uint16_t kMutedColor   = 0x7BEF;   // medium gray muted/disabled items
+// Row geometry (tokens section 7): 64px rows from y=56 at 76px pitch.
+constexpr int kRowX = 20;
+constexpr int kRowW = 370;
+constexpr int kRowH = 64;
+constexpr int kRowY0 = 56;
+constexpr int kRowPitch = 76;
 
-// Settings menu items (index matches selected_item).
-static const char* kMenuItems[] = {
-    "Brightness",
-    "Volume",
-    "Do Not Disturb",
-    "Theme",
-    "About Device",
-};
-constexpr int kNumItems = 5;
+constexpr int kRowBrightness = 0;
+constexpr int kRowVolume = 1;
+constexpr int kRowDnd = 2;
+constexpr int kRowAbout = 3;
+constexpr int kRowColorTest = 4;
+constexpr int kNumRows = 5;
+
+// Slider track span (the control zone on the right of slider rows).
+constexpr int kSliderX0 = 190;
+constexpr int kSliderX1 = 330;
+
+int row_top(int row) { return kRowY0 + row * kRowPitch; }
+int row_at(int y) {
+    if (y < kRowY0) return -1;
+    const int rel = y - kRowY0;
+    const int row = rel / kRowPitch;
+    if (row >= kNumRows || rel % kRowPitch >= kRowH) return -1;
+    return row;
+}
+
+}  // namespace
 
 SettingsPage::SettingsPage(Hal& board) : board_(board) {}
 
-void SettingsPage::render(Framebuffer& fb) {
-    // Status bar at top (36px height).
-    fb.fill_rect(0, 0, kDisplayWidth - 1, 36, kHeaderColor);
-
-    // Menu items: each is ~72px tall in the available area below status bar.
-    const int item_h = 72;
-    const int start_y = 48;   // leave a gap after status bar
-
-    for (int i = 0; i < kNumItems; ++i) {
-        int y_top = start_y + i * item_h;
-        bool selected = (i == state_.selected_item);
-
-        // Item background — highlight the selected one.
-        uint16_t bg = selected ? kSelectedCol : kItemColor;
-        fb.fill_rect(8, y_top, kDisplayWidth - 16, y_top + item_h - 8, bg);
-
-        // Item label, drawn with the shared 5x7 font (scale 2 -> 10x14 glyphs).
-        const char* label = kMenuItems[i];
-        int label_x = 24;
-        int label_y = y_top + item_h / 2 - 7;
-
-        fb.draw_text(label_x, label_y, label, kTextColor);
-
-        // Draw the current value on the right side.
-        const char* value_str = nullptr;
-        switch (i) {
-            case 0:  // Brightness
-                if (state_.brightness > 80) value_str = "HIGH";
-                else if (state_.brightness < 30) value_str = "LOW";
-                else value_str = "MED";
-                break;
-            case 1:  // Volume
-                if (state_.volume > 70) value_str = "ON";
-                else if (state_.volume == 0) value_str = "MUTE";
-                else value_str = "ON";
-                break;
-            case 2:  // Do Not Disturb
-                value_str = state_.do_not_disturb ? "ON" : "OFF";
-                break;
-            case 3:  // Theme (always dark for AMOLED)
-                value_str = state_.dark_theme ? "DARK" : "LIGHT";
-                break;
-            case 4:  // About Device — show battery %
-                static char batt_buf[16];
-                PowerStatus ps = board_.read_power();
-                snprintf(batt_buf, sizeof(batt_buf), "%d%%", ps.battery_percent);
-                value_str = batt_buf;
-                break;
-        }
-
-        if (value_str) {
-            // Right-align the value, ending 24 px from the right edge (clear of
-            // the scroll-indicator dots at the very edge).
-            int val_x = kDisplayWidth - 24 - Framebuffer::text_width(value_str);
-            fb.draw_text(val_x, label_y, value_str, kMutedColor);
-        }
+void SettingsPage::set_slider_value(int row, int x) {
+    int pct = (x - kSliderX0) * 100 / (kSliderX1 - kSliderX0);
+    if (pct < 0) pct = 0;
+    if (pct > 100) pct = 100;
+    if (row == kRowBrightness) {
+        if (pct < 5) pct = 5;   // HAL backlight floor
+        state_.brightness = static_cast<uint8_t>(pct);
+        board_.set_backlight(state_.brightness);
+    } else if (row == kRowVolume) {
+        state_.volume = static_cast<uint8_t>(pct);
+        board_.set_volume(state_.volume);
     }
+}
 
-    // Draw scroll indicators (dots on the right edge).
-    for (int i = 0; i < kNumItems; ++i) {
-        int dot_y = start_y + item_h / 2 - 40 + i * (item_h + 6);
-        uint16_t dot_color = (i == state_.selected_item) ? kSelectedCol : kMutedColor;
-        fb.fill_rect(kDisplayWidth - 8, dot_y, kDisplayWidth - 4, dot_y + 5, dot_color);
+void SettingsPage::render(Framebuffer& fb) {
+    if (color_test_) {
+        draw_color_test_pattern(fb);
+        return;
+    }
+    // The shell paints the backdrop + status zone; rows start at y=56.
+    struct RowDef {
+        const char* label;
+        Icon icon;
+    };
+    static const RowDef kRows[kNumRows] = {
+        {"Brightness", Icon::kSun},
+        {"Volume", Icon::kVolume},
+        {"Do Not Disturb", Icon::kMoon},
+        {"About", Icon::kInfo},
+        {"Color Test", Icon::kSparkle},
+    };
+
+    for (int row = 0; row < kNumRows; ++row) {
+        const int y = row_top(row);
+        const int cy = y + kRowH / 2;
+        BubbleStyle style = bubble_style();
+        style.shadow = nullptr;   // rows aren't card-sized; no sprite
+        fb.draw_bubble(kRowX, y, kRowW, kRowH, 18, style);
+
+        // Icon chip: 40px pill, blue at 18% over the bubble, glyph in
+        // blue; label in Body.
+        const uint16_t chip =
+            blend565(colors::kBubble, colors::kBlue, 46);
+        fb.fill_round_rect(kRowX + 12, cy - 20, 40, 40, 20, chip);
+        draw_icon(fb, kRowX + 22, cy - 10, kRows[row].icon,
+                  FontFace::kIcon20, colors::kBlueTop);
+        draw_text_aa(fb, kRowX + 64,
+                     cy - font_line_height(FontFace::kBody) / 2,
+                     kRows[row].label, FontFace::kBody, colors::kText);
+
+        char val_buf[16];
+        switch (row) {
+            case kRowBrightness:
+            case kRowVolume: {
+                const int value = row == kRowBrightness
+                                      ? state_.brightness
+                                      : state_.volume;
+                // Track + filled portion + % readout.
+                fb.fill_round_rect(kSliderX0, cy - 3, kSliderX1 - kSliderX0,
+                                   6, 3, colors::kInput);
+                const int fill_w = (kSliderX1 - kSliderX0) * value / 100;
+                if (fill_w > 0) {
+                    fb.fill_round_rect(kSliderX0, cy - 3, fill_w, 6, 3,
+                                       colors::kBlue);
+                }
+                const int thumb_x = kSliderX0 + fill_w;
+                const uint16_t thumb =
+                    blend565(colors::kBlue, colors::kWhite, 60);
+                fb.fill_circle(thumb_x, cy, 14, thumb);
+                fb.fill_circle(thumb_x - 3, cy - 4, 5,
+                               blend565(thumb, colors::kWhite, 90));
+                std::snprintf(val_buf, sizeof(val_buf), "%d%%", value);
+                draw_text_aa_right(fb, kRowX + kRowW - 8,
+                                   cy - font_line_height(FontFace::kMicro) / 2,
+                                   val_buf, FontFace::kMicro, colors::kDim);
+                break;
+            }
+            case kRowDnd: {
+                // Switch widget: 44x24 pill + knob.
+                const int sx = kRowX + kRowW - 16 - 44;
+                fb.fill_round_rect(sx, cy - 12, 44, 24, 12,
+                                   state_.do_not_disturb ? colors::kBlue
+                                                         : colors::kInput);
+                fb.fill_circle(state_.do_not_disturb ? sx + 32 : sx + 12,
+                               cy, 9, colors::kWhite);
+                break;
+            }
+            case kRowAbout: {
+                const PowerStatus ps = board_.read_power();
+                std::snprintf(val_buf, sizeof(val_buf), "Battery %d%%",
+                              static_cast<int>(ps.battery_percent));
+                draw_text_aa_right(
+                    fb, kRowX + kRowW - 16,
+                    cy - font_line_height(FontFace::kBody) / 2, val_buf,
+                    FontFace::kBody, colors::kDim);
+                break;
+            }
+            case kRowColorTest: {
+                draw_icon(fb, kRowX + kRowW - 16 - 20, cy - 10,
+                          Icon::kChevronRight, FontFace::kIcon20,
+                          colors::kDim);
+                break;
+            }
+        }
     }
 }
 
 bool SettingsPage::on_touch(const TouchEvent& event) {
-    const int item_h = 72;
-    const int start_y = 48;
-
-    if (event.type == TouchEvent::Press && event.y >= start_y) {
-        // Calculate which menu item was tapped.
-        int rel_y = event.y - start_y;
-        int item_index = rel_y / item_h;
-
-        if (item_index >= 0 && item_index < kNumItems) {
-            state_.selected_item = item_index;
-
-            // Toggle/adjust the selected setting immediately on tap.
-            switch (item_index) {
-                case 0:  // Brightness — cycle 100 -> 50 -> 80 -> 100
-                    if (state_.brightness >= 100) state_.brightness = 50;
-                    else if (state_.brightness >= 80) state_.brightness = 100;
-                    else state_.brightness = 80;
-                    board_.set_backlight(state_.brightness);
-                    break;
-                case 1:  // Volume — cycle mute/on
-                    state_.volume = (state_.volume == 0) ? 70 : 0;
-                    board_.set_volume(state_.volume);
-                    break;
-                case 2:  // Do Not Disturb toggle
-                    state_.do_not_disturb = !state_.do_not_disturb;
-                    break;
-                case 3:  // Theme — always dark for AMOLED, but cycle to show UX
-                    state_.dark_theme = true;   // fixed: dark theme is mandatory on AMOLED
-                    break;
-                case 4:  // About Device — no action (read-only info)
-                    break;
-            }
-            return true;   // consumed
+    if (color_test_) {
+        // Any press leaves the colour-test pattern (plan 0.1).
+        if (event.type == TouchEvent::Press) {
+            color_test_ = false;
+            return true;
         }
+        return false;
     }
 
+    const int row = row_at(event.y);
+    switch (event.type) {
+        case TouchEvent::Press: {
+            if (row < 0 || event.x < kRowX || event.x >= kRowX + kRowW) {
+                return false;
+            }
+            if (row == kRowBrightness || row == kRowVolume) {
+                drag_row_ = row;
+                if (event.x >= kSliderX0 - 20) {
+                    set_slider_value(row, event.x);
+                }
+                return true;
+            }
+            if (row == kRowDnd) {
+                state_.do_not_disturb = !state_.do_not_disturb;
+                return true;
+            }
+            if (row == kRowColorTest) {
+                color_test_ = true;
+                return true;
+            }
+            return row == kRowAbout;   // About: consumed, read-only
+        }
+        case TouchEvent::Move:
+            if (drag_row_ >= 0) {
+                set_slider_value(drag_row_, event.x);
+                return true;
+            }
+            return false;
+        case TouchEvent::Release:
+            if (drag_row_ >= 0) {
+                drag_row_ = -1;
+                return true;
+            }
+            return false;
+    }
     return false;
 }
 

@@ -615,27 +615,42 @@ static void test_noise_crypto() {
 
 // --- Test Settings volume tap drives the Hal (real settings_page.cpp) ---
 static void test_settings_volume() {
-    // Volume toggles mute/on in state AND forwards to the Hal. Default volume
-    // is 70, so the first tap on item 1 (y in [120, 192)) must mute.
+    // Settings rows are Muse Gloss rows (y=56, pitch 76) with REAL
+    // sliders: press/drag on the track sets the HAL value from x.
+    // Slider span x=190..330, so x=260 is exactly 50%.
     aiwatchos::TestHal hal;
-    aiwatchos::SettingsPage settings(hal);
+    aiwatchos::SettingsPage page(hal);
 
-    aiwatchos::TouchEvent vol{100, 156, aiwatchos::TouchEvent::Press};
-    assert(settings.on_touch(vol) == true);
-    assert(hal.volume() == 0);   // muted through the Hal, not just in state
+    aiwatchos::TouchEvent press260r0{260, 88, aiwatchos::TouchEvent::Press};
+    assert(page.on_touch(press260r0) == true);
+    assert(hal.backlight() == 50);              // (260-190)/140 = 50%
+    aiwatchos::TouchEvent drag330{330, 88, aiwatchos::TouchEvent::Move};
+    assert(page.on_touch(drag330) == true);
+    assert(hal.backlight() == 100);              // dragged to the end
+    aiwatchos::TouchEvent rel{330, 88, aiwatchos::TouchEvent::Release};
+    assert(page.on_touch(rel) == true);
 
-    assert(settings.on_touch(vol) == true);
-    assert(hal.volume() == 70);  // back on
+    aiwatchos::TouchEvent press260r1{260, 164, aiwatchos::TouchEvent::Press};
+    assert(page.on_touch(press260r1) == true);
+    assert(hal.volume() == 50);                  // volume row, same maths
 
-    // Brightness item 0 (y in [48, 120)) cycles 100 -> 50 -> 80 -> 100,
-    // driving the Hal each step. The old thresholds left 80 unreachable.
-    aiwatchos::TouchEvent bri{100, 84, aiwatchos::TouchEvent::Press};
-    assert(settings.on_touch(bri) == true);
-    assert(hal.backlight() == 50);
-    assert(settings.on_touch(bri) == true);
-    assert(hal.backlight() == 80);   // was skipped by the old cycle
-    assert(settings.on_touch(bri) == true);
-    assert(hal.backlight() == 100);
+    // The Color Test row opens the byte-order pattern full-screen;
+    // any press leaves it again.
+    static uint16_t buf[aiwatchos::kDisplayWidth * aiwatchos::kDisplayHeight];
+    aiwatchos::Framebuffer fb{buf, aiwatchos::kDisplayWidth, aiwatchos::kDisplayHeight};
+    fb.fill(0x0000);
+    page.render(fb);
+    assert(buf[150 * aiwatchos::kDisplayWidth + 40] != 0xF800);   // settings rows
+    aiwatchos::TouchEvent open_ct{200, 392, aiwatchos::TouchEvent::Press};
+    assert(page.on_touch(open_ct) == true);      // row 4 (y 360..424)
+    fb.fill(0x0000);
+    page.render(fb);
+    assert(buf[150 * aiwatchos::kDisplayWidth + 40] == 0xF800);   // RED band
+    aiwatchos::TouchEvent exit_ct{100, 100, aiwatchos::TouchEvent::Press};
+    assert(page.on_touch(exit_ct) == true);
+    fb.fill(0x0000);
+    page.render(fb);
+    assert(buf[150 * aiwatchos::kDisplayWidth + 40] != 0xF800);
 
     printf("test_settings_volume: PASSED\n");
 }
@@ -767,27 +782,67 @@ static void test_launcher_hit_testing() {
 
 // --- Test notification body wrapping (drives the real render path) ---
 static void test_notification_wrap() {
-    // A two-word body must render on TWO lines. The old loop broke after the
-    // first word, so the second band stayed background.
+    // Card list (plan 3.5): BOTH notifications render as bubble cards,
+    // bodies wrap by PIXEL width (several words share a line — the old
+    // renderer put one word per line), receipt times render, tap
+    // expands, swipe-right dismisses.
     aiwatchos::TestHal hal;
+    hal.advance_ms(3723 * 1000);   // some wall-clock time for the stamps
     aiwatchos::NotificationManager mgr(hal);
-    mgr.add_notification("T", std::string(30, 'a') + " " + std::string(30, 'b'));
+    mgr.add_notification(
+        "First",
+        "alpha bravo charlie delta echo foxtrot golf hotel india "
+        "juliet kilo lima mike november oscar papa quebec romeo");
+    mgr.add_notification("Second",
+                          std::string(30, 'a') + " " + std::string(30, 'b'));
+    assert(mgr.count() == 2);
 
     static uint16_t buf[aiwatchos::kDisplayWidth * aiwatchos::kDisplayHeight];
     aiwatchos::Framebuffer fb{buf, aiwatchos::kDisplayWidth, aiwatchos::kDisplayHeight};
     fb.fill(0x0000);
     mgr.render(fb);
 
-    auto band_has_body = [&](int y0, int y1) {
-        for (int y = y0; y <= y1; ++y) {
-            for (int x = 0; x < aiwatchos::kDisplayWidth; ++x) {
-                if (buf[y * aiwatchos::kDisplayWidth + x] == 0xBDEF) return true;
-            }
-        }
-        return false;
+    auto count_color = [&](uint16_t c, int x0, int x1, int y0, int y1) {
+        int n = 0;
+        for (int y = y0; y <= y1; ++y)
+            for (int x = x0; x <= x1; ++x)
+                if (buf[y * aiwatchos::kDisplayWidth + x] == c) ++n;
+        return n;
     };
-    assert(band_has_body(84, 99));    // first word, line 1
-    assert(band_has_body(104, 119));  // second word, line 2 (was dropped)
+    // Card geometry: card0 (newest, "Second") y=56 h=86; card1 ("First")
+    // y=154. Body text is Caption `dim` (0x8C35), titles BodySB kText.
+    // Second card's first body line ("aaa...") is long.
+    assert(count_color(0x8C35, 84, 380, 92, 110) > 200);
+    // ...and its second line ("bbb...") renders too.
+    assert(count_color(0x8C35, 84, 380, 112, 130) > 200);
+    // The OLDER notification renders below as its own card (it used to
+    // be unreachable): bubble interior + title ink.
+    assert(count_color(0x118B, 24, 60, 190, 240) > 50);
+    assert(count_color(0xF77F, 84, 300, 164, 186) > 20);
+    // First card's line 1 packs MANY words: long dim run.
+    assert(count_color(0x8C35, 84, 380, 190, 208) > 200);
+    // Receipt time in Micro `faint` at the card's top right.
+    assert(count_color(0x398B, 300, 378, 66, 84) > 10);
+    // Collapsed: no third body line for "First" yet (its card is 86px).
+    assert(count_color(0x8C35, 84, 380, 230, 248) == 0);
+
+    // Tap "First" -> expands to its full 3 lines.
+    aiwatchos::TouchEvent p1{200, 200, aiwatchos::TouchEvent::Press};
+    aiwatchos::TouchEvent r1{200, 200, aiwatchos::TouchEvent::Release};
+    assert(mgr.on_touch(p1) == true);
+    assert(mgr.on_touch(r1) == true);
+    fb.fill(0x0000);
+    mgr.render(fb);
+    assert(count_color(0x8C35, 84, 380, 230, 248) > 50);
+
+    // Swipe right on the top card dismisses it.
+    aiwatchos::TouchEvent p2{100, 80, aiwatchos::TouchEvent::Press};
+    aiwatchos::TouchEvent m2{210, 80, aiwatchos::TouchEvent::Move};
+    aiwatchos::TouchEvent r2{210, 80, aiwatchos::TouchEvent::Release};
+    assert(mgr.on_touch(p2) == true);
+    assert(mgr.on_touch(m2) == true);
+    assert(mgr.on_touch(r2) == true);
+    assert(mgr.count() == 1);
 
     printf("test_notification_wrap: PASSED\n");
 }

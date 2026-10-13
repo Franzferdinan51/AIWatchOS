@@ -1,18 +1,115 @@
-// Notification display — renders messages with scroll support on the 410x502 AMOLED.
-// Touch-drag scrolls vertically; tap returns to the latest notification. Designed for
-// hardware constraints: uses std::vector (heap-allocated in PSRAM via ESP-IDF config)
-// but limits notifications to a bounded deque-style buffer (max 16 entries).
+// Notification card list — see notifications.hpp.
 #include "aiwatchos/notifications.hpp"
+
+#include <algorithm>
+#include <cstdio>
 #include <cstring>
 
-namespace aiwatchos {
+#include "aiwatchos/battery_display.hpp"   // kStatusZoneH
+#include "aiwatchos/colors.hpp"
+#include "aiwatchos/font.hpp"
 
-constexpr uint16_t kBgColor     = 0x0000;   // black AMOLED background
-constexpr uint16_t kHeaderCol   = 0x294A;   // dark blue header band
-constexpr uint16_t kTitleColor  = 0xFFFF;   // white title text
-constexpr uint16_t kBodiesColor = 0xBDEF;   // light gray body text
+namespace aiwatchos {
+namespace {
 
 constexpr int kMaxNotifications = 16;   // bounded buffer to limit PSRAM usage
+constexpr int kCardX = 20;
+constexpr int kCardW = 370;
+constexpr int kListY = 56;
+constexpr int kCardGap = 12;
+constexpr int kBodyX = 64;              // text starts right of the bell chip
+constexpr int kBodyW = 294;             // kCardW - kBodyX - 12
+
+// Pixel-width greedy wrap into at most max_lines lines (a negative
+// max_lines means unbounded). When the text needs more lines than
+// allowed, the last line is truncated with an ellipsis.
+std::vector<std::string> wrap_px(const std::string& text, FontFace face,
+                                 int max_w, int max_lines) {
+    std::vector<std::string> lines;
+    std::string cur;
+    size_t i = 0;
+    auto flush = [&]() {
+        lines.push_back(cur);
+        cur.clear();
+    };
+    auto fits = [&](const std::string& s) {
+        return text_width_aa(s, face) <= max_w;
+    };
+    while (i < text.size()) {
+        if (text[i] == '\n') {
+            flush();
+            ++i;
+            continue;
+        }
+        if (text[i] == ' ') {
+            ++i;
+            continue;
+        }
+        size_t j = i;
+        while (j < text.size() && text[j] != ' ' && text[j] != '\n') ++j;
+        std::string word = text.substr(i, j - i);
+        i = j;
+        // Hard-break a word that alone exceeds the line.
+        while (!fits(word)) {
+            if (!cur.empty()) {
+                flush();
+                if (max_lines >= 0 &&
+                    static_cast<int>(lines.size()) >= max_lines) {
+                    return lines;
+                }
+            }
+            // Longest prefix that fits.
+            size_t cut = word.size();
+            while (cut > 1 && !fits(word.substr(0, cut))) --cut;
+            lines.push_back(word.substr(0, cut));
+            word = word.substr(cut);
+            if (max_lines >= 0 &&
+                static_cast<int>(lines.size()) >= max_lines) {
+                return lines;
+            }
+        }
+        if (cur.empty()) {
+            cur = word;
+        } else if (fits(cur + " " + word)) {
+            cur += " " + word;
+        } else {
+            flush();
+            if (max_lines >= 0 &&
+                static_cast<int>(lines.size()) >= max_lines) {
+                return lines;
+            }
+            cur = word;
+        }
+    }
+    if (!cur.empty() || lines.empty()) flush();
+    // Ellipsis when content was cut off by the line cap.
+    if (max_lines >= 0 && static_cast<int>(lines.size()) >= max_lines &&
+        i < text.size()) {
+        std::string& last = lines.back();
+        while (!last.empty() && !fits(last + "...")) {
+            last.pop_back();
+        }
+        last += "...";
+    }
+    return lines;
+}
+
+// Truncate a single line to max_w px with a trailing ellipsis.
+std::string truncate_px(const std::string& text, FontFace face, int max_w) {
+    if (text_width_aa(text, face) <= max_w) return text;
+    std::string out = text;
+    while (!out.empty() && text_width_aa(out + "...", face) > max_w) {
+        out.pop_back();
+    }
+    return out + "...";
+}
+
+// Card height for a given number of body lines.
+int card_height(int body_line_count) {
+    return 36 + body_line_count * font_line_height(FontFace::kCaption) + 10;
+}
+
+}  // namespace
 
 NotificationManager::NotificationManager(Hal& board) : board_(board) {}
 
@@ -21,94 +118,154 @@ void NotificationManager::add_notification(std::string title, std::string body) 
         notifications_.erase(notifications_.begin());   // drop oldest
     }
     notifications_.push_back({std::move(title), std::move(body), board_.now_ms()});
+    expanded_ = -1;
+}
+
+int NotificationManager::body_lines(const Notification& n, bool expanded) const {
+    if (expanded) {
+        return static_cast<int>(wrap_px(n.body, FontFace::kCaption, kBodyW, -1).size());
+    }
+    return static_cast<int>(wrap_px(n.body, FontFace::kCaption, kBodyW, 2).size());
 }
 
 void NotificationManager::render(Framebuffer& fb) {
     if (notifications_.empty()) {
-        // Empty state: show "NO NOTIFICATIONS" centered on screen.
-        fb.fill(kBgColor);
-        const char* msg = "NO NOTIFICATIONS";
-        int x = (kDisplayWidth - Framebuffer::text_width(msg)) / 2;
-        int y = kDisplayHeight / 2 - Framebuffer::text_height() / 2;
-        fb.draw_text(x, y, msg, kTitleColor);
+        // Empty state: bell in a bubble + a quiet line (tokens 3.5).
+        BubbleStyle style = bubble_style();
+        style.shadow = nullptr;   // small bubble; sprite is tile-sized
+        fb.draw_bubble(kDisplayWidth / 2 - 40, 190, 80, 80, 24, style);
+        draw_icon(fb, kDisplayWidth / 2 - 20, 210, Icon::kBell,
+                  FontFace::kIcon40, colors::kDim);
+        draw_text_aa_centered(fb, kDisplayWidth / 2, 292,
+                              "No notifications", FontFace::kBody,
+                              colors::kDim);
         return;
     }
 
-    // Show the latest notification (index = last).
-    const Notification& n = notifications_.back();
+    int y = kListY - scroll_offset_;
+    // Newest first: walk the vector backwards.
+    for (int idx = static_cast<int>(notifications_.size()) - 1; idx >= 0;
+         --idx) {
+        const Notification& n = notifications_[idx];
+        const bool expanded = (idx == expanded_);
+        const auto lines =
+            wrap_px(n.body, FontFace::kCaption, kBodyW, expanded ? -1 : 2);
+        const int h = card_height(static_cast<int>(lines.size()));
+        if (y + h >= kStatusZoneH && y < kDisplayHeight) {
+            // Card shadow: the baked card sprite stretched vertically
+            // to this card's height (its reference height is 152).
+            if (const AlphaSprite* shadow = shadow_card()) {
+                int cap_top = 0, cap_bot = 0;
+                card_shadow_caps(cap_top, cap_bot);
+                fb.blit_alpha4_vstretch(kCardX + shadow->anchor_x - 11,
+                                        y + shadow->anchor_y, *shadow,
+                                        colors::kBlue, h + 32, cap_top,
+                                        cap_bot);
+            }
+            BubbleStyle style = bubble_style();
+            style.shadow = nullptr;   // pre-blitted stretched above
+            fb.draw_bubble(kCardX, y, kCardW, h, 18, style);
 
-    // Status bar.
-    fb.fill_rect(0, 0, kDisplayWidth - 1, 36, kHeaderCol);
+            // Bell chip.
+            const uint16_t chip =
+                blend565(colors::kBubble, colors::kBlue, 46);
+            fb.fill_round_rect(kCardX + 12, y + 12, 40, 40, 20, chip);
+            draw_icon(fb, kCardX + 22, y + 22, Icon::kBell,
+                      FontFace::kIcon20, colors::kBlueTop);
 
-    // Title at top of content area (single line, truncated to fit).
-    const int chars_per_line = (kDisplayWidth - 32) / Framebuffer::text_advance();
-    int title_y = 52;
-    fb.draw_text(16, title_y, n.title.substr(0, chars_per_line).c_str(), kTitleColor);
+            // Title (ellipsis-truncated) + receipt time, right.
+            const std::string title =
+                truncate_px(n.title, FontFace::kBodySemibold, 218);
+            draw_text_aa(fb, kCardX + kBodyX, y + 10, title,
+                         FontFace::kBodySemibold, colors::kText);
+            const uint64_t shown_ms = local_display_ms(n.timestamp_ms);
+            char time_buf[8];
+            std::snprintf(time_buf, sizeof(time_buf), "%u:%02u",
+                          static_cast<unsigned>((shown_ms / 3600000) % 24),
+                          static_cast<unsigned>((shown_ms / 60000) % 60));
+            draw_text_aa_right(fb, kCardX + kCardW - 12, y + 12, time_buf,
+                               FontFace::kMicro, colors::kFaint);
 
-    // Body text below the title — scroll support via scroll_offset_.
-    const int body_start_x = 16;
-    const int body_start_y = 84;
-
-    // Simple text wrapping: break into lines of chars_per_line.
-    std::string remaining = n.body;
-    int line_y = body_start_y - scroll_offset_;
-
-    while (!remaining.empty() && line_y < kDisplayHeight - 36) {
-        // Consume exactly one line per iteration so every line is reached;
-        // draw only the lines inside the visible area (scrolling just shifts
-        // line_y). The old code broke out after the first word here.
-        size_t break_pos = remaining.find_first_of(" \n");
-        std::string word;
-        if (break_pos != std::string::npos && static_cast<int>(break_pos) < chars_per_line) {
-            word = remaining.substr(0, break_pos);
-            remaining = remaining.substr(break_pos + 1);   // skip the space/newline
-        } else if (remaining.length() > static_cast<size_t>(chars_per_line)) {
-            word = remaining.substr(0, chars_per_line);
-            remaining = remaining.substr(chars_per_line);
-        } else {
-            word = remaining;
-            remaining.clear();
+            // Body lines.
+            const int lh = font_line_height(FontFace::kCaption);
+            for (size_t li = 0; li < lines.size(); ++li) {
+                draw_text_aa(fb, kCardX + kBodyX, y + 36 + static_cast<int>(li) * lh,
+                             lines[li], FontFace::kCaption, colors::kDim);
+            }
         }
-
-        if (line_y >= body_start_y) {   // only draw lines in the visible area
-            fb.draw_text(body_start_x, line_y, word.c_str(), kBodiesColor);
-        }
-
-        line_y += 20;   // 14px glyph height at scale 2 + line spacing
+        y += h + kCardGap;
     }
-
-    (void)n.timestamp_ms;   // timestamp is available but not rendered in this simplified version
 }
 
 bool NotificationManager::on_touch(const TouchEvent& event) {
     if (notifications_.empty()) return false;
 
-    // Vertical drag to scroll. Horizontal swipe dismisses the current notification.
-    static int last_y = 0;
-
-    if (event.type == TouchEvent::Press) {
-        last_y = event.y;
-        return true;
-    }
-
-    if (event.type == TouchEvent::Move) {
-        // Scroll: drag up to scroll content down, and vice versa.
-        int delta = last_y - event.y;   // positive = dragged up = scroll content up
-        scroll_offset_ += delta;
-        if (scroll_offset_ < 0) scroll_offset_ = 0;
-
-        last_y = event.y;
-        return true;
-    }
-
-    if (event.type == TouchEvent::Release) {
-        // Tap (press and release near each other) resets the scroll position.
-        if (abs(event.y - last_y) < 10) {
-            scroll_offset_ = 0;
+    // Total stack height for scroll clamping.
+    auto stack_height = [&]() {
+        int total = 0;
+        for (size_t i = 0; i < notifications_.size(); ++i) {
+            total += card_height(body_lines(
+                         notifications_[i],
+                         static_cast<int>(i) == expanded_)) +
+                     kCardGap;
         }
-        return true;
-    }
+        return total;
+    };
+    // Card index (into notifications_) at screen y, or -1.
+    auto card_at = [&](int screen_y) {
+        int y = kListY - scroll_offset_;
+        for (int idx = static_cast<int>(notifications_.size()) - 1;
+             idx >= 0; --idx) {
+            const int h = card_height(
+                body_lines(notifications_[idx], idx == expanded_));
+            if (screen_y >= y && screen_y < y + h) return idx;
+            y += h + kCardGap;
+        }
+        return -1;
+    };
 
+    switch (event.type) {
+        case TouchEvent::Press:
+            press_x_ = event.x;
+            press_y_ = event.y;
+            last_y_ = event.y;
+            press_card_ = card_at(event.y);
+            drag_moved_ = false;
+            return true;
+        case TouchEvent::Move: {
+            const int dy = last_y_ - event.y;
+            last_y_ = event.y;
+            if (event.y - press_y_ > 8 || press_y_ - event.y > 8 ||
+                event.x - press_x_ > 8 || press_x_ - event.x > 8) {
+                drag_moved_ = true;
+            }
+            scroll_offset_ += dy;
+            const int max_scroll =
+                std::max(0, stack_height() - (kDisplayHeight - kListY));
+            if (scroll_offset_ < 0) scroll_offset_ = 0;
+            if (scroll_offset_ > max_scroll) scroll_offset_ = max_scroll;
+            return true;
+        }
+        case TouchEvent::Release: {
+            const bool consumed = press_card_ >= 0;
+            if (!drag_moved_ && press_card_ >= 0) {
+                // Tap: toggle expansion of the pressed card.
+                expanded_ = (expanded_ == press_card_) ? -1 : press_card_;
+            } else if (drag_moved_ && press_card_ >= 0 &&
+                       event.x - press_x_ > 60) {
+                // Swipe right: dismiss.
+                notifications_.erase(notifications_.begin() + press_card_);
+                if (expanded_ == press_card_) expanded_ = -1;
+                press_card_ = -1;
+                const int max_scroll =
+                    std::max(0, stack_height() - (kDisplayHeight - kListY));
+                if (scroll_offset_ > max_scroll) scroll_offset_ = max_scroll;
+                return true;
+            }
+            press_card_ = -1;
+            return consumed;
+        }
+    }
     return false;
 }
 
