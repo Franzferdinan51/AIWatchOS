@@ -49,7 +49,7 @@ struct NetConfig {
     // link layer reads these through net_config() on every reconnect
     // attempt, so provisioning takes effect without a reflash.
     std::string hermes_remote_host;    // funnel host ("" = no remote)
-    int hermes_remote_port = 443;
+    int hermes_remote_port = 8443;
     bool hermes_remote_enabled = true;
 
     // True when the remote Hermes endpoint may be attempted.

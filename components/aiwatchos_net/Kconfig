@@ -107,11 +107,14 @@ config AIWATCHOS_NET_HERMES_REMOTE_HOST
 
 config AIWATCHOS_NET_HERMES_REMOTE_PORT
     int "Hermes hub remote port"
-    default 443
+    default 8443
     range 1 65535
     help
-        Port of the remote (Funnel) endpoint. NVS key "hport2"
-        or the setup string overrides at runtime.
+        Port of the remote (Funnel) endpoint. The funnel lives on
+        8443 (not 443) because the hub host's 443 listener already
+        serves the Hermes WebUI tailnet-only; the funnel exposes
+        ONLY the gadget hub port. NVS key "hport2" or the setup
+        string overrides at runtime.
 
 config AIWATCHOS_NET_HERMES_REMOTE
     bool "Hermes remote endpoint enabled"
