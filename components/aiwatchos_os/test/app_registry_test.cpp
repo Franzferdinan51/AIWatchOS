@@ -24,6 +24,7 @@
 #include "aiwatchos/settings_page.hpp"   // for Settings volume wiring verification
 #include "aiwatchos/battery_display.hpp"   // for status-bar time rendering verification
 #include "aiwatchos/notifications.hpp"   // for notification wrap verification
+#include "aiwatchos/color_test.hpp"      // for colour-test pattern verification
 #include "aiwatchos_hermes.hpp"   // for device-health dashboard verification
 #include "aiwatchos_muse.hpp"   // for push-to-talk turn buffering verification
 #include "muse_adpcm.h"         // for IMA-ADPCM round-trip verification
@@ -1585,7 +1586,32 @@ static void test_wrap_text() {
     printf("test_wrap_text: PASSED\n");
 }
 
+// --- Test the colour-test pattern (plan 0.1: byte-order evidence) ---------
+static void test_color_test_pattern() {
+    using namespace aiwatchos;
+    static uint16_t buf[kDisplayWidth * kDisplayHeight];
+    Framebuffer fb{buf, kDisplayWidth, kDisplayHeight};
+    fb.fill(0x1111);
+    draw_color_test_pattern(fb);
+    auto px = [&](int x, int y) { return buf[y * kDisplayWidth + x]; };
+    // Five pure bands (canonical 565): R, G, B, W, K across the top area.
+    assert(px(40, 150) == 0xF800);
+    assert(px(120, 150) == 0x07E0);
+    assert(px(200, 150) == 0x001F);
+    assert(px(280, 150) == 0xFFFF);
+    assert(px(370, 150) == 0x0000);
+    // Accent swatch row: first swatch is the BOOT accent.
+    const int sw_y = kDisplayHeight * 3 / 5 + 16;
+    assert(px(20, sw_y + 28) == state_scheme(MuseState::kBoot).accent);
+    // Bubble + blue swatches at the bottom.
+    const int bb_y = sw_y + 56 + 40;
+    assert(px(40, bb_y + 27) == colors::kBubble);
+    assert(px(300, bb_y + 27) == colors::kBlue);
+    printf("test_color_test_pattern: PASSED\n");
+}
+
 int main() {
+    test_color_test_pattern();           // pure bands + accents for the byte-order check
     test_gloss_color_math();             // Muse Gloss token/blend/gradient math
     test_gloss_primitives();             // rounded rect / circle / ring / arc / bubble
     test_wrap_text();                    // hg word-wrap port

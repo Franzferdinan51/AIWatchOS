@@ -14,6 +14,7 @@ set(COMPONENT_SRCS
     src/notifications.cpp
     src/weather_app.cpp
     src/weather_data.cpp
+    src/color_test.cpp
 )
 
 set(COMPONENT_ADD_INCLUDEDIRS include)

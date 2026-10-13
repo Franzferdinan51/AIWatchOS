@@ -128,13 +128,31 @@ esp_err_t co5300_init(void) {
 
 // Flush rows [y0, y1) of the given PSRAM framebuffer through the DMA bounce
 // buffer. Called by Board::display_flush() via board_display_flush() below.
+//
+// BYTE ORDER (audit X8 / plan 0.1, resolved here): the framebuffer holds
+// CANONICAL RGB565 in host order everywhere in the OS, but the CO5300
+// expects big-endian RGB565 on the wire. Evidence: HermesGadget drives
+// this same panel with swap_bytes = true ("big-endian RGB565 on the
+// wire", firmware/esp32/main/port_amoled.cpp) and swaps in its canvas
+// encode; the esp_lcd_co5300 component's draw_bitmap passes color_data
+// to tx_color VERBATIM (no swap). AIWatchOS previously did a plain
+// memcpy with no swap anywhere, which would have channel-rotated every
+// non-symmetric colour on real hardware (red swapped with blue). The
+// swap lives EXACTLY HERE - once, in the bounce-buffer copy - never in
+// app constants and never in the framebuffer. Verify on first power-on
+// with the settings colour-test screen (draw_color_test_pattern).
 static esp_err_t co5300_flush_rows(uint16_t* fb, uint16_t y0, uint16_t y1) {
     if (!s_panel || !s_bounce_buf || !fb || y0 >= y1 || y1 > kDisplayHeight) {
         return ESP_ERR_INVALID_STATE;
     }
     for (uint16_t y = y0; y < y1; y += kBounceRows) {
         uint16_t rows = (y + kBounceRows <= y1) ? kBounceRows : static_cast<uint16_t>(y1 - y);
-        memcpy(s_bounce_buf, &fb[y * kDisplayWidth], rows * kDisplayWidth * sizeof(uint16_t));
+        const uint16_t* src = &fb[y * kDisplayWidth];
+        const int n = rows * kDisplayWidth;
+        for (int i = 0; i < n; ++i) {
+            const uint16_t px = src[i];
+            s_bounce_buf[i] = static_cast<uint16_t>((px >> 8) | (px << 8));
+        }
         // draw_bitmap sets the address window internally; the CO5300 flush is
         // dispatched per chunk so the bounce buffer can be reused immediately.
         esp_err_t err = esp_lcd_panel_draw_bitmap(s_panel, 0, y, kDisplayWidth, y + rows, s_bounce_buf);

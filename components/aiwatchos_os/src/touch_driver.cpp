@@ -154,19 +154,23 @@ void board_inject_touch(int x0, int y0, int x1, int y1, int count) {
 int ft3168_read(int* out_xs, int* out_ys, int max_points) {
 #ifdef __ESPRESSIF_IDF__
     // Production path: poll the FT3168 through esp_lcd_touch_ft5x06 and pull
-    // processed coordinates out of the driver.
+    // processed coordinates out of the driver. Uses esp_lcd_touch_get_data
+    // (esp_lcd_touch 1.2.1): the esp_lcd_touch_get_coordinates API it
+    // replaces is deprecated/removed in current component versions -
+    // HermesGadget did the same migration (firmware/esp32/main/
+    // port_touch.cpp).
     if (!s_touch) return 0;
     if (esp_lcd_touch_read_data(s_touch) != ESP_OK) return 0;
 
-    uint16_t xs[2] = {0}, ys[2] = {0}, strengths[2] = {0};
+    esp_lcd_touch_point_data_t points[2] = {};
     uint8_t point_num = 0;
-    if (!esp_lcd_touch_get_coordinates(s_touch, xs, ys, strengths, &point_num, 2)) {
+    if (esp_lcd_touch_get_data(s_touch, points, &point_num, 2) != ESP_OK) {
         return 0;
     }
     int n = 0;
     for (int i = 0; i < point_num && n < max_points; ++i) {
-        int x = static_cast<int>(xs[i]);
-        int y = static_cast<int>(ys[i]);
+        int x = static_cast<int>(points[i].x);
+        int y = static_cast<int>(points[i].y);
         if (is_valid_point(x, y)) {
             out_xs[n] = x;
             out_ys[n] = y;
