@@ -7,8 +7,9 @@
 //     spellings.
 //   - Scope trimmed to what AIWatchOS's Muse app actually does today:
 //     push-to-talk voice-note turns out, text replies in. The gadget's
-//     dictation stream, typed-turn path, and MP3 fetch machinery have no
-//     counterpart here (see "Replies" note below).
+//     dictation stream and typed-turn path have no counterpart here;
+//     the MP3 fetch arrived later as the spoken-replies port in
+//     muse_tts.cpp (see "Replies" note below).
 //   - Capability honesty (the gadget's own link.register bug is the
 //     cautionary tale: its handlers exist but are never advertised):
 //     this client advertises nothing it doesn't implement. The chat
@@ -21,8 +22,12 @@
 // audio reply stream in the protocol — the reference gadget synthesizes
 // speech locally from that text ("a TTS API of your choice" is its own
 // comment). So replies land in muse_link_last_reply() for the UI, and the
-// Muse app's MP3 playback path (muse_play_reply) stays ready for any
-// future spoken-reply source; nothing here fakes an MP3 stream.
+// Muse app's MP3 playback path (muse_play_reply) is fed by the
+// spoken-replies port: when a TTS provider is configured (aiwnet
+// key), muse_tts.cpp POSTs the cleaned reply to an OpenAI-shaped
+// speech endpoint and plays the returned MP3 through the speech sink
+// the app registers; unconfigured or failed, the reply stays text.
+// Nothing here fakes an MP3 stream.
 //
 // Turn model (matches the reference): a completed PTT turn is one
 // POST /chat/stream whose body is a JSON voice note — base64 WAV of the
@@ -52,6 +57,7 @@
 
 #include "aiwatchos_net/net_proto.hpp"
 #include "muse_account.hpp"
+#include "muse_tts.hpp"
 
 namespace aiwatchos_net {
 namespace {
@@ -896,6 +902,11 @@ bool upload_turn_impl(const uint8_t* adpcm, size_t len) {
         xSemaphoreGive(g_reply_mutex);
         ESP_LOGI(kTag, "reply: %u chars", static_cast<unsigned>(joined.size()));
     }
+    // Spoken replies (TTS port): speak the reply we just published.
+    // tts_speak_reply gates internally on the aiwnet TTS key plus a
+    // registered sink and fails closed to text on any error, so this
+    // is a no-op unless spoken replies are fully configured.
+    if (!joined.empty()) tts_speak_reply(joined);
     return true;
 }
 
