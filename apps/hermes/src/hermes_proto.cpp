@@ -76,6 +76,8 @@ void HermesClient::init(const HermesSinks& sinks, const HermesConfig& cfg) {
     charging_sent_ = -2;
     outbox_head_ = 0;
     outbox_count_ = 0;
+    pair_end_ms_ = 0;
+    pair_archived_ = false;
     capturing_ = false;
     play_stream_ = -1;
     img_stream_ = -1;
@@ -293,16 +295,20 @@ void HermesClient::on_text(const char* json, size_t len, uint64_t now_ms) {
         if (ts && cJSON_IsNumber(ts)) cJSON_AddNumberToObject(pong, "ts", ts->valuedouble);
         send_json(pong);
     } else if (std::strcmp(type, "turn.start") == 0) {
+        archive_pair();   // H1: a new exchange completes the previous one
         view_.busy = true;
     } else if (std::strcmp(type, "transcript") == 0) {
+        archive_pair();   // H1: same boundary, for flows without turn.start
         copy_capped(view_.transcript, sizeof(view_.transcript), json_str(root, "text"));
         view_.reply[0] = '\0';
     } else if (std::strcmp(type, "status") == 0) {
         copy_capped(view_.status, sizeof(view_.status), json_str(root, "text"));
     } else if (std::strcmp(type, "reply.delta") == 0 || std::strcmp(type, "reply") == 0) {
         copy_capped(view_.reply, sizeof(view_.reply), json_str(root, "text"));
+        if (view_.reply[0]) pair_archived_ = false;   // H1: fresh pair content
     } else if (std::strcmp(type, "turn.end") == 0) {
         view_.busy = false;
+        pair_end_ms_ = now_ms;   // H1: the exchange's completion stamp
         const char* outcome = json_str(root, "outcome");
         if (outcome && std::strcmp(outcome, "success") != 0) {
             copy_capped(view_.status, sizeof(view_.status), outcome);
@@ -587,6 +593,7 @@ void HermesClient::send_text_frame(const char* text) {
 
 bool HermesClient::send_chat_text(const char* text) {
     if (!text || !text[0]) return false;
+    if (welcomed_ && view_.paired) archive_pair();   // H1: new exchange begins
     if (!welcomed_ || !view_.paired) {
         // Offline outbox (buddy-harvest): bounded FIFO; a full queue
         // evicts the oldest text so the newest intent always survives.
@@ -649,6 +656,9 @@ bool HermesClient::new_session(uint64_t now_ms) {
     send_json(root);
     view_.transcript[0] = '\0';
     view_.reply[0] = '\0';
+    view_.history_count = 0;   // H1: the ring is session-scoped
+    pair_archived_ = false;
+    pair_end_ms_ = 0;
     copy_capped(view_.status, sizeof(view_.status), "Starting a new session");
     view_.busy = true;
     return true;
@@ -657,6 +667,7 @@ bool HermesClient::new_session(uint64_t now_ms) {
 bool HermesClient::talk_start(uint64_t now_ms) {
     (void)now_ms;
     if (capturing_ || !welcomed_ || !view_.paired) return false;
+    archive_pair();   // H1: a voice turn is a new exchange too
     talk_stream_ = static_cast<uint8_t>(1 + (msg_counter_ % 250));
     std::snprintf(talk_id_, sizeof(talk_id_), "a%u", ++msg_counter_);
     talk_seq_ = 0;
@@ -763,6 +774,27 @@ void HermesClient::forget() {
 void HermesClient::restore_conversation(const char* transcript, const char* reply) {
     copy_capped(view_.transcript, sizeof(view_.transcript), transcript);
     copy_capped(view_.reply, sizeof(view_.reply), reply);
+    // H1: the restored pair is the current exchange; it archives when
+    // the next turn begins, stamped 0 (its real end time is unknown).
+    pair_archived_ = false;
+    pair_end_ms_ = 0;
+}
+
+void HermesClient::archive_pair() {
+    if (pair_archived_ || !view_.reply[0]) return;
+    if (view_.history_count >= HermesView::kHermesHistoryMax) {
+        // Ring full: evict the oldest exchange (fixed buffers, PSRAM —
+        // the shift is one turn-rate event, never per-frame).
+        for (int i = 1; i < HermesView::kHermesHistoryMax; ++i) {
+            view_.history[i - 1] = view_.history[i];
+        }
+        view_.history_count = HermesView::kHermesHistoryMax - 1;
+    }
+    HermesExchange& ex = view_.history[view_.history_count++];
+    copy_capped(ex.transcript, sizeof(ex.transcript), view_.transcript);
+    copy_capped(ex.reply, sizeof(ex.reply), view_.reply);
+    ex.end_ms = pair_end_ms_;
+    pair_archived_ = true;
 }
 
 // ---------------------------------------------------------------------------

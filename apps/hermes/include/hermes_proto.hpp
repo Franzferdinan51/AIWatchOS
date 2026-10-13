@@ -80,9 +80,24 @@ enum class HermesLinkState : uint8_t {
     AuthFailed,    // server rejected our key; owner must forget + re-enroll
 };
 
+// One completed exchange for the H1 history ring: the transcript the
+// hub heard plus the reply it produced, stamped with the client clock
+// at turn end (epoch-based ms on device; the adapter renders HH:MM).
+struct HermesExchange {
+    char transcript[512] = {};
+    char reply[4096] = {};
+    uint64_t end_ms = 0;
+};
+
 // Everything the renderer needs, in fixed buffers (no per-frame allocation).
 // The owning HermesClient is heap-allocated once (PSRAM on device).
 struct HermesView {
+    // H1: completed exchanges, oldest first; the live pair below is the
+    // in-progress / most recent exchange. Session-scoped: cleared by
+    // session.new, never persisted (the pair is the persisted surface).
+    static constexpr int kHermesHistoryMax = 6;
+    HermesExchange history[kHermesHistoryMax];
+    uint8_t history_count = 0;
     HermesLinkState link = HermesLinkState::Offline;
     bool paired = false;
     uint8_t queued = 0;            // offline outbox depth (buddy-harvest)
@@ -215,6 +230,10 @@ class HermesClient {
     void send_state(uint64_t now_ms);
     void send_text_frame(const char* text);
     void flush_pending_text(uint64_t now_ms);
+    // H1: move the current transcript+reply pair into the history ring
+    // (called when a new exchange begins; no-op when the pair is empty
+    // or was already archived).
+    void archive_pair();
     void set_link(HermesLinkState s);
     void show_notice(const char* text, uint32_t ttl_s, uint64_t now_ms);
     void ota_fail(const char* code, const char* message, uint64_t now_ms);
@@ -239,6 +258,11 @@ class HermesClient {
     int charging_ = -1;                      // -1 unknown, 0 no, 1 yes
     int charging_sent_ = -2;                 // last value reported via state{}
     uint64_t last_state_ms_ = 0;
+
+    // H1 archival state: pair_end_ms_ stamps the last turn.end;
+    // pair_archived_ suppresses double-archival of the same pair.
+    uint64_t pair_end_ms_ = 0;
+    bool pair_archived_ = false;
 
     unsigned msg_counter_ = 0;
     // Offline outbox (buddy-harvest): bounded FIFO, flushed in order once

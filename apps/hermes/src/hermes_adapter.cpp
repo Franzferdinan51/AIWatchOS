@@ -367,8 +367,9 @@ bool hermes_paired() {
 
 namespace {
 // Borrowed-view access: the view lives inside the client (PSRAM on
-// device). Callers get a reference, never a copy — the struct is ~7 KB of
-// text buffers and the OS main task stack cannot hold one. On device the
+// device). Callers get a reference, never a copy — the struct is ~35 KB
+// of text buffers (H1 ring included) and the OS main task stack cannot
+// hold one. On device the
 // link task may update it concurrently; render/touch hold the client lock
 // while reading, API callers treat the reference as a transient snapshot.
 HermesView* g_empty_view = nullptr;   // heap fallback when no client exists
@@ -738,8 +739,8 @@ void hermes_render(aiwatchos::Framebuffer& fb) {
     // status zone lives above and is repainted by the shell.
     draw_text(fb, 16, 46, "Hermes", 3, kAmberColor);
 
-    // The view is read in place under the client lock — never copied. It is
-    // ~7 KB of text buffers and this runs on the OS main task's stack.
+    // The view is read in place under the client lock — never copied. It
+    // is ~35 KB of text buffers and this runs on the OS main task's stack.
     LockGuard lock;
     const HermesView& v = hermes_view();
     const uint8_t* image_px = nullptr;
@@ -896,6 +897,66 @@ void hermes_render(aiwatchos::Framebuffer& fb) {
                           v.status[0] ? v.status : "THINKING");
             y = draw_wrapped(fb, 16, y, kContentW, status_line, 2, kAmberColor, 2);
             y += 6;
+        }
+        // H1: completed exchanges as Hermes-dialect bubbles above the
+        // current pair (gold bar surface, like the display card). Each
+        // bubble: an HH:MM stamp (Micro, gold) from the turn end, the
+        // heard transcript as one dim "YOU: ..." line, and the reply in
+        // up to 2 lines. Only the newest bubbles that fit above y=318
+        // draw; the current pair keeps the rest of the screen.
+        if (v.history_count > 0) {
+            const int kHistBottom = 318;
+            int first = v.history_count;
+            {
+                int yy = y;
+                for (int i = v.history_count - 1; i >= 0; --i) {
+                    const HermesExchange& ex = v.history[i];
+                    int h = 14 + (ex.end_ms ? 14 : 0) +
+                            (ex.transcript[0] ? 26 : 0) +
+                            26 * wrapped_line_count(ex.reply, kContentW - 16, 2, 2);
+                    if (yy + h > kHistBottom) break;
+                    yy += h + 6;
+                    first = i;
+                }
+            }
+            for (int i = first; i < v.history_count; ++i) {
+                const HermesExchange& ex = v.history[i];
+                const int r_lines =
+                    wrapped_line_count(ex.reply, kContentW - 16, 2, 2);
+                const int bh = 14 + (ex.end_ms ? 14 : 0) +
+                               (ex.transcript[0] ? 26 : 0) + 26 * r_lines;
+                aiwatchos::BubbleStyle hist = aiwatchos::bubble_style();
+                hist.top = hc::kBarTop;
+                hist.mid = hc::kBar;
+                hist.bot = hc::kBarBot;
+                hist.shadow = nullptr;
+                fb.draw_bubble(8, y, aiwatchos::kDisplayWidth - 16, bh, 14,
+                               hist);
+                int iy = y + 7;
+                if (ex.end_ms) {
+                    const uint64_t disp =
+                        aiwatchos::local_display_ms(ex.end_ms);
+                    char stamp[8];
+                    std::snprintf(stamp, sizeof(stamp), "%02u:%02u",
+                                  static_cast<unsigned>((disp / 3600000) % 24),
+                                  static_cast<unsigned>((disp / 60000) % 60));
+                    aiwatchos::draw_text_aa(fb, 24, iy, stamp,
+                                            aiwatchos::FontFace::kMicro,
+                                            kAmberColor);
+                    iy += 14;
+                }
+                if (ex.transcript[0]) {
+                    char you[528];
+                    std::snprintf(you, sizeof(you), "YOU: %s", ex.transcript);
+                    iy = draw_wrapped(fb, 24, iy, kContentW - 16, you, 2,
+                                      kDimColor, 1);
+                }
+                if (ex.reply[0]) {
+                    draw_wrapped(fb, 24, iy, kContentW - 16, ex.reply, 2,
+                                 kTextColor, 2);
+                }
+                y += bh + 6;
+            }
         }
         if (v.transcript[0]) {
             y = draw_wrapped(fb, 16, y, kContentW, "YOU:", 2, kStatusColor, 1);

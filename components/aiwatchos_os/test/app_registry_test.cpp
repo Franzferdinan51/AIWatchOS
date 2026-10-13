@@ -732,6 +732,72 @@ static void test_settings_registered_rows() {
     printf("test_settings_registered_rows: PASSED\n");
 }
 
+// --- Test Hermes H1 history ring (direct protocol client) ----------------
+static void test_hermes_history() {
+    using namespace aiwatchos_hermes;
+    // Static storage: the client embeds the ~35 KB view (H1 ring) and
+    // must not sit on a test stack frame.
+    static HermesClient client_storage;
+    HermesClient& c = client_storage;
+    HermesSinks sinks{};   // no transport: sends drop by design
+    c.init(sinks, HermesConfig{});
+    uint8_t key[32] = {};
+    c.set_key(key);
+    c.on_transport_open(1000);
+    auto inject = [&c](const char* json, uint64_t t) {
+        c.on_text(json, std::strlen(json), t);
+    };
+    inject("{\"type\":\"welcome\",\"session\":\"s1\",\"paired\":true,\"heartbeat_s\":20}", 1100);
+    assert(c.view().history_count == 0);
+
+    char js[256];
+    auto run_turn = [&](int n, uint64_t t0) {
+        inject("{\"type\":\"turn.start\"}", t0);
+        std::snprintf(js, sizeof(js),
+                      "{\"type\":\"transcript\",\"text\":\"question %d\"}", n);
+        inject(js, t0 + 100);
+        std::snprintf(js, sizeof(js),
+                      "{\"type\":\"reply\",\"text\":\"answer %d\"}", n);
+        inject(js, t0 + 500);
+        inject("{\"type\":\"turn.end\",\"outcome\":\"success\"}", t0 + 900);
+    };
+
+    run_turn(1, 10000);
+    // The just-finished pair is the CURRENT exchange, not history yet.
+    assert(c.view().history_count == 0);
+    assert(std::strcmp(c.view().transcript, "question 1") == 0);
+
+    run_turn(2, 20000);   // turn 2's start archives turn 1, stamped at its end
+    assert(c.view().history_count == 1);
+    assert(std::strcmp(c.view().history[0].transcript, "question 1") == 0);
+    assert(std::strcmp(c.view().history[0].reply, "answer 1") == 0);
+    assert(c.view().history[0].end_ms == 10900);
+
+    for (int n = 3; n <= 8; ++n) run_turn(n, 10000ULL * static_cast<unsigned>(n));
+    // 7 archives total (turns 1..7); the ring holds the last 6, oldest
+    // evicted first.
+    assert(c.view().history_count == 6);
+    assert(std::strcmp(c.view().history[0].transcript, "question 2") == 0);
+    assert(std::strcmp(c.view().history[5].transcript, "question 7") == 0);
+    assert(std::strcmp(c.view().history[5].reply, "answer 7") == 0);
+
+    // session.new clears the ring: history is session-scoped.
+    assert(c.new_session(90000));
+    assert(c.view().history_count == 0);
+    assert(c.view().transcript[0] == '\0' && c.view().reply[0] == '\0');
+
+    // The transcript boundary archives too (flows without turn.start).
+    inject("{\"type\":\"transcript\",\"text\":\"typed hi\"}", 100000);
+    inject("{\"type\":\"reply\",\"text\":\"typed answer\"}", 100100);
+    inject("{\"type\":\"turn.end\",\"outcome\":\"success\"}", 100200);
+    inject("{\"type\":\"transcript\",\"text\":\"next\"}", 101000);
+    assert(c.view().history_count == 1);
+    assert(std::strcmp(c.view().history[0].reply, "typed answer") == 0);
+    assert(c.view().history[0].end_ms == 100200);
+
+    printf("test_hermes_history: PASSED\n");
+}
+
 // --- Test MP3 reply decoding (drives the vendored minimp3 on a fixture) ---
 static void test_minimp3_reply() {
     // Spoken replies arrive as MP3 and must decode to playable PCM. The
@@ -2464,6 +2530,7 @@ int main() {
     test_notifications_actionable();     // H10: dedupe/retire/expiry/tap-action
     test_muse_level_meter();             // drives the live mic RMS meter
     test_hermes_vitals();                // drives the Hermes health dashboard
+    test_hermes_history();               // H1: history ring archive/evict/clear
     test_muse_turn_log();                // drives the voice turn activity log
     test_muse_outbox();                  // drives the offline turn outbox
     test_muse_captions();                // companion caption/activity ports (M2/M3)
