@@ -1,9 +1,18 @@
 // Baked-asset loading + AA text/icon rendering — see font.hpp.
+#include "aiwatchos/hal.hpp"   // FIRST: carries the ESP_PLATFORM -> __ESPRESSIF_IDF__ mapping
 #include "aiwatchos/font.hpp"
 
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+
+// Tripwire: without the hal.hpp mapping above, an ESP-IDF build of this
+// TU silently selects the host branch — no FAT mount, no log lines, and
+// fopen("assets/...") failing on device (the 2026-10-13 first-boot bug:
+// the watch rendered fallback text while every log claimed nothing).
+#if defined(ESP_PLATFORM) && !defined(__ESPRESSIF_IDF__)
+#error "font.cpp: ESP-IDF build without __ESPRESSIF_IDF__ — hal.hpp must be included first"
+#endif
 
 #ifdef __ESPRESSIF_IDF__
 #include "esp_err.h"
@@ -271,10 +280,6 @@ bool assets_load() {
             ++faces_ok;
         }
     }
-#ifdef __ESPRESSIF_IDF__
-    ESP_LOGI(kFontTag, "assets load: %d/%d font faces, sprites %s",
-             faces_ok, kFaceCount, g_sprites_ok ? "ok" : "unavailable");
-#endif
     {
         char path[96];
 #ifdef __ESPRESSIF_IDF__
@@ -291,6 +296,10 @@ bool assets_load() {
         uint8_t* buf = read_whole_file(path, &size);
         if (buf) g_sprites_ok = parse_sprites(buf, size);
     }
+#ifdef __ESPRESSIF_IDF__
+    ESP_LOGI(kFontTag, "assets load: %d/%d faces, sprites %s",
+             faces_ok, kFaceCount, g_sprites_ok ? "ok" : "FAIL");
+#endif
     g_ready = all;
     return g_ready;
 }
