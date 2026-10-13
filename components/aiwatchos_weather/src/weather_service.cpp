@@ -78,9 +78,16 @@ bool snapshot_fn(aiwatchos::WeatherSnapshot* out) {
     return true;
 }
 
+}  // namespace
+
+// Public API (header): must live OUTSIDE the anonymous namespace —
+// defined inside it, this was an internal-linkage namesake and every
+// external caller (MDB health) failed to link.
 bool weather_service_snapshot(aiwatchos::WeatherSnapshot* out) {
     return snapshot_fn(out);
 }
+
+namespace {
 
 void refresh_fn() { g_refresh_requested = true; }   // nudge only; the task fetches
 
