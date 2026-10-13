@@ -28,6 +28,7 @@
 #include "aiwatchos_hermes.hpp"
 #include "aiwatchos_net/net.hpp"
 #include "aiwatchos_weather/weather_service.hpp"
+#include "driver/i2c_master.h"
 #include "driver/usb_serial_jtag.h"
 #include "esp_err.h"
 #include "esp_heap_caps.h"
@@ -212,6 +213,162 @@ void cmd_screenshot() {
     if (ok) out_str("\nFBDUMP_END\n");
 }
 
+// --- I2C bench probe (touch NACK diagnosis) --------------------------
+// One command answers: who ACKs on the bus, whether the touch chip
+// answers raw register reads, which transaction flavor works, and
+// whether same-bus controls (RTC, PMIC) read fine through the same
+// calls. Panel-IO is bypassed entirely on purpose.
+void i2c_probe_read(i2c_master_bus_handle_t bus, uint8_t addr, uint8_t reg,
+                    uint32_t speed_hz, int timeout_ms, bool split,
+                    const char* label) {
+    i2c_device_config_t dc = {};
+    dc.dev_addr_length = I2C_ADDR_BIT_LEN_7;
+    dc.device_address = addr;
+    dc.scl_speed_hz = speed_hz;
+    i2c_master_dev_handle_t dev = nullptr;
+    char buf[256];
+    if (i2c_master_bus_add_device(bus, &dc, &dev) != ESP_OK) {
+        snprintf(buf, sizeof(buf), "%s: add_device FAILED\n", label);
+        out_str(buf);
+        return;
+    }
+    uint8_t val = 0xEE;
+    esp_err_t err;
+    if (split) {
+        err = i2c_master_transmit(dev, &reg, 1, timeout_ms);
+        if (err == ESP_OK) {
+            vTaskDelay(pdMS_TO_TICKS(2));
+            err = i2c_master_receive(dev, &val, 1, timeout_ms);
+        }
+    } else {
+        err = i2c_master_transmit_receive(dev, &reg, 1, &val, 1, timeout_ms);
+    }
+    snprintf(buf, sizeof(buf), "%s: err=%s val=0x%02X\n", label,
+             esp_err_to_name(err), val);
+    out_str(buf);
+    i2c_master_bus_rm_device(dev);
+}
+
+void cmd_i2c() {
+    i2c_master_bus_handle_t bus = aiwatchos::aiwatchos_i2c_bus();
+    if (!bus) {
+        out_str("ERR no i2c bus\n");
+        return;
+    }
+    char buf[256];
+    out_str("MDB_I2C_BEGIN\n");
+    out_str("scan:");
+    for (int a = 0x08; a <= 0x77; ++a) {
+        if (i2c_master_probe(bus, static_cast<uint16_t>(a), 50) == ESP_OK) {
+            snprintf(buf, sizeof(buf), " %02x", a);
+            out_str(buf);
+        }
+    }
+    out_str("\n");
+    i2c_probe_read(bus, 0x38, 0x02, 100000, 200, false, "touch txrx reg02 t200");
+    i2c_probe_read(bus, 0x38, 0x02, 100000, 1000, false, "touch txrx reg02 t1000");
+    i2c_probe_read(bus, 0x38, 0x02, 100000, 200, true, "touch split reg02 t200");
+    i2c_probe_read(bus, 0x38, 0x02, 400000, 200, false, "touch txrx reg02 400k");
+    i2c_probe_read(bus, 0x38, 0x00, 100000, 200, false, "touch txrx reg00");
+    i2c_probe_read(bus, 0x38, 0xA3, 100000, 200, false, "touch txrx regA3 chipid");
+    i2c_probe_read(bus, 0x38, 0xA6, 100000, 200, false, "touch txrx regA6 fwver");
+    i2c_probe_read(bus, 0x51, 0x02, 100000, 200, false, "rtc txrx reg02 ctrl");
+    i2c_probe_read(bus, 0x34, 0x03, 100000, 200, false, "axp txrx reg03 ctrl");
+    // Write path control: reg 0x00 (device mode) = 0x00 is the reset
+    // default (normal operating mode), so this write changes nothing.
+    {
+        i2c_device_config_t dc = {};
+        dc.dev_addr_length = I2C_ADDR_BIT_LEN_7;
+        dc.device_address = 0x38;
+        dc.scl_speed_hz = 100000;
+        i2c_master_dev_handle_t dev = nullptr;
+        if (i2c_master_bus_add_device(bus, &dc, &dev) == ESP_OK) {
+            const uint8_t w[2] = {0x00, 0x00};
+            const esp_err_t err = i2c_master_transmit(dev, w, 2, 200);
+            snprintf(buf, sizeof(buf), "touch wr reg00=00: err=%s\n",
+                     esp_err_to_name(err));
+            out_str(buf);
+            i2c_master_bus_rm_device(dev);
+        }
+    }
+    // Burst: 10 reads of reg 0x02, 20 ms apart — catches an
+    // intermittently-waking chip that single shots miss.
+    {
+        i2c_device_config_t dc = {};
+        dc.dev_addr_length = I2C_ADDR_BIT_LEN_7;
+        dc.device_address = 0x38;
+        dc.scl_speed_hz = 100000;
+        i2c_master_dev_handle_t dev = nullptr;
+        if (i2c_master_bus_add_device(bus, &dc, &dev) == ESP_OK) {
+            int ok = 0;
+            for (int i = 0; i < 10; ++i) {
+                uint8_t reg = 0x02, val = 0;
+                if (i2c_master_transmit_receive(dev, &reg, 1, &val, 1,
+                                                200) == ESP_OK) {
+                    ++ok;
+                }
+                vTaskDelay(pdMS_TO_TICKS(20));
+            }
+            snprintf(buf, sizeof(buf), "touch burst reg02: %d/10 ok\n", ok);
+            out_str(buf);
+            i2c_master_bus_rm_device(dev);
+        }
+    }
+    out_str("MDB_I2C_END\n");
+}
+
+void cmd_tpoll() {
+    // Touch-poll A/B (Defect C): raw reads with NO scan first (cold),
+    // then the production panel-IO path via Board::read_touch at the
+    // main-loop cadence, then raw reads again (warm). FT5x06 error
+    // lines in the surrounding stream convict or clear the panel path.
+    i2c_master_bus_handle_t bus = aiwatchos::aiwatchos_i2c_bus();
+    aiwatchos::Board& board = aiwatchos::Board::instance();
+    char buf[256];
+    out_str("MDB_TPOLL_BEGIN\n");
+    i2c_device_config_t dc = {};
+    dc.dev_addr_length = I2C_ADDR_BIT_LEN_7;
+    dc.device_address = 0x38;
+    dc.scl_speed_hz = 100000;
+    i2c_master_dev_handle_t dev = nullptr;
+    if (i2c_master_bus_add_device(bus, &dc, &dev) != ESP_OK) {
+        out_str("ERR add_device\n");
+        return;
+    }
+    for (int phase = 0; phase < 2; ++phase) {
+        int ok = 0;
+        char first[64] = "";
+        for (int i = 0; i < 10; ++i) {
+            uint8_t reg = 0x02, val = 0;
+            const esp_err_t e =
+                i2c_master_transmit_receive(dev, &reg, 1, &val, 1, 200);
+            if (e == ESP_OK) {
+                ++ok;
+            } else if (first[0] == 0) {
+                snprintf(first, sizeof(first), " first_err@%d=%s", i,
+                         esp_err_to_name(e));
+            }
+            vTaskDelay(pdMS_TO_TICKS(100));
+        }
+        snprintf(buf, sizeof(buf), "raw phase%d: %d/10 ok%s\n",
+                 phase + 1, ok, first);
+        out_str(buf);
+        if (phase == 0) {
+            int nz = 0;
+            for (int i = 0; i < 30; ++i) {
+                int xs[2] = {0}, ys[2] = {0};
+                if (board.read_touch(xs, ys) > 0) ++nz;
+                vTaskDelay(pdMS_TO_TICKS(100));
+            }
+            snprintf(buf, sizeof(buf),
+                     "panel read_touch x30 @100ms: %d nonzero\n", nz);
+            out_str(buf);
+        }
+    }
+    i2c_master_bus_rm_device(dev);
+    out_str("MDB_TPOLL_END\n");
+}
+
 void cmd_health() {
     aiwatchos::Board& board = aiwatchos::Board::instance();
     const aiwatchos::PowerStatus power = board.read_power();
@@ -363,6 +520,8 @@ void cmd_help() {
         "  mdb screenshot            framebuffer dump (FBDUMP_BEGIN..END)\n"
         "  mdb health                state snapshot (key=value)\n"
         "  mdb logs                  recent log ring (~32 KB)\n"
+        "  mdb i2c                   bus scan + raw touch/RTC/PMIC probe\n"
+        "  mdb tpoll                 touch A/B: raw vs panel-IO reads\n"
         "  mdb touch                 stream touch points until any byte\n"
         "  mdb panic                 reset reason + boot/panic counters\n"
         "  mdb tap <x> <y>           inject a tap\n"
@@ -384,6 +543,8 @@ void dispatch(char* line) {
     }
     if (strcmp(verb, "help") == 0) { cmd_help(); return; }
     if (strcmp(verb, "screenshot") == 0) { cmd_screenshot(); return; }
+    if (strcmp(verb, "i2c") == 0) { cmd_i2c(); return; }
+    if (strcmp(verb, "tpoll") == 0) { cmd_tpoll(); return; }
     if (strcmp(verb, "health") == 0) { cmd_health(); return; }
     if (strcmp(verb, "logs") == 0) { cmd_logs(); return; }
     if (strcmp(verb, "touch") == 0) { cmd_touch(); return; }
