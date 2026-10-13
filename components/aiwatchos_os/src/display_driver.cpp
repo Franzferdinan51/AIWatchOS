@@ -81,7 +81,12 @@ static const co5300_lcd_init_cmd_t s_lcd_init[] = {
     { 0x53, (uint8_t[]){ 0x20 }, 1, 0 },
     { 0x51, (uint8_t[]){ 0xFF }, 1, 0 },
     { 0x63, (uint8_t[]){ 0xFF }, 1, 0 },
-    { 0x2A, (uint8_t[]){ 0x00, 0x00, 0x01, 0x99 }, 4, 0 },
+    // CASET 22..431 (0x16..0x1AF), not 0..409: the visible glass on
+    // this panel starts at GRAM column offset 22 (Waveshare BSP for
+    // the 2.06, waveshare/esp32_s3_touch_amoled_2_06 v2.0.0, whose
+    // init list carries exactly these values; its flush-time twin is
+    // the set_gap(22, 0) in co5300_init below).
+    { 0x2A, (uint8_t[]){ 0x00, 0x16, 0x01, 0xAF }, 4, 0 },
     { 0x2B, (uint8_t[]){ 0x00, 0x00, 0x01, 0xF5 }, 4, 600 },
     { 0x11, nullptr, 0, 600 },
     { 0x29, nullptr, 0, 0 },
@@ -148,6 +153,34 @@ esp_err_t co5300_init(void) {
     if (!s_bounce_buf) {
         return ESP_ERR_NO_MEM;
     }
+
+    // GRAM clear + the real window offset (see the 0x2A note above).
+    // The set_gap(0, 0) done earlier still applies here, so this clear
+    // can address the full vendor GRAM span 0..431: paint every column
+    // black once, so no power-on GRAM content (the solid green the
+    // panel wakes up with) can survive anywhere — the columns outside
+    // the visible window included. Only then move the window onto the
+    // glass with gap (22, 0); every flush from here on lands at CASET
+    // 22..431 exactly as the vendor BSP drives this panel.
+    {
+        constexpr int kGramCols = 432;   // vendor window: 0..431
+        constexpr int kClearRows = 9;    // 432*9*2 = 7776 B <= bounce
+        memset(s_bounce_buf, 0, kGramCols * kClearRows * 2);
+        for (int y = 0; y < kDisplayHeight; y += kClearRows) {
+            const int rows = (y + kClearRows <= kDisplayHeight)
+                                 ? kClearRows
+                                 : (kDisplayHeight - y);
+            // Partial tail chunk streams only width*rows bytes from
+            // the (all-zero) buffer head — safe.
+            ESP_RETURN_ON_ERROR(
+                esp_lcd_panel_draw_bitmap(s_panel, 0, y, kGramCols,
+                                          y + rows, s_bounce_buf),
+                kTag, "GRAM clear");
+            if (s_trans_done) xSemaphoreTake(s_trans_done, portMAX_DELAY);
+        }
+    }
+    ESP_RETURN_ON_ERROR(esp_lcd_panel_set_gap(s_panel, 22, 0), kTag,
+                        "set gap 22");
     return ESP_OK;
 }
 
