@@ -261,4 +261,8 @@ bool hermes_binary_parse(const uint8_t* data, size_t len, uint8_t* channel, uint
     return true;
 }
 
+const char* hermes_endpoint_name(HermesEndpoint ep) {
+    return ep == HermesEndpoint::Remote ? "REMOTE" : "LAN";
+}
+
 }  // namespace aiwatchos_hermes

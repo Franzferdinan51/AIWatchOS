@@ -18,6 +18,12 @@ config HERMES_PORT
     default 8765
     range 1 65535
 
+# The away-from-home endpoint (wss via the hub host's Tailscale Funnel)
+# is NOT configured here: like WiFi, it is shared provisioning data and
+# lives in the net component — see AIWATCHOS_NET_HERMES_REMOTE_* in
+# components/aiwatchos_net/Kconfig, overridable at runtime through the
+# aiwnet NVS keys hhost2 / hport2 / hrem or the setup string.
+
 config HERMES_DEVICE_NAME
     string "Device name announced to Hermes"
     default "AIWatchOS"

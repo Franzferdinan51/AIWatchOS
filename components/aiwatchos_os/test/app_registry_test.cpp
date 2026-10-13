@@ -1472,6 +1472,67 @@ static bool outbound_has(const char* needle) {
 }
 
 // --- Hermes handshake: hello -> TOFU auth -> welcome -> pairing -> paired --
+static void test_hermes_failover() {
+    using namespace aiwatchos_hermes;
+    // Fresh machine: LAN first, no remote until enabled.
+    {
+        HermesFailover f;
+        assert(f.next_endpoint() == HermesEndpoint::Lan);
+        assert(!f.has_active);
+        f.on_attempt_failed(HermesEndpoint::Lan);
+        f.on_attempt_failed(HermesEndpoint::Lan);
+        f.on_attempt_failed(HermesEndpoint::Lan);
+        assert(f.next_endpoint() == HermesEndpoint::Lan);   // remote disabled: LAN forever
+    }
+    // LAN fails twice -> REMOTE; remote connects -> active REMOTE; the
+    // link drops -> the fresh cycle re-arms LAN (returning home heals).
+    {
+        HermesFailover f;
+        f.remote_enabled = true;
+        f.on_attempt_failed(HermesEndpoint::Lan);
+        assert(f.next_endpoint() == HermesEndpoint::Lan);   // one failure is not enough
+        assert(f.lan_failures == 1);
+        f.on_attempt_failed(HermesEndpoint::Lan);
+        assert(f.next_endpoint() == HermesEndpoint::Remote);
+        f.on_connected(HermesEndpoint::Remote);
+        assert(f.has_active && f.active == HermesEndpoint::Remote);
+        assert(f.lan_failures == 0);
+        f.on_link_down();
+        assert(f.next_endpoint() == HermesEndpoint::Lan);
+    }
+    // Remote failure hands the cycle back to LAN with the streak reset:
+    // both endpoints down alternates L,L,R,L,L,R under repeated failure.
+    {
+        HermesFailover f;
+        f.remote_enabled = true;
+        HermesEndpoint seq[6];
+        for (int i = 0; i < 6; ++i) {
+            seq[i] = f.next_endpoint();
+            f.on_attempt_failed(seq[i]);
+        }
+        assert(seq[0] == HermesEndpoint::Lan && seq[1] == HermesEndpoint::Lan &&
+               seq[2] == HermesEndpoint::Remote && seq[3] == HermesEndpoint::Lan &&
+               seq[4] == HermesEndpoint::Lan && seq[5] == HermesEndpoint::Remote);
+    }
+    // A LAN success keeps LAN: connect, drop, reconnect stays on LAN and
+    // a single subsequent failure does not flap to REMOTE.
+    {
+        HermesFailover f;
+        f.remote_enabled = true;
+        f.on_connected(HermesEndpoint::Lan);
+        assert(f.active == HermesEndpoint::Lan);
+        f.on_link_down();
+        assert(f.next_endpoint() == HermesEndpoint::Lan);
+        f.on_attempt_failed(HermesEndpoint::Lan);
+        assert(f.next_endpoint() == HermesEndpoint::Lan);
+        assert(std::string(hermes_endpoint_name(HermesEndpoint::Lan)) == "LAN");
+        assert(std::string(hermes_endpoint_name(HermesEndpoint::Remote)) == "REMOTE");
+        // Health-line endpoint tag (host stub: the LAN primary).
+        assert(std::string(hermes_link_endpoint_tag()) == "LAN");
+    }
+    printf("test_hermes_failover: PASSED\n");
+}
+
 static void test_hermes_handshake() {
     using namespace aiwatchos_hermes;
     aiwatchos::TestHal hal;
@@ -2645,6 +2706,7 @@ int main() {
     test_hermes_auth_failure();          // Hermes auth lockout + heartbeat death
     test_hermes_notifications_bridge();  // H10: prompts/cards/notices -> OS notifications
     test_hermes_new_session();           // H5: session.new wire + BOOT long-press
+    test_hermes_failover();              // away-from-home endpoint failover machine
     test_hermes_proto_harvest();         // buddy harvest: charging, diag retention, FIFO outbox, forget
     test_hermes_outbox_persist();        // buddy harvest: outbox ring survives reboot
     test_hermes_conversation_persist();  // buddy harvest: conversation pair survives reboot

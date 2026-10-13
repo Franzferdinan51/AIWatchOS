@@ -117,6 +117,15 @@ struct SetupFields {
     // initial Speak-replies toggle ("1"/"true" = on, "0" = off).
     std::string tts_url, tts_key, tts_model, tts_voice;
     bool tts_speak = false;
+    // Hermes remote endpoint provisioning: hhost2 / hport2 carry the
+    // Tailscale Funnel host and port; hrem is the enable toggle
+    // ("1"/"true" = on, "0" = off — the `speak` pattern). The port
+    // travels as text here and is validated at apply time with
+    // parse_tcp_port(); an invalid port leaves the config unchanged.
+    std::string hermes_remote_host, hermes_remote_port;
+    bool hermes_remote_on = true;
+    bool has_hermes_remote_host = false, has_hermes_remote_port = false,
+         has_hermes_remote_on = false;
     bool has_tts_url = false, has_tts_key = false, has_tts_model = false,
          has_tts_voice = false, has_tts_speak = false;
     bool has_ssid = false, has_pass = false, has_token = false,
@@ -126,6 +135,10 @@ struct SetupFields {
 
 // Parses a setup string. Returns false when the scheme/prefix is wrong.
 bool parse_setup_string(const char* text, SetupFields* out);
+
+// Strict decimal TCP port: digits only, 1..65535. Used to validate the
+// hport2 setup value (and reusable for future numeric setup fields).
+bool parse_tcp_port(const char* s, int* out);
 
 // --- Cloud TTS request shaping (M10) ---------------------------------------
 // The companion's openrouter_tts.dart contract, ported pure so it is
