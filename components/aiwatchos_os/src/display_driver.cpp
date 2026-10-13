@@ -149,6 +149,7 @@ static esp_err_t co5300_flush_rows(uint16_t* fb, uint16_t y0, uint16_t y1) {
 // the Board singleton), this marks that a flush was dispatched so test code can verify rendering
 // reached the panel layer. In production, display_flush_impl below handles the DMA transfer.
 static bool g_last_flush_success = false;
+static bool g_display_asleep = false;
 
 bool co5300_display_flushed() { return g_last_flush_success; }
 void co5300_reset_flush_state() { g_last_flush_success = false; }
@@ -181,6 +182,34 @@ extern "C" bool board_display_flush(uint16_t* fb, uint16_t y0, uint16_t y1) {
 }
 
 #ifdef __ESPRESSIF_IDF__
+// Panel sleep driver entry points (defined with the brightness path below).
+bool co5300_set_sleep(bool sleep);
+bool co5300_is_asleep();
+#endif
+
+// --- Panel sleep interface (called by Board::display_sleep) ---
+// Sleep means DISPOFF + SLPIN on the CO5300: scan-out stops (AMOLED pixels
+// fully dark) and the panel drops to its low-power state. The FT3168 touch
+// controller is a separate chip and stays live, so touch INT activity and
+// button presses can still wake the watch instantly.
+bool display_sleep_impl(bool sleep) {
+#ifdef __ESPRESSIF_IDF__
+    return co5300_set_sleep(sleep);
+#else
+    g_display_asleep = sleep;
+    return true;
+#endif
+}
+
+bool display_is_asleep() {
+#ifdef __ESPRESSIF_IDF__
+    return co5300_is_asleep();
+#else
+    return g_display_asleep;
+#endif
+}
+
+#ifdef __ESPRESSIF_IDF__
 // Set panel brightness 0-100 via CO5300 "write display brightness" (0x51),
 // QSPI-framed exactly as the upstream board file does.
 void co5300_set_brightness(uint8_t percent_0_to_100) {
@@ -189,6 +218,35 @@ void co5300_set_brightness(uint8_t percent_0_to_100) {
     uint8_t level = static_cast<uint8_t>(percent_0_to_100 * 255 / 100);
     esp_lcd_panel_io_tx_param(s_io, (0x02 << 24) | (0x51 << 8), &level, 1);
 }
+
+// Panel sleep state for this build: true between SLPIN and SLPOUT.
+static bool s_panel_asleep = false;
+
+// Send a no-parameter MIPI DCS command using the same QSPI framing as the
+// brightness path above ((0x02 << 24) | (cmd << 8) through panel IO).
+static void co5300_tx_cmd(uint8_t cmd) {
+    if (!s_io) return;
+    esp_lcd_panel_io_tx_param(s_io, (0x02 << 24) | (static_cast<uint32_t>(cmd) << 8), nullptr, 0);
+}
+
+bool co5300_set_sleep(bool sleep) {
+    if (!s_panel || !s_io) return false;
+    if (sleep == s_panel_asleep) return true;
+    if (sleep) {
+        // DISPOFF first so the AMOLED goes fully dark, then SLPIN.
+        esp_lcd_panel_disp_on_off(s_panel, false);
+        co5300_tx_cmd(0x10);   // SLPIN
+    } else {
+        // SLPOUT, then the datasheet settle delay before DISPON.
+        co5300_tx_cmd(0x11);   // SLPOUT
+        vTaskDelay(pdMS_TO_TICKS(120));
+        esp_lcd_panel_disp_on_off(s_panel, true);
+    }
+    s_panel_asleep = sleep;
+    return true;
+}
+
+bool co5300_is_asleep() { return s_panel_asleep; }
 #endif
 
 }  // namespace aiwatchos

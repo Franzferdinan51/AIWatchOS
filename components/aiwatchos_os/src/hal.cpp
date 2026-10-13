@@ -92,6 +92,16 @@ bool Board::display_flush() {
     return board_display_flush(g_framebuffer_ptr, 0, kDisplayHeight);
 }
 
+// --- Display sleep (CO5300 SLPIN/SLPOUT) — implemented in display_driver.cpp ---
+// display_sleep_impl() drives the panel low-power state on hardware and just
+// records the state in host builds. The policy that decides WHEN to sleep
+// lives in aiwatchos/display_power.hpp and runs in the app_main loop.
+bool display_sleep_impl(bool sleep);
+bool display_is_asleep();
+
+void Board::display_sleep(bool sleep) { display_sleep_impl(sleep); }
+bool Board::display_asleep() const { return display_is_asleep(); }
+
 void Board::set_backlight(uint8_t percent) {
 #ifdef __ESPRESSIF_IDF__
     extern void co5300_set_brightness(uint8_t);
