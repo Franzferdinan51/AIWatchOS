@@ -31,6 +31,17 @@ CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
 CONFIG_FREERTOS_HZ=100
 CONFIG_COMPILER_OPTIMIZATION_PERF=y
 
+# --- Performance clocks (perf-wave, 2026-10-13) ---
+# The in-family reference for THIS board (muse-gadget-206,
+# esp32/devices/sdkconfig.muse-waveshare-s3-206) ships CPU 240 MHz +
+# octal-DDR PSRAM at 80 MHz. The earlier power pass capped us at
+# 160/40, which roughly doubled every PSRAM/CPU-bound frame stage
+# (measured: render 34 ms, band hash 13 ms, full flush ~250 ms).
+# Clocks are static (PM/DFS off), so these are pure caps being lifted
+# back to the board's known-good operating point.
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
+CONFIG_SPIRAM_SPEED_80M=y
+
 # --- TLS buffer strategy (net component; resource-budget trim) ---
 # Dynamic SSL buffers: the TLS handshake is the DRAM peak event; dynamic
 # buffers free ~12-16 KB of steady-state DRAM vs fixed 16 KB in/out buffers.
