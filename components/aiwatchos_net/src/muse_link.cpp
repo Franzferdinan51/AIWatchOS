@@ -577,6 +577,17 @@ void stream_data(StreamSlot& s, ConstByteSpan data) {
 }
 
 void stream_end(StreamSlot& s, bool ok) {
+    if (s.kind == kStreamSub) {
+        // The subscribe stream is the connection's reason to exist. The
+        // reference drops the whole connection when it ends (SDK
+        // muse_chat_session.cpp stream_end: K_SUB returns false — "the
+        // connection has to go") and reopens it on reconnect. Marking
+        // the link down makes poll_socket fail right after this frame
+        // is processed, so the link task tears down and resubscribes
+        // instead of sitting linked but permanently deaf.
+        ESP_LOGW(kTag, "subscription ended; reconnecting");
+        g_conn.up = false;
+    }
     if (s.kind == kStreamChat && ok) on_chat_body(g_chat_body);
     if (s.kind == kStreamChat) g_chat_body.clear();
     s.kind = kStreamNone;
