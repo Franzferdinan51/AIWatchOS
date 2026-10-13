@@ -11,8 +11,10 @@
 
 namespace aiwatchos_muse {
 
-// One push-to-talk turn holds 30 s of 16 kHz mono encoded at 4 bits/sample.
-constexpr size_t kTurnMaxAdpcmBytes = 16000u * 30u / 2u;
+// One push-to-talk turn holds 20 s of 16 kHz mono encoded at 4 bits/sample
+// (the reference firmware's NOTE_MAX_BYTES staging cap, esp32
+// muse_chat_session.cpp; the service stops listening well before 30 s).
+constexpr size_t kTurnMaxAdpcmBytes = 16000u * 20u / 2u;
 
 // Muse app state — tracks the voice interaction lifecycle.
 struct MuseState {

@@ -425,7 +425,7 @@ RxMsg* find_msg(const std::string& id, bool create) {
     for (auto& m : g_rx.msgs) {
         if (m.id == id) return &m;
     }
-    if (!create || id.empty() || g_rx.msgs.size() >= 4) return nullptr;
+    if (!create || id.empty() || g_rx.msgs.size() >= 8) return nullptr;
     g_rx.msgs.push_back(RxMsg{id, "", false});
     return &g_rx.msgs.back();
 }
