@@ -95,7 +95,7 @@ config AIWATCHOS_NET_TTS_SPEAK
 
 config AIWATCHOS_NET_HERMES_REMOTE_HOST
     string "Hermes hub remote host (Tailscale Funnel)"
-    default "your-mac.your-tailnet.ts.net"
+    default ""
     help
         Away-from-home endpoint for the Hermes gadget hub: the hub
         host's Tailscale Funnel name. The watch connects to
