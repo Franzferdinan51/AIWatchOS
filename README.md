@@ -28,11 +28,20 @@ voice interaction as first-class apps. It provides:
     the app stays in offline-outbox mode. Replies arrive as text events
     and render on screen; the MP3 playback path is bench-verified, but
     the host protocol does not send audio replies.
-  - **`hermes`** — **placeholder**: the app shell renders its screens and
-    honestly reports `LINK OFFLINE`; it does not speak the HermesGadget
-    protocol yet. The host side is ready (the HermesGadget plugin hub
-    runs on the gateway, pairing + HMAC + chat proven end-to-end), and a
-    protocol-v1 watch client is in progress on a separate branch.
+  - **`hermes`** — a real Hermes Gadget Protocol v1 client
+    (`apps/hermes`): the watch enrolls with the Hermes hub over
+    WebSocket (`ws://<host>:8765/gadget`), authenticates with a
+    device key + HMAC-SHA256 (TOFU enrollment, then HMAC re-auth),
+    and chats with the Hermes agent — text turns, spoken replies
+    played on the speaker, push-to-talk voice turns, yes/no prompt
+    cards, display cards and images from the agent, battery
+    telemetry, and signed OTA firmware updates. Pairing: the watch
+    shows an 8-character code; approve it once on the host with
+    `hermes pairing approve gadget <CODE>`. Setup: hub host/port and
+    device name are the `HERMES_HOST` / `HERMES_PORT` /
+    `HERMES_DEVICE_NAME` Kconfigs; WiFi comes from the shared network
+    config (`components/aiwatchos_net`, Kconfig or NVS `aiwnet`) —
+    with no WiFi configured the app stays honestly at `LINK OFFLINE`.
 - **Standard smartwatch features**:
   - Clock face with hour/minute/second hands (Bresenham line drawing on RGB565 framebuffer).
     Time comes from the PCF85063 RTC, disciplined by SNTP when online, with a
@@ -46,8 +55,9 @@ voice interaction as first-class apps. It provides:
     swallowed), PWR short-press sleep/wake toggle
   - Notifications display: stored notifications in a bounded PSRAM buffer
     (max 16); rendering/scroll quirks are tracked in `docs/ui/UI_UX_AUDIT.md`
-  - Weather app: temperature/condition/humidity layout — **currently shows
-    placeholder data**; live network fetch is not wired yet
+  - Weather app: real current conditions from the US National Weather
+    Service (see Status below) — temperature in °F, the station's own
+    condition text, humidity when the station reports it
 
 ## Hardware
 
@@ -104,17 +114,22 @@ SKIPPED without them. Run it from the repo root.
 
 ## Status / known limitations
 
-- Hermes watch app is a placeholder (see above); protocol-v1 client in progress.
-- Weather fetches REAL current conditions from Open-Meteo (no API key)
-  via components/aiwatchos_weather: Kconfig location (default Huber
-  Heights, Ohio), 30-minute refresh, honest NO DATA YET / OFFLINE /
-  STALE states — placeholder data is gone.
+- Weather fetches REAL current conditions from the US National Weather
+  Service (api.weather.gov — no API key, US coverage) via
+  components/aiwatchos_weather: the documented points -> station list ->
+  latest-observation chain, Kconfig location (default Huber Heights,
+  Ohio), 30-minute refresh, honest NO DATA YET / OFFLINE / FETCH FAILED
+  / STALE states — placeholder data is gone. A station that reports a
+  null temperature (NWS stations lag) counts as a failed fetch, never
+  as invented weather.
 - No on-watch settings UI for network credentials yet (Kconfig/NVS only).
 - Spoken replies are not wired: host replies are text; the MP3 path awaits a TTS source.
 - UI quality gaps (typography, launcher labels, flush cost) are catalogued in
   `docs/ui/UI_UX_AUDIT.md`; the gloss-blue redesign lives in
   `docs/ui/DESIGN_TOKENS.md` + `docs/ui/IMPLEMENTATION_PLAN.md`, and the
-  resource budget every build must respect is `docs/ui/RESOURCE_BUDGET.md`.
+  resource budget every build must respect is `docs/ui/RESOURCE_BUDGET.md`,
+  and companion/buddy feature-port verdicts live in
+  `docs/ui/FEATURE_PORT_MATRIX.md`.
 
 ## License
 
