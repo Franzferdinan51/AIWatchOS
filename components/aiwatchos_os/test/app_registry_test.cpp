@@ -658,6 +658,80 @@ static void test_settings_volume() {
     printf("test_settings_volume: PASSED\n");
 }
 
+// --- Test Settings registered rows (M22 status page + external toggle) ---
+namespace {
+struct FakeStatus {
+    int calls = 0;
+};
+size_t fake_status_provider(aiwatchos::SettingsStatusRow* rows, size_t max_rows,
+                            void* ctx) {
+    auto* st = static_cast<FakeStatus*>(ctx);
+    ++st->calls;
+    const char* vals[2][2] = {{"WiFi", "CONNECTED"}, {"Muse token", "PRESENT"}};
+    size_t n = 0;
+    for (; n < 2 && n < max_rows; ++n) {
+        std::snprintf(rows[n].label, sizeof(rows[n].label), "%s", vals[n][0]);
+        std::snprintf(rows[n].value, sizeof(rows[n].value), "%s", vals[n][1]);
+    }
+    return n;
+}
+struct FakeToggle {
+    bool on = false;
+    int sets = 0;
+};
+bool fake_toggle_get(void* ctx) { return static_cast<FakeToggle*>(ctx)->on; }
+void fake_toggle_set(void* ctx, bool on) {
+    auto* t = static_cast<FakeToggle*>(ctx);
+    t->on = on;
+    ++t->sets;
+}
+}  // namespace
+
+static void test_settings_registered_rows() {
+    // The OS settings page cannot depend on the net component, so main
+    // registers a status provider (About page, M22) and one toggle row
+    // (M10 speak). Drive both seams through the REAL page.
+    static FakeStatus status;
+    static FakeToggle toggle;
+    aiwatchos::settings_register_status_provider(&fake_status_provider,
+                                                 &status);
+    aiwatchos::SettingsToggleRow row;
+    row.label = "Speak replies";
+    row.get = &fake_toggle_get;
+    row.set = &fake_toggle_set;
+    row.ctx = &toggle;
+    assert(aiwatchos::settings_register_toggle(row) == true);
+    // The single slot is taken; a second registration is refused.
+    assert(aiwatchos::settings_register_toggle(row) == false);
+
+    aiwatchos::TestHal hal;
+    aiwatchos::SettingsPage page(hal);
+    static uint16_t buf[aiwatchos::kDisplayWidth * aiwatchos::kDisplayHeight];
+    aiwatchos::Framebuffer fb{buf, aiwatchos::kDisplayWidth,
+                              aiwatchos::kDisplayHeight};
+    fb.fill(0x0000);
+    page.render(fb);   // list with 6 rows renders
+
+    // About row (row 3, y 284..348) opens the status page; the provider
+    // is consulted on render; any press leaves the page again.
+    aiwatchos::TouchEvent open_about{200, 316, aiwatchos::TouchEvent::Press};
+    assert(page.on_touch(open_about) == true);
+    fb.fill(0x0000);
+    page.render(fb);
+    assert(status.calls > 0);
+    aiwatchos::TouchEvent exit_about{100, 100, aiwatchos::TouchEvent::Press};
+    assert(page.on_touch(exit_about) == true);
+
+    // Toggle row (row 5, y 436..500) flips the registered state.
+    aiwatchos::TouchEvent tap_toggle{200, 468, aiwatchos::TouchEvent::Press};
+    assert(page.on_touch(tap_toggle) == true);
+    assert(toggle.on && toggle.sets == 1);
+    assert(page.on_touch(tap_toggle) == true);
+    assert(!toggle.on && toggle.sets == 2);
+
+    printf("test_settings_registered_rows: PASSED\n");
+}
+
 // --- Test MP3 reply decoding (drives the vendored minimp3 on a fixture) ---
 static void test_minimp3_reply() {
     // Spoken replies arrive as MP3 and must decode to playable PCM. The
@@ -2382,6 +2456,7 @@ int main() {
     test_muse_turn_buffering();          // drives the REAL muse PTT pipeline into the turn buffer
     test_noise_crypto();                 // drives the vendored Noise crypto backend (or skips)
     test_settings_volume();              // drives Settings volume tap into the Hal
+    test_settings_registered_rows();     // M22 status page + registered toggle seams
     test_minimp3_reply();                // decodes the MP3 reply fixture (or skips)
     test_muse_play_reply();              // plays the fixture through the reply path
     test_launcher_hit_testing();         // drives real LauncherUI gap/icon taps
