@@ -9,6 +9,7 @@
 
 #include <cstdint>
 #include "aiwatchos/app.hpp"
+#include "aiwatchos/battery_display.hpp"   // kStatusZoneBottom
 #include "aiwatchos/hal.hpp"   // for kDisplayWidth/kDisplayHeight constants
 
 namespace aiwatchos {
@@ -16,10 +17,11 @@ namespace aiwatchos {
 class AppManager;   // forward declaration (full definition in app_manager.hpp)
 
 // Tile geometry (tokens section 7): 96px tiles, 3 across — 29px screen
-// margin, 28px gutters (+4 centering), rows from y=64 at 148px pitch.
+// margin, 28px gutters (+4 centering), rows from 8px below the status
+// zone at 148px pitch.
 inline constexpr int kTileSize = 96;
 inline constexpr int kTileX0 = 33;
-inline constexpr int kTileY0 = 64;
+inline constexpr int kTileY0 = kStatusZoneBottom + 8;
 inline constexpr int kTilePitchX = 124;
 inline constexpr int kTilePitchY = 148;
 inline constexpr int kTileCols = 3;

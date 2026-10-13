@@ -8,6 +8,7 @@
 #include <functional>
 
 #include "aiwatchos/app.hpp"
+#include "aiwatchos/battery_display.hpp"   // SafeRect / kContentRect
 #include "aiwatchos/hal.hpp"
 
 namespace aiwatchos {
@@ -39,6 +40,11 @@ class AppManager {
 
     // Access an app by index for launcher tap-to-launch (returns nullptr if out of range).
     App* app_at_index(size_t idx) const;
+
+    // The safe content rect (panel minus the glass safe-area
+    // insets, below the status zone). Apps lay out against this;
+    // render() clips their output to it.
+    SafeRect content_rect() const { return kContentRect; }
 
     // --- Event dispatch (called from the main loop) ---
     void tick(uint32_t elapsed_ms);

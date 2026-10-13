@@ -1,6 +1,7 @@
 // Settings page — Muse Gloss rows with real controls. See
 // settings_page.hpp for the row inventory.
 #include "aiwatchos/settings_page.hpp"
+#include "aiwatchos/battery_display.hpp"   // kStatusZoneBottom, kSafeBottom
 #include "aiwatchos/hal.hpp"
 #include "aiwatchos/colors.hpp"
 #include "aiwatchos/color_test.hpp"
@@ -10,12 +11,14 @@
 namespace aiwatchos {
 namespace {
 
-// Row geometry (tokens section 7): 64px rows from y=56 at 76px pitch.
+// Row geometry (tokens section 7): 64px rows from the status-zone
+// bottom at 68px pitch (stage-4: the zone grew by the top safe
+// inset; the tighter pitch keeps all 6 rows above the safe bottom).
 constexpr int kRowX = 20;
 constexpr int kRowW = 370;
 constexpr int kRowH = 64;
-constexpr int kRowY0 = 56;
-constexpr int kRowPitch = 76;
+constexpr int kRowY0 = kStatusZoneBottom;
+constexpr int kRowPitch = 68;
 
 constexpr int kRowBrightness = 0;
 constexpr int kRowVolume = 1;
@@ -203,7 +206,7 @@ void SettingsPage::render_about(Framebuffer& fb) {
     }
     const int total = 1 + static_cast<int>(n_prov);
     for (int i = 0; i < total; ++i) {
-        const int y = 56 + i * 64;
+        const int y = kStatusZoneBottom + i * 58;
         const int cy = y + 26;
         BubbleStyle style = bubble_style();
         style.shadow = nullptr;
@@ -225,8 +228,10 @@ void SettingsPage::render_about(Framebuffer& fb) {
         draw_text_aa_right(fb, kRowX + kRowW - 16, ty, value,
                            FontFace::kBody, colors::kDim);
     }
-    draw_text_aa(fb, kRowX + 4, 470, "TAP TO GO BACK", FontFace::kMicro,
-                 colors::kDim);
+    draw_text_aa(fb, kRowX + 4,
+                 kDisplayHeight - kSafeBottom -
+                     font_line_height(FontFace::kMicro),
+                 "TAP TO GO BACK", FontFace::kMicro, colors::kDim);
 }
 
 bool SettingsPage::on_touch(const TouchEvent& event) {

@@ -15,7 +15,7 @@ namespace {
 constexpr int kMaxNotifications = 16;   // bounded buffer to limit PSRAM usage
 constexpr int kCardX = 20;
 constexpr int kCardW = 370;
-constexpr int kListY = 56;
+constexpr int kListY = kStatusZoneBottom;
 constexpr int kCardGap = 12;
 constexpr int kBodyX = 64;              // text starts right of the bell chip
 constexpr int kBodyW = 294;             // kCardW - kBodyX - 12

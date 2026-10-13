@@ -494,7 +494,8 @@ extern "C" void app_main(void) {
                 // fired accidentally mid-gesture); the bottom strip is
                 // one large thumb target instead.
                 if (te.type == aiwatchos::TouchEvent::Press &&
-                    te.y >= aiwatchos::kDisplayHeight - 30) {
+                    te.y >= aiwatchos::kDisplayHeight -
+                                aiwatchos::kSafeBottom - 30) {
                     g_app_mgr.switch_to("launcher");
                 }
             }
@@ -558,8 +559,10 @@ extern "C" void app_main(void) {
                 case aiwatchos_net::LinkState::kOff:
                     break;
             }
-            fb.fill_rect(0, aiwatchos::kStatusZoneBottom - 3,
-                         aiwatchos::kDisplayWidth - 1,
+            fb.fill_rect(aiwatchos::kSafeCornerEnd,
+                         aiwatchos::kStatusZoneBottom - 3,
+                         aiwatchos::kDisplayWidth - 1 -
+                             aiwatchos::kSafeCornerEnd,
                          aiwatchos::kStatusZoneBottom - 1, link_color);
         }
 #endif

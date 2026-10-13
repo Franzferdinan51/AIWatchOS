@@ -7,6 +7,7 @@
 // owns WiFi + the WebSocket and feeds frames into the client from its own
 // task, so the session stays alive while other apps are foregrounded.
 #include "aiwatchos_hermes.hpp"
+#include "aiwatchos/battery_display.hpp"   // kSafeBottom, kStatusZoneBottom
 #include "aiwatchos/notifications.hpp"  // H10 bridge target
 #include "hermes_internal.hpp"
 
@@ -737,7 +738,8 @@ void hermes_render(aiwatchos::Framebuffer& fb) {
     fb.fill(kHermesBg);
     // Gold identity title (tokens section 9). No header band — the OS
     // status zone lives above and is repainted by the shell.
-    draw_text(fb, 16, 46, "Hermes", 3, kAmberColor);
+    draw_text(fb, 16, aiwatchos::kStatusZoneBottom + 2, "Hermes", 3,
+              kAmberColor);
 
     // The view is read in place under the client lock — never copied. It
     // is ~35 KB of text buffers and this runs on the OS main task's stack.
@@ -754,7 +756,7 @@ void hermes_render(aiwatchos::Framebuffer& fb) {
     // State headline.
     char headline[48];
     std::snprintf(headline, sizeof(headline), "LINK %s", link_word(v.link));
-    draw_text(fb, 16, 88, headline, 2,
+    draw_text(fb, 16, 118, headline, 2,
               v.link == HermesLinkState::Linked ? hc::kOnline
               : v.link == HermesLinkState::AuthFailed
                     ? aiwatchos::colors::kDanger
@@ -766,7 +768,7 @@ void hermes_render(aiwatchos::Framebuffer& fb) {
     // fill colour carries the charging state (kOk), red under 20%.
     if (g_hal) {
         aiwatchos::PowerStatus ps = g_hal->read_power();
-        constexpr int kBarX = 16, kBarY = 120, kBarW = 200, kBarH = 20;
+        constexpr int kBarX = 16, kBarY = 150, kBarW = 200, kBarH = 20;
         fb.fill_round_rect(kBarX, kBarY, kBarW, kBarH, 10, hc::kFaint);
         fb.fill_round_rect(kBarX + 2, kBarY + 2, kBarW - 4, kBarH - 4, 8,
                            hc::kBar);
@@ -796,17 +798,17 @@ void hermes_render(aiwatchos::Framebuffer& fb) {
         } else {
             std::snprintf(up_line, sizeof(up_line), "UP %s", up_buf);
         }
-        aiwatchos::draw_text_aa(fb, 16, 146, up_line,
+        aiwatchos::draw_text_aa(fb, 16, 176, up_line,
                                 aiwatchos::FontFace::kMicro, kDimColor);
         if (g_client) {
             aiwatchos::draw_text_aa_right(
-                fb, aiwatchos::kDisplayWidth - 16, 146,
+                fb, aiwatchos::kDisplayWidth - 16, 176,
                 g_client->device_id(), aiwatchos::FontFace::kMicro,
                 kDimColor);
         }
     }
 
-    const int kContentY = 170;
+    const int kContentY = 200;
     const int kContentW = aiwatchos::kDisplayWidth - 32;
 
     if (v.link == HermesLinkState::AuthFailed) {
@@ -862,7 +864,9 @@ void hermes_render(aiwatchos::Framebuffer& fb) {
         card_style.mid = hc::kBar;
         card_style.bot = hc::kBarBot;
         card_style.shadow = nullptr;
-        fb.draw_bubble(8, kContentY - 8, aiwatchos::kDisplayWidth - 16,
+        fb.draw_bubble(aiwatchos::kSafeLeft, kContentY - 8,
+                       aiwatchos::kDisplayWidth - aiwatchos::kSafeLeft -
+                           aiwatchos::kSafeRight,
                        card_h, 16, card_style);
         draw_wrapped(fb, 16, kContentY, kContentW, v.card_title, 3, kTextColor, 2);
         draw_wrapped(fb, 16, kContentY + 48, kContentW, v.card_body, 2, kDimColor, 12);
@@ -930,7 +934,11 @@ void hermes_render(aiwatchos::Framebuffer& fb) {
                 hist.mid = hc::kBar;
                 hist.bot = hc::kBarBot;
                 hist.shadow = nullptr;
-                fb.draw_bubble(8, y, aiwatchos::kDisplayWidth - 16, bh, 14,
+                fb.draw_bubble(aiwatchos::kSafeLeft, y,
+                               aiwatchos::kDisplayWidth -
+                                   aiwatchos::kSafeLeft -
+                                   aiwatchos::kSafeRight,
+                               bh, 14,
                                hist);
                 int iy = y + 7;
                 if (ex.end_ms) {
@@ -1008,13 +1016,17 @@ void hermes_render(aiwatchos::Framebuffer& fb) {
                           : "NEW SESSION",
                       static_cast<unsigned>(left_ms / 1000),
                       static_cast<unsigned>((left_ms % 1000) / 100));
-        draw_text(fb, 16, aiwatchos::kDisplayHeight - 60, hold, 2, kAmberColor);
+        draw_text(fb, 16,
+                  aiwatchos::kDisplayHeight - aiwatchos::kSafeBottom - 44,
+                  hold, 2, kAmberColor);
     }
     const char* hint = "HOLD BOTTOM: TALK";
     if (v.prompt_active) hint = "TAP YES OR NO";
     else if (v.card_active || v.image_active) hint = "TAP: DISMISS";
     else if (v.link != HermesLinkState::Linked) hint = "HERMES GADGET";
-    draw_text(fb, 16, aiwatchos::kDisplayHeight - 30, hint, 2, kDimColor);
+    draw_text(fb, 16,
+              aiwatchos::kDisplayHeight - aiwatchos::kSafeBottom - 14, hint,
+              2, kDimColor);
 }
 
 bool hermes_on_touch(const aiwatchos::TouchEvent& event) {

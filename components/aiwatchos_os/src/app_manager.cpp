@@ -86,6 +86,10 @@ void AppManager::render(Framebuffer& fb) {
     if (foreground_ && foreground_->render) {
         foreground_->render(fb);
     }
+    // Safe-area clip: erase anything the app painted into the masked
+    // glass edges (side columns + bottom band). The status zone's
+    // rows are repainted by BatteryDisplay right after this returns.
+    clip_to_safe_area(fb);
 }
 
 bool AppManager::on_touch(const TouchEvent& event) {
