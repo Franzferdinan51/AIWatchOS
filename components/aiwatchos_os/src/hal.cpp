@@ -181,12 +181,27 @@ PowerStatus Board::read_power() {
 
 // --- Time (PCF85063 RTC via I2C once its driver lands; until then the
 // ESP32's microsecond timer advances the clock from the fixed base) ---
-uint64_t Board::now_ms() {
+// g_time_shift_ms is the SNTP discipline offset (see board_set_epoch_ms):
+// zero until the net component syncs, so offline behavior is unchanged.
+static int64_t g_time_shift_ms = 0;
+
+static uint64_t now_ms_unshifted() {
 #ifdef __ESPRESSIF_IDF__
     return g_now_ms + static_cast<uint64_t>(esp_timer_get_time() / 1000);
 #else
     return g_now_ms;
 #endif
+}
+
+uint64_t Board::now_ms() {
+    int64_t t = static_cast<int64_t>(now_ms_unshifted()) + g_time_shift_ms;
+    return t < 0 ? 0 : static_cast<uint64_t>(t);
+}
+
+// Wall-clock discipline seam for the net component's SNTP sync.
+void board_set_epoch_ms(uint64_t epoch_ms) {
+    g_time_shift_ms = static_cast<int64_t>(epoch_ms) -
+                      static_cast<int64_t>(now_ms_unshifted());
 }
 
 // Test helper: advance the monotonic clock by elapsed milliseconds. This lets unit tests

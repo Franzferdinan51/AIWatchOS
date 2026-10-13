@@ -119,6 +119,13 @@ Hal& hal();
 // returns a progressing value in unit tests (replaces PCF85063 RTC reads).
 void board_advance_test_time_ms(uint64_t ms);
 
+// Set the wall-clock time: shifts now_ms() so it reads `epoch_ms`
+// (milliseconds since the Unix epoch). Used by the network component when
+// SNTP sync lands; additive — it does not change the base the clock counts
+// from, only the offset applied on top of it. Safe to call repeatedly
+// (re-disciplining just recomputes the offset).
+void board_set_epoch_ms(uint64_t epoch_ms);
+
 // Test-only: inject up to 2 touch points with screen-space coordinates. These are consumed
 // by the next Board::read_touch() call, simulating one IRQ-driven poll cycle from the FT3168.
 // This lets unit tests exercise the real touch dispatch path (Board -> AppManager -> LauncherUI)
