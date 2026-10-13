@@ -2,6 +2,8 @@
 // NVS namespace "aiwnet" (the runtime provisioning path). See net.hpp.
 #include "aiwatchos_net/net.hpp"
 
+#include <cstdio>
+
 #include "esp_log.h"
 #include "nvs.h"
 #include "sdkconfig.h"
@@ -48,6 +50,13 @@ void load_once() {
 #else
     g_cfg.tts_speak = false;
 #endif
+    g_cfg.hermes_remote_host = CONFIG_AIWATCHOS_NET_HERMES_REMOTE_HOST;
+    g_cfg.hermes_remote_port = CONFIG_AIWATCHOS_NET_HERMES_REMOTE_PORT;
+#ifdef CONFIG_AIWATCHOS_NET_HERMES_REMOTE
+    g_cfg.hermes_remote_enabled = true;   // unset bool Kconfigs get no define
+#else
+    g_cfg.hermes_remote_enabled = false;
+#endif
 
     nvs_handle_t h = 0;
     if (nvs_open(kNs, NVS_READONLY, &h) == ESP_OK) {
@@ -65,6 +74,20 @@ void load_once() {
         uint8_t speak = 0;
         if (nvs_get_u8(h, "ttsspeak", &speak) == ESP_OK) {
             g_cfg.tts_speak = speak != 0;
+        }
+        g_cfg.hermes_remote_host = nvs_read_str(h, "hhost2", g_cfg.hermes_remote_host);
+        {
+            // Port persists as text (uniform with the other fields);
+            // an unparsable stored value keeps the Kconfig default.
+            const std::string ps = nvs_read_str(h, "hport2", "");
+            int port = 0;
+            if (!ps.empty() && proto::parse_tcp_port(ps.c_str(), &port)) {
+                g_cfg.hermes_remote_port = port;
+            }
+        }
+        uint8_t hrem = 0;
+        if (nvs_get_u8(h, "hrem", &hrem) == ESP_OK) {
+            g_cfg.hermes_remote_enabled = hrem != 0;
         }
         nvs_close(h);
     }
@@ -98,6 +121,13 @@ bool net_save_config(const NetConfig& cfg) {
     nvs_set_str(h, "ttsmodel", cfg.tts_model);
     nvs_set_str(h, "ttsvoice", cfg.tts_voice);
     nvs_set_u8(h, "ttsspeak", cfg.tts_speak ? 1 : 0);
+    nvs_set_str(h, "hhost2", cfg.hermes_remote_host);
+    {
+        char pb[8];
+        std::snprintf(pb, sizeof(pb), "%d", cfg.hermes_remote_port);
+        nvs_set_str(h, "hport2", pb);
+    }
+    nvs_set_u8(h, "hrem", cfg.hermes_remote_enabled ? 1 : 0);
     esp_err_t err = nvs_commit(h);
     nvs_close(h);
     if (err != ESP_OK) return false;
@@ -123,6 +153,14 @@ bool net_apply_setup_string(const char* text) {
     if (f.has_tts_model) cfg.tts_model = f.tts_model;
     if (f.has_tts_voice) cfg.tts_voice = f.tts_voice;
     if (f.has_tts_speak) cfg.tts_speak = f.tts_speak;
+    if (f.has_hermes_remote_host) cfg.hermes_remote_host = f.hermes_remote_host;
+    if (f.has_hermes_remote_port) {
+        int port = 0;
+        if (proto::parse_tcp_port(f.hermes_remote_port.c_str(), &port)) {
+            cfg.hermes_remote_port = port;
+        }   // invalid port in a setup string: leave the value unchanged
+    }
+    if (f.has_hermes_remote_on) cfg.hermes_remote_enabled = f.hermes_remote_on;
     return net_save_config(cfg);
 }
 

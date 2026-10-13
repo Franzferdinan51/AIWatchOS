@@ -160,10 +160,35 @@ bool parse_setup_string(const char* text, SetupFields* out) {
                 out->tts_speak = (val == "1" || val == "true");
                 out->has_tts_speak = true;
             }
+            else if (key == "hhost2") {
+                out->hermes_remote_host = val;
+                out->has_hermes_remote_host = true;
+            }
+            else if (key == "hport2") {
+                out->hermes_remote_port = val;
+                out->has_hermes_remote_port = true;
+            }
+            else if (key == "hrem") {
+                out->hermes_remote_on = (val == "1" || val == "true");
+                out->has_hermes_remote_on = true;
+            }
         }
         if (amp == query.size()) break;
         pos = amp + 1;
     }
+    return true;
+}
+
+bool parse_tcp_port(const char* s, int* out) {
+    if (!s || !out || !*s) return false;
+    long v = 0;
+    for (const char* p = s; *p; ++p) {
+        if (*p < '0' || *p > '9') return false;
+        v = v * 10 + (*p - '0');
+        if (v > 65535) return false;
+    }
+    if (v < 1) return false;
+    *out = static_cast<int>(v);
     return true;
 }
 

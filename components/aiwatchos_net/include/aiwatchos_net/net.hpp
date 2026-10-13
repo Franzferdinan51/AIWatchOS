@@ -41,6 +41,22 @@ struct NetConfig {
     std::string tts_voice;      // voice id ("" = provider default)
     bool tts_speak = false;     // the OS Settings "Speak replies" toggle
 
+    // Hermes hub away-from-home endpoint: the hub host's Tailscale
+    // Funnel (wss). The primary home-LAN endpoint stays in the Hermes
+    // app's own Kconfig (HERMES_HOST/HERMES_PORT); the remote endpoint
+    // is provisioning-shaped like the TTS fields above because the
+    // funnel name is deployment data, not app behavior. The Hermes
+    // link layer reads these through net_config() on every reconnect
+    // attempt, so provisioning takes effect without a reflash.
+    std::string hermes_remote_host;    // funnel host ("" = no remote)
+    int hermes_remote_port = 443;
+    bool hermes_remote_enabled = true;
+
+    // True when the remote Hermes endpoint may be attempted.
+    bool hermes_remote_configured() const {
+        return hermes_remote_enabled && !hermes_remote_host.empty();
+    }
+
     // True when speech could work if enabled: endpoint + key present.
     bool tts_provisioned() const {
         return !tts_url.empty() && !tts_key.empty();

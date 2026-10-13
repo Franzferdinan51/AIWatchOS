@@ -93,4 +93,34 @@ config AIWATCHOS_NET_TTS_SPEAK
         companion's cloud TTS is opt-in too). The runtime toggle,
         persisted to NVS ("ttsspeak"), wins once touched.
 
+config AIWATCHOS_NET_HERMES_REMOTE_HOST
+    string "Hermes hub remote host (Tailscale Funnel)"
+    default "your-mac.your-tailnet.ts.net"
+    help
+        Away-from-home endpoint for the Hermes gadget hub: the hub
+        host's Tailscale Funnel name. The watch connects to
+        wss://<host>:<port>/gadget when the home-LAN endpoint
+        (apps/hermes HERMES_HOST/HERMES_PORT) fails repeatedly.
+        An NVS value (namespace "aiwnet", key "hhost2") or the
+        setup string overrides this at runtime; empty disables
+        the remote endpoint.
+
+config AIWATCHOS_NET_HERMES_REMOTE_PORT
+    int "Hermes hub remote port"
+    default 443
+    range 1 65535
+    help
+        Port of the remote (Funnel) endpoint. NVS key "hport2"
+        or the setup string overrides at runtime.
+
+config AIWATCHOS_NET_HERMES_REMOTE
+    bool "Hermes remote endpoint enabled"
+    default y
+    help
+        Master switch for the away-from-home Hermes endpoint.
+        The persisted NVS value ("hrem") or the setup string
+        wins once provisioned. A funnel name with nothing behind
+        it just fails to connect, so leaving this on is harmless
+        at home: LAN stays primary and is retried every cycle.
+
 endmenu

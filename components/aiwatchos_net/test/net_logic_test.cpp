@@ -222,6 +222,41 @@ int main() {
         CHECK(!g.has_tts_key);   // untouched fields stay unset
     }
 
+    // --- setup string: Hermes remote (away-from-home) fields -------------
+    {
+        SetupFields f;
+        CHECK(parse_setup_string(
+            "aiwatchos://setup?hhost2=your-mac.your-tailnet.ts.net"
+            "&hport2=443&hrem=1", &f));
+        CHECK(f.has_hermes_remote_host &&
+              f.hermes_remote_host == "your-mac.your-tailnet.ts.net");
+        CHECK(f.has_hermes_remote_port && f.hermes_remote_port == "443");
+        CHECK(f.has_hermes_remote_on && f.hermes_remote_on);
+        int port = 0;
+        CHECK(parse_tcp_port(f.hermes_remote_port.c_str(), &port) && port == 443);
+        SetupFields g;
+        CHECK(parse_setup_string("aiwatchos://setup?hrem=0", &g));
+        CHECK(g.has_hermes_remote_on && !g.hermes_remote_on);
+        CHECK(!g.has_hermes_remote_host && !g.has_hermes_remote_port);
+    }
+
+    // --- parse_tcp_port: strict decimal, 1..65535 --------------------------
+    {
+        int v = 0;
+        CHECK(parse_tcp_port("1", &v) && v == 1);
+        CHECK(parse_tcp_port("443", &v) && v == 443);
+        CHECK(parse_tcp_port("8765", &v) && v == 8765);
+        CHECK(parse_tcp_port("65535", &v) && v == 65535);
+        CHECK(!parse_tcp_port("0", &v));
+        CHECK(!parse_tcp_port("65536", &v));
+        CHECK(!parse_tcp_port("", &v));
+        CHECK(!parse_tcp_port("44a", &v));
+        CHECK(!parse_tcp_port("-1", &v));
+        CHECK(!parse_tcp_port(" 443", &v));
+        CHECK(!parse_tcp_port(nullptr, &v));
+        CHECK(!parse_tcp_port("443", nullptr));
+    }
+
     // --- TTS chunking (companion _chunkText, cap 1800 default) -----------
     {
         CHECK(tts_chunks("").empty());
