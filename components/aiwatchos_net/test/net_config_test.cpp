@@ -108,16 +108,22 @@ int main() {
     cfg.tts_model = "model-x";
     cfg.tts_voice = "voice-y";
     cfg.tts_speak = true;
+    cfg.hermes_remote_host = "your-mac.your-tailnet.ts.net";
+    cfg.hermes_remote_port = 8443;
+    cfg.hermes_remote_enabled = true;
 
     // The save itself is the regression: pre-fix it never returned.
     CHECK(net_save_config(cfg));
-    CHECK(g_set_str_calls == 11);   // 11 string keys, exactly once each
-    CHECK(g_set_u8_calls == 1);     // ttsspeak
+    CHECK(g_set_str_calls == 13);   // 13 string keys, exactly once each (11 + hhost2 + hport2)
+    CHECK(g_set_u8_calls == 2);     // ttsspeak + hrem
     CHECK(g_commit_calls == 1);
     CHECK(g_strs["ssid"] == "HomeWiFi");
     CHECK(g_strs["token"] == "tok-placeholder");
     CHECK(g_strs["ttskey"] == "key-placeholder");
     CHECK(g_u8s["ttsspeak"] == 1);
+    CHECK(g_strs["hhost2"] == "your-mac.your-tailnet.ts.net");
+    CHECK(g_strs["hport2"] == "8443");
+    CHECK(g_u8s["hrem"] == 1);
     CHECK(net_config().hatch_token == "tok-placeholder");
 
     // Empty string -> the helper's erase branch (also ::-qualified).
@@ -125,7 +131,7 @@ int main() {
     g_set_str_calls = 0;
     g_erase_calls = 0;
     CHECK(net_save_config(cfg));
-    CHECK(g_set_str_calls == 10);
+    CHECK(g_set_str_calls == 12);
     CHECK(g_erase_calls == 1);
     CHECK(g_strs.count("pass") == 0);
 
