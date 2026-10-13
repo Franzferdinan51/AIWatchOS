@@ -15,6 +15,8 @@ set(COMPONENT_SRCS
     src/weather_app.cpp
     src/weather_data.cpp
     src/color_test.cpp
+    src/touch_synth.cpp
+    src/band_flush.cpp
 )
 
 set(COMPONENT_ADD_INCLUDEDIRS include)

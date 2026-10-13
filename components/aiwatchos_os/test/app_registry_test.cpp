@@ -25,6 +25,8 @@
 #include "aiwatchos/battery_display.hpp"   // for status-bar time rendering verification
 #include "aiwatchos/notifications.hpp"   // for notification wrap verification
 #include "aiwatchos/color_test.hpp"      // for colour-test pattern verification
+#include "aiwatchos/touch_synth.hpp"     // for Press/Move/Release synthesis verification
+#include "aiwatchos/band_flush.hpp"      // for dirty-band flush verification
 #include "aiwatchos_hermes.hpp"   // for device-health dashboard verification
 #include "aiwatchos_muse.hpp"   // for push-to-talk turn buffering verification
 #include "muse_adpcm.h"         // for IMA-ADPCM round-trip verification
@@ -1610,7 +1612,60 @@ static void test_color_test_pattern() {
     printf("test_color_test_pattern: PASSED\n");
 }
 
+// --- Test touch synthesis (audit X6: Press/Move/Release from points) ------
+static void test_touch_synth() {
+    using namespace aiwatchos;
+    TouchSynth synth;
+    TouchEvent ev[TouchSynth::kMaxEvents];
+    int xs[2] = {0, 0}, ys[2] = {0, 0};
+
+    assert(synth.update(0, xs, ys, ev) == 0);          // nothing down
+    xs[0] = 100; ys[0] = 200;
+    assert(synth.update(1, xs, ys, ev) == 1);          // finger down
+    assert(ev[0].type == TouchEvent::Press && ev[0].x == 100 && ev[0].y == 200);
+    xs[0] = 101;                                       // 1px jitter: no Move
+    assert(synth.update(1, xs, ys, ev) == 0);
+    xs[0] = 130;                                       // drag: Move
+    assert(synth.update(1, xs, ys, ev) == 1);
+    assert(ev[0].type == TouchEvent::Move && ev[0].x == 130 && ev[0].y == 200);
+    assert(synth.update(0, xs, ys, ev) == 1);          // lift: Release (PTT ends)
+    assert(ev[0].type == TouchEvent::Release && ev[0].x == 130 && ev[0].y == 200);
+
+    xs[0] = 10; ys[0] = 10; xs[1] = 300; ys[1] = 400;  // two fingers
+    assert(synth.update(2, xs, ys, ev) == 2);          // two Presses
+    assert(synth.update(1, xs, ys, ev) == 1);          // slot 1 lifts alone
+    assert(ev[0].type == TouchEvent::Release && ev[0].x == 300 && ev[0].y == 400);
+    synth.reset();                                     // no phantom Release
+    assert(synth.update(0, xs, ys, ev) == 0);
+    printf("test_touch_synth: PASSED\n");
+}
+
+// --- Test band flush change detection (plan 1.6) ---------------------------
+static void test_band_flush() {
+    using namespace aiwatchos;
+    static uint16_t buf[kDisplayWidth * kDisplayHeight];
+    for (int i = 0; i < kDisplayWidth * kDisplayHeight; ++i) buf[i] = 0;
+
+    BandFlush bf;
+    uint8_t m = bf.scan(buf, kDisplayWidth, kDisplayHeight);
+    assert(m == 0xF);                                  // first frame: all bands
+    bf.commit(m);
+    assert(bf.scan(buf, kDisplayWidth, kDisplayHeight) == 0);   // static frame
+    buf[300 * kDisplayWidth + 10] = 0xFFFF;            // one pixel in band 2
+    m = bf.scan(buf, kDisplayWidth, kDisplayHeight);
+    assert(m == (1 << 2));
+    bf.commit(m);
+    assert(bf.scan(buf, kDisplayWidth, kDisplayHeight) == 0);
+    bf.invalidate();                                   // wake: full flush
+    assert(bf.scan(buf, kDisplayWidth, kDisplayHeight) == 0xF);
+    assert(band_hash(buf, kDisplayWidth, 0, 100) ==
+           band_hash(buf, kDisplayWidth, 0, 100));     // deterministic
+    printf("test_band_flush: PASSED\n");
+}
+
 int main() {
+    test_touch_synth();                  // Press/Move/Release from the point stream
+    test_band_flush();                   // dirty-band hash change detection
     test_color_test_pattern();           // pure bands + accents for the byte-order check
     test_gloss_color_math();             // Muse Gloss token/blend/gradient math
     test_gloss_primitives();             // rounded rect / circle / ring / arc / bubble

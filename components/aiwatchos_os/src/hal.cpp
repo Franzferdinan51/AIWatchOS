@@ -107,13 +107,19 @@ extern "C" bool board_display_flush(uint16_t* fb, uint16_t y0, uint16_t y1);
 void Board::set_framebuffer(uint16_t* fb) { g_framebuffer_ptr = fb; }
 uint16_t* Board::framebuffer() const { return g_framebuffer_ptr; }
 
-bool Board::display_flush() {
+bool Board::display_flush() { return display_flush_rows(0, kDisplayHeight); }
+
+// Row-range flush (plan 1.6): the shell hashes the frame in bands and
+// flushes only changed bands through here, instead of paying the full
+// ~80 ms wire time of a 502-row flush every frame. The byte swap to the
+// panel's big-endian wire format happens inside board_display_flush.
+bool Board::display_flush_rows(int y0, int y1) {
     if (!g_framebuffer_ptr) return false;   // no framebuffer — nothing to flush (honest failure, not a stub)
-    // Delegate to the real display driver's flush implementation. This validates that:
-    // 1. The framebuffer pointer is valid and within bounds
-    // 2. The dirty region [0, kDisplayHeight) can be addressed without errors
-    // In production this DMA-copies rows through a bounce buffer to the CO5300 QSPI panel.
-    return board_display_flush(g_framebuffer_ptr, 0, kDisplayHeight);
+    if (y0 < 0) y0 = 0;
+    if (y1 > kDisplayHeight) y1 = kDisplayHeight;
+    if (y0 >= y1) return false;
+    return board_display_flush(g_framebuffer_ptr, static_cast<uint16_t>(y0),
+                               static_cast<uint16_t>(y1));
 }
 
 // --- Display sleep (CO5300 SLPIN/SLPOUT) — implemented in display_driver.cpp ---
@@ -127,6 +133,7 @@ void Board::display_sleep(bool sleep) { display_sleep_impl(sleep); }
 bool Board::display_asleep() const { return display_is_asleep(); }
 
 void Board::set_backlight(uint8_t percent) {
+    backlight_percent_ = percent;   // cached for the shell's switch-dip
 #ifdef __ESPRESSIF_IDF__
     extern void co5300_set_brightness(uint8_t);
     co5300_set_brightness(percent);   // CO5300 register 0x51, QSPI-framed

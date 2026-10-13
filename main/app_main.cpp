@@ -3,6 +3,8 @@
 // launcher, muse voice, hermes agent), and starts the AppManager event loop.
 #include "aiwatchos/app.hpp"
 #include "aiwatchos/app_manager.hpp"
+#include "aiwatchos/band_flush.hpp"
+#include "aiwatchos/touch_synth.hpp"
 #include "aiwatchos/clock_face.hpp"
 #include "aiwatchos/launcher_ui.hpp"
 #include "aiwatchos/battery_display.hpp"
@@ -16,6 +18,7 @@
 #include "aiwatchos_muse.hpp"
 #include "aiwatchos_hermes.hpp"
 #include <cstdio>
+#include <cstring>
 
 #ifdef __ESPRESSIF_IDF__
 #include "aiwatchos_net/net.hpp"
@@ -125,6 +128,15 @@ extern "C" void app_main(void) {
 #endif
     static aiwatchos::DisplayPower g_power(kDisplaySleepTimeoutMs);
 
+    // Touch event synthesis (Press/Move/Release from the FT3168 point
+    // stream) and band-based dirty flushing (plan 1.6/1.7).
+    static aiwatchos::TouchSynth g_touch_synth;
+    static aiwatchos::BandFlush g_band_flush;
+    // App-switch brightness dip state (plan 3.0 transition).
+    const char* last_app_id = nullptr;
+    int dip_step = -1;
+    uint8_t dip_saved = 100;
+
     while (true) {
         // Sample this frame's inputs first: the power policy needs the touch
         // points and button state before anything is dispatched or rendered.
@@ -140,9 +152,19 @@ extern "C" void app_main(void) {
             g_power.update(frame_now_ms, n_points, buttons);
         if (power_action == aiwatchos::DisplayPower::Action::kWake) {
             board.display_sleep(false);
+            g_band_flush.invalidate();   // first awake frame flushes fully
+            g_touch_synth.reset();       // no phantom events across the wake
         } else if (power_action == aiwatchos::DisplayPower::Action::kEnterSleep) {
             board.display_sleep(true);
+            g_touch_synth.reset();
         }
+
+        // Synthesize Press/Move/Release from the raw point stream (audit
+        // X6). Runs before the asleep check so a finger held through
+        // sleep/wake stays consistent; dispatch is gated below.
+        aiwatchos::TouchEvent synth_events[aiwatchos::TouchSynth::kMaxEvents];
+        const int n_events = g_touch_synth.update(n_points, touch_xs, touch_ys,
+                                                  synth_events);
 
         if (g_power.asleep()) {
             // Panel asleep: input was still sampled above (that polling is
@@ -162,23 +184,45 @@ extern "C" void app_main(void) {
         // the rest of it, until all fingers lift) so it cannot also fire the
         // UI element sitting under the waking finger.
         if (!g_power.swallow_touch()) {
-            for (int i = 0; i < n_points; ++i) {
-                aiwatchos::TouchEvent te{
-                    touch_xs[i], touch_ys[i],
-                    aiwatchos::TouchEvent::Press   // FT3168 reports press state via IRQ
-                };
-                // Dispatch to the foreground app first. If it doesn't handle the touch
-                // (e.g., clock_touch returns false), fall back to edge-swipe navigation so
-                // the user can always switch apps from any screen — this makes criterion 6
-                // (touch-driven launcher UI) reachable at runtime regardless of which app is active.
-                if (!g_app_mgr.on_touch(te)) {
-                    g_launcher.on_touch(te);   // edge-swipe: left/right 30px triggers switch_prev/next
+            for (int i = 0; i < n_events; ++i) {
+                const aiwatchos::TouchEvent& te = synth_events[i];
+                // Foreground app first. While the launcher is foreground
+                // it receives the events itself (tiles + its own swipes).
+                if (g_app_mgr.on_touch(te)) continue;
+                // Fallback (plan 3.0): an unconsumed Press in the bottom
+                // 30 px strip — below every app's controls — returns
+                // home. This replaces the old left/right edge-swipe
+                // fallback (7.5%-of-width edge targets on a 410 px screen
+                // fired accidentally mid-gesture); the bottom strip is
+                // one large thumb target instead.
+                if (te.type == aiwatchos::TouchEvent::Press &&
+                    te.y >= aiwatchos::kDisplayHeight - 30) {
+                    g_app_mgr.switch_to("launcher");
                 }
             }
         }
 
         // Tick the foreground app (updates AI conversation state, voice pipeline).
         g_app_mgr.tick(kFrameMs);
+
+        // App-switch dip (plan 3.0): when the foreground app changes,
+        // brightness dips toward black and back over ~6 frames, so the
+        // user never sees a full-brightness cut between two screens.
+        {
+            const char* current_id = g_app_mgr.current_app_id();
+            if (dip_step < 0 && last_app_id && current_id &&
+                std::strcmp(last_app_id, current_id) != 0) {
+                dip_saved = board.backlight_percent();
+                dip_step = 0;
+            }
+            if (current_id) last_app_id = current_id;
+            if (dip_step >= 0) {
+                static const uint8_t kDipPct[6] = {45, 15, 0, 15, 45, 100};
+                board.set_backlight(static_cast<uint8_t>(
+                    dip_saved * kDipPct[dip_step] / 100));
+                if (++dip_step >= 6) dip_step = -1;
+            }
+        }
 
         // Render: clear framebuffer, draw status bar + clock face/app content.
         fb.fill(0x0000);   // black background for AMOLED power saving
@@ -217,8 +261,23 @@ extern "C" void app_main(void) {
         // App renders its content below the status bar.
         g_app_mgr.render(fb);
 
-        // Flush the framebuffer to the CO5300 AMOLED panel via DMA.
-        board.display_flush();
+        // Flush only the changed bands to the CO5300 (plan 1.6): hash
+        // the frame in 4 horizontal bands and flush the dirty ones via
+        // the HAL row-range flush. A static screen costs zero QSPI
+        // traffic; changed bands commit their hashes only on success.
+        {
+            const uint8_t dirty = g_band_flush.scan(fb.pixels, fb.width, fb.height);
+            uint8_t flushed = 0;
+            for (int b = 0; b < aiwatchos::BandFlush::kBands; ++b) {
+                if (!(dirty & (1u << b))) continue;
+                int y0, y1;
+                aiwatchos::BandFlush::band_range(b, fb.height, y0, y1);
+                if (board.display_flush_rows(y0, y1)) {
+                    flushed |= static_cast<uint8_t>(1u << b);
+                }
+            }
+            g_band_flush.commit(flushed);
+        }
 
         // Delay for one frame (~40 ms). Without this yield the loop would
         // starve the IDLE task and trip the task watchdog.

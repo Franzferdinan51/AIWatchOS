@@ -93,6 +93,12 @@ class Board : public Hal {
     void begin();
 
     bool display_flush() override;   // flushes framebuffer to CO5300 panel via DMA bounce buffer
+    // Flush only rows [y0, y1) (plan 1.6 band flushing); display_flush()
+    // is exactly display_flush_rows(0, kDisplayHeight).
+    bool display_flush_rows(int y0, int y1);
+    // Last backlight percentage requested via set_backlight() (100 until
+    // first set) — the shell's switch-dip animation reads it from here.
+    uint8_t backlight_percent() const { return backlight_percent_; }
     void set_framebuffer(uint16_t* fb);  // sets the RGB565 framebuffer pointer (called by app_main)
     uint16_t* framebuffer() const;        // returns the current framebuffer pointer
     void set_backlight(uint8_t percent) override;
@@ -112,6 +118,8 @@ class Board : public Hal {
 
  private:
     Board();
+
+    uint8_t backlight_percent_ = 100;
 };
 
 // Global accessor for the board singleton.
