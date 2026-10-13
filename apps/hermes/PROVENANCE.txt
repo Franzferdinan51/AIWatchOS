@@ -1,0 +1,20 @@
+Provenance for third-party code in this component
+==================================================
+
+src/cJSON.c, src/cJSON.h
+------------------------
+cJSON 1.7 (Dave Gamble and contributors), MIT license — see CJSON-LICENSE
+in this directory. Copied verbatim from the ESP-IDF v5.3.6 tree on the
+build machine (components/json/cJSON) so the protocol core parses frames
+identically on device and in host tests. On device, its allocator hooks
+are pointed at PSRAM by hermes_link.cpp (cJSON_InitHooks) so frame parsing
+never consumes internal SRAM.
+
+Protocol implementation
+-----------------------
+hermes_proto.cpp / hermes_crypto.cpp are an original implementation of
+the Hermes Gadget Protocol v1 as specified in the HermesGadget project's
+docs/protocol.md (same author ecosystem, Apache-2.0). Identity and auth
+values are pinned to that project's published test vectors
+(tests/test_protocol.py in HermesGadget, mirrored in firmware/tests),
+which the AIWatchOS host tests reuse.
