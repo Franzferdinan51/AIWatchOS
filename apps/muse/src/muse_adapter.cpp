@@ -73,16 +73,6 @@ static aiwatchos::MuseState muse_face_state(const char** word_out) {
         *word_out = "LISTENING";
         return aiwatchos::MuseState::kListening;
     }
-#ifdef __ESPRESSIF_IDF__
-    // Spoken replies: REAL playback outranks the bookkeeping states.
-    // While a fetched clip plays, the outbox still shows the draining
-    // turn (the drain is inside its send call), and any agent-status
-    // speaking pose below is an inference this signal supersedes.
-    if (aiwatchos_net::muse_link_speaking()) {
-        *word_out = "SPEAKING";
-        return aiwatchos::MuseState::kSpeaking;
-    }
-#endif
     if (muse_outbox_depth() > 0 || g_state.turn_bytes > 0) {
         *word_out = "THINKING";
         return aiwatchos::MuseState::kThinking;
@@ -301,15 +291,6 @@ void muse_init() {
                     return aiwatchos_net::muse_link_upload_turn(data, len);
                 },
                 nullptr);
-        },
-        nullptr);
-    // Spoken replies: when a TTS provider is configured, the link
-    // fetches each reply's MP3 and hands it to this sink. Playback via
-    // muse_play_reply blocks until the clip ends, which is what paces
-    // the SPEAKING face state (muse_link_speaking()).
-    aiwatchos_net::muse_link_set_speech_sink(
-        [](const uint8_t* mp3, size_t len, void*) {
-            return muse_play_reply(mp3, len) > 0;
         },
         nullptr);
 #endif

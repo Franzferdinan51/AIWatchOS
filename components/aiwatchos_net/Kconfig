@@ -55,38 +55,4 @@ config AIWATCHOS_NET_SNTP_SERVER
     string "SNTP server"
     default "pool.ntp.org"
 
-config AIWATCHOS_NET_TTS_BASE_URL
-    string "TTS base URL (spoken replies; full API prefix)"
-    default "https://openrouter.ai/api"
-    help
-        Base prefix of an OpenAI-shaped speech API; spoken replies
-        POST {base}/v1/audio/speech. The default is OpenRouter's API
-        base; any compatible provider fits by changing this one
-        string. An NVS value (namespace "aiwnet", key "ttsurl")
-        overrides it at runtime.
-
-config AIWATCHOS_NET_TTS_API_KEY
-    string "TTS API key (empty: spoken replies OFF)"
-    default ""
-    help
-        Bearer <redacted> for the speech endpoint. EMPTY (the default)
-        disables spoken replies entirely: replies stay text and no
-        speech request is ever made. An NVS value (namespace
-        "aiwnet", key "ttskey") overrides it at runtime.
-
-config AIWATCHOS_NET_TTS_MODEL
-    string "TTS model id"
-    default "openai/gpt-4o-mini-tts"
-    help
-        Model field of the speech request (an OpenRouter-style id by
-        default; plain provider ids work with other bases). An NVS
-        value (namespace "aiwnet", key "ttsmodel") overrides it.
-
-config AIWATCHOS_NET_TTS_VOICE
-    string "TTS voice id"
-    default "alloy"
-    help
-        Voice field of the speech request. An NVS value (namespace
-        "aiwnet", key "ttsvoice") overrides it at runtime.
-
 endmenu

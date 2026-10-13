@@ -10,7 +10,6 @@ idf_component_register(
         "src/net_manager.cpp"
         "src/muse_account.cpp"
         "src/muse_link.cpp"
-        "src/muse_tts.cpp"
     INCLUDE_DIRS "include"
     # aiwatchos_os: Board time seam (board_set_epoch_ms) for SNTP.
     # noise_core: ClientSession / PsaCryptoBackend (Noise XX transport).
