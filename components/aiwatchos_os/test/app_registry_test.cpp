@@ -9,6 +9,8 @@
 //     components/aiwatchos_os/test/app_registry_test.cpp \
 //     components/aiwatchos_os/src/*.cpp apps/muse/src/muse_adapter.cpp \
 //     apps/muse/src/muse_adpcm.c apps/hermes/src/hermes_adapter.cpp \
+//     apps/hermes/src/hermes_proto.cpp apps/hermes/src/hermes_crypto.cpp \
+//     apps/hermes/src/hermes_link.cpp apps/hermes/src/cJSON.c \
 //     components/noise_core/src/PsaCryptoBackend.cpp \
 //     components/noise_core/src/Status.cpp components/minimp3/src/minimp3.c \
 //     -L $MBEDTLS/lib -ltfpsacrypto -o /tmp/aiwatchos_test && /tmp/aiwatchos_test
@@ -1120,6 +1122,358 @@ static void test_rtc_seam() {
     aiwatchos::board_set_epoch_ms(base_before);   // restore for other tests
     aiwatchos::rtc_test_set_present(false);
     printf("test_rtc_seam: PASSED\n");
+// --- Hermes Gadget Protocol v1: published identity/auth vectors ------------
+// The same vectors pin the HermesGadget server (tests/test_protocol.py) and
+// firmware suites, so the two implementations cannot drift apart silently.
+static void test_hermes_proto_vectors() {
+    using namespace aiwatchos_hermes;
+    uint8_t key[32];
+    for (int i = 0; i < 32; ++i) key[i] = static_cast<uint8_t>(i);
+
+    assert(hermes_device_id_for_key(key) == "hg-630dcd2966c43366");
+    assert(hermes_auth_mac_b64(key, "hg-630dcd2966c43366", "bm9uY2Utbm9uY2Utbm9uY2U=") ==
+           "AMUEF53Phk8+1vHw7R8PgiDwlPd8rXUx+cgyYv1YJX0=");
+    const char* empty_sha = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+    char hex[65];
+    hermes_sha256_hex(reinterpret_cast<const uint8_t*>(""), 0, hex);
+    assert(std::string(hex) == empty_sha);
+    assert(hermes_ota_mac_b64(key, "hg-630dcd2966c43366", "AAECAwQFBgcICQoLDA0ODw==",
+                              empty_sha, 1234) ==
+           "ieymn+y1CMEJ5uX8yGz8VrXxT2KKjSOnzJC5qagTTwk=");
+
+    // Base64: exact encoding of the vector key, round trip, rejection.
+    std::string enc = hermes_base64_encode(key, 32);
+    assert(enc == "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=");
+    uint8_t buf[64];
+    size_t n = 0;
+    assert(hermes_base64_decode(enc.c_str(), buf, sizeof(buf), &n));
+    assert(n == 32 && memcmp(buf, key, 32) == 0);
+    assert(!hermes_base64_decode("not base64!", buf, sizeof(buf), &n));
+
+    // Binary frame header: pack/parse round trip, unknown channel and
+    // truncated frames rejected (mirrors the Python suite).
+    uint8_t frame[6] = {};
+    assert(hermes_binary_header_pack(frame, kHermesChannelAudio, 7, 0x1234) == 4);
+    frame[4] = 0xAA;
+    frame[5] = 0xBB;
+    uint8_t ch = 0, st = 0;
+    uint16_t sq = 0;
+    const uint8_t* pl = nullptr;
+    size_t plen = 0;
+    assert(hermes_binary_parse(frame, 6, &ch, &st, &sq, &pl, &plen));
+    assert(ch == 1 && st == 7 && sq == 0x1234 && plen == 2 && pl[0] == 0xAA && pl[1] == 0xBB);
+    uint8_t bad[4] = {0x09, 0, 0, 0};
+    assert(!hermes_binary_parse(bad, 4, &ch, &st, &sq, &pl, &plen));
+    assert(!hermes_binary_parse(frame, 3, &ch, &st, &sq, &pl, &plen));
+
+    printf("test_hermes_proto_vectors: PASSED\n");
+}
+
+// Helper: a Hermes app bound to a fresh TestHal with the vector key, already
+// welcomed + paired. Leaves the outbound capture empty.
+static void hermes_linked(aiwatchos::TestHal& hal) {
+    using namespace aiwatchos_hermes;
+    aiwatchos::App app = make_hermes_app(hal);
+    app.init();
+    uint8_t key[32];
+    for (int i = 0; i < 32; ++i) key[i] = static_cast<uint8_t>(i);
+    hermes_test_reset(key);
+    hermes_test_transport_up();
+    hermes_test_inject_text("{\"type\":\"challenge\",\"nonce\":\"bm9uY2Utbm9uY2Utbm9uY2U=\",\"enrolled\":false}");
+    hermes_test_inject_text("{\"type\":\"welcome\",\"session\":\"s1\",\"paired\":true,\"heartbeat_s\":20}");
+    assert(hermes_link_state() == HermesLinkState::Linked);
+    hermes_test_clear_outbound();
+}
+
+static bool outbound_has(const char* needle) {
+    using namespace aiwatchos_hermes;
+    for (size_t i = 0; i < hermes_test_outbound_count(); ++i) {
+        if (!hermes_test_outbound_is_binary(i) &&
+            hermes_test_outbound_text(i).find(needle) != std::string::npos) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// --- Hermes handshake: hello -> TOFU auth -> welcome -> pairing -> paired --
+static void test_hermes_handshake() {
+    using namespace aiwatchos_hermes;
+    aiwatchos::TestHal hal;
+    aiwatchos::App app = make_hermes_app(hal);
+    app.init();
+    uint8_t key[32];
+    for (int i = 0; i < 32; ++i) key[i] = static_cast<uint8_t>(i);
+    hermes_test_reset(key);
+    assert(hermes_link_state() == HermesLinkState::Offline);
+
+    hermes_test_transport_up();
+    assert(hermes_test_outbound_count() == 1);
+    std::string hello = hermes_test_outbound_text(0);
+    assert(hello.find("\"type\":\"hello\"") != std::string::npos);
+    assert(hello.find("\"device_id\":\"hg-630dcd2966c43366\"") != std::string::npos);
+    assert(hello.find("\"max_size\":2031616") != std::string::npos);
+    assert(hermes_link_state() == HermesLinkState::Connecting);
+
+    // First contact: the server is not enrolled, so auth carries the key.
+    hermes_test_clear_outbound();
+    hermes_test_inject_text("{\"type\":\"challenge\",\"nonce\":\"bm9uY2Utbm9uY2Utbm9uY2U=\",\"enrolled\":false}");
+    assert(hermes_test_outbound_count() == 1);
+    assert(hermes_test_outbound_text(0).find(
+               "\"key\":\"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=\"") != std::string::npos);
+
+    // Unpaired welcome -> pairing code screen -> approval flips to Linked.
+    hermes_test_inject_text("{\"type\":\"welcome\",\"session\":\"s1\",\"paired\":false,\"heartbeat_s\":20}");
+    assert(hermes_link_state() == HermesLinkState::Pairing);
+    assert(hermes_health_line().find("LINK PAIRING") != std::string::npos);
+    hermes_test_inject_text(
+        "{\"type\":\"pairing\",\"code\":\"ABCD2345\",\"command\":\"hermes pairing approve gadget ABCD2345\"}");
+    assert(std::string(hermes_pairing_code()) == "ABCD2345");
+    assert(std::string(hermes_pairing_command()).find("ABCD2345") != std::string::npos);
+    hermes_test_inject_text("{\"type\":\"paired\"}");
+    assert(hermes_paired());
+    assert(hermes_link_state() == HermesLinkState::Linked);
+    assert(hermes_pairing_code()[0] == '\0');
+    assert(hermes_health_line().find("LINK ONLINE") != std::string::npos);
+
+    // Server ping is answered with a pong echoing its ts.
+    hermes_test_clear_outbound();
+    hermes_test_inject_text("{\"type\":\"ping\",\"ts\":123456}");
+    assert(outbound_has("\"type\":\"pong\""));
+    assert(outbound_has("123456"));
+
+    printf("test_hermes_handshake: PASSED\n");
+}
+
+// --- Hermes conversation: turns, prompts, actions, cards, spoken replies ---
+static void test_hermes_conversation() {
+    using namespace aiwatchos_hermes;
+    aiwatchos::TestHal hal;
+    hermes_linked(hal);
+    aiwatchos::App app = make_hermes_app(hal);
+
+    // Typed chat goes out as a protocol text frame.
+    assert(hermes_send_text("hello hermes"));
+    assert(outbound_has("\"type\":\"text\""));
+    assert(outbound_has("\"text\":\"hello hermes\""));
+    hermes_test_clear_outbound();
+
+    // Turn lifecycle drives the view.
+    hermes_test_inject_text("{\"type\":\"turn.start\",\"turn\":\"t1\"}");
+    assert(hermes_view().busy);
+    hermes_test_inject_text("{\"type\":\"status\",\"text\":\"Searching the web\"}");
+    assert(std::string(hermes_view().status) == "Searching the web");
+    hermes_test_inject_text("{\"type\":\"transcript\",\"text\":\"what time is it\"}");
+    assert(std::string(hermes_view().transcript) == "what time is it");
+    hermes_test_inject_text("{\"type\":\"reply.delta\",\"turn\":\"t1\",\"text\":\"It is\"}");
+    hermes_test_inject_text("{\"type\":\"reply.delta\",\"turn\":\"t1\",\"text\":\"It is noon\"}");
+    assert(std::string(hermes_view().reply) == "It is noon");   // cumulative
+    hermes_test_inject_text("{\"type\":\"reply\",\"turn\":\"t1\",\"text\":\"It is noon.\"}");
+    assert(std::string(hermes_view().reply) == "It is noon.");
+    hermes_test_inject_text("{\"type\":\"turn.end\",\"turn\":\"t1\",\"outcome\":\"success\"}");
+    assert(!hermes_view().busy);
+    assert(hermes_view().status[0] == '\0');
+
+    // Render smoke: header band survives the conversation screen.
+    static uint16_t buf[aiwatchos::kDisplayWidth * aiwatchos::kDisplayHeight];
+    aiwatchos::Framebuffer fb{buf, aiwatchos::kDisplayWidth, aiwatchos::kDisplayHeight};
+    app.render(fb);
+    assert(buf[10 * aiwatchos::kDisplayWidth + 10] == 0x294A);
+
+    // A prompt is answered exactly once.
+    hermes_test_inject_text("{\"type\":\"prompt\",\"id\":\"q1\",\"title\":\"Confirm\",\"text\":\"Do it?\",\"ttl_s\":300}");
+    assert(hermes_view().prompt_active);
+    assert(hermes_answer_prompt(true));
+    assert(outbound_has("\"type\":\"prompt.reply\""));
+    assert(outbound_has("\"answer\":\"yes\""));
+    assert(!hermes_view().prompt_active);
+    assert(!hermes_answer_prompt(true));   // no double answer
+    hermes_test_clear_outbound();
+
+    // Unknown actions still get exactly one (negative) result.
+    hermes_test_inject_text("{\"type\":\"action\",\"id\":\"x1\",\"name\":\"led.set\",\"args\":{\"color\":\"red\"}}");
+    assert(outbound_has("\"type\":\"action.result\""));
+    assert(outbound_has("\"id\":\"x1\""));
+    assert(outbound_has("\"ok\":false"));
+    hermes_test_clear_outbound();
+
+    // Display card shows, and a tap dismisses it.
+    hermes_test_inject_text("{\"type\":\"display\",\"title\":\"Timer\",\"body\":\"Pasta: 9 min\",\"ttl_s\":15}");
+    assert(hermes_view().card_active);
+    assert(std::string(hermes_view().card_title) == "Timer");
+    assert(std::string(hermes_view().card_body) == "Pasta: 9 min");
+    aiwatchos::TouchEvent tap{200, 200, aiwatchos::TouchEvent::Press};
+    assert(app.on_touch(tap));
+    assert(!hermes_view().card_active);
+
+    // Spoken reply: audio.start + channel-1 PCM lands in the HAL.
+    size_t played_before = hal.played().size();
+    hermes_test_inject_text("{\"type\":\"audio.start\",\"stream\":7,\"rate\":16000,\"format\":\"pcm16\"}");
+    int16_t samples[4] = {100, -200, 300, -400};
+    uint8_t frame[4 + sizeof(samples)];
+    hermes_binary_header_pack(frame, kHermesChannelAudio, 7, 0);
+    memcpy(frame + 4, samples, sizeof(samples));
+    hermes_test_inject_binary(frame, sizeof(frame));
+    assert(hal.played().size() == played_before + 4);
+    assert(hal.played()[played_before + 1] == -200);
+    hermes_test_inject_text("{\"type\":\"audio.end\",\"stream\":7}");
+
+    printf("test_hermes_conversation: PASSED\n");
+}
+
+// --- Hermes push-to-talk: SAY HELLO tap, hold-to-talk framing, too-short ---
+static void test_hermes_talk() {
+    using namespace aiwatchos_hermes;
+    aiwatchos::TestHal hal;
+    hermes_linked(hal);
+    aiwatchos::App app = make_hermes_app(hal);
+
+    // The SAY HELLO button sends a real chat text.
+    aiwatchos::TouchEvent hello_tap{200, 320, aiwatchos::TouchEvent::Press};
+    assert(app.on_touch(hello_tap));
+    assert(outbound_has("\"text\":\"Hello from my watch\""));
+    hermes_test_clear_outbound();
+
+    // Hold bottom = talk: audio.start, 40 ms binary frames, audio.end.
+    aiwatchos::TouchEvent press{205, 450, aiwatchos::TouchEvent::Press};
+    aiwatchos::TouchEvent release{205, 450, aiwatchos::TouchEvent::Release};
+    assert(app.on_touch(press));
+    assert(outbound_has("\"type\":\"audio.start\""));
+    hermes_test_clear_outbound();
+    std::vector<int16_t> one_second(16000, 500);
+    hermes_test_talk_feed(one_second.data(), one_second.size());
+    size_t frames = 0;
+    for (size_t i = 0; i < hermes_test_outbound_count(); ++i) {
+        if (hermes_test_outbound_is_binary(i)) ++frames;
+    }
+    assert(frames == 25);   // 16000 samples / 640 per frame
+    assert(app.on_touch(release));
+    assert(outbound_has("\"type\":\"audio.end\""));
+    assert(outbound_has("\"duration_ms\":1000"));
+    hermes_test_clear_outbound();
+
+    // A sub-250 ms utterance is cancelled, not sent.
+    assert(app.on_touch(press));
+    std::vector<int16_t> blip(1600, 500);   // 100 ms
+    hermes_test_talk_feed(blip.data(), blip.size());
+    hermes_test_clear_outbound();
+    assert(app.on_touch(release));
+    assert(outbound_has("\"type\":\"audio.cancel\""));
+
+    printf("test_hermes_talk: PASSED\n");
+}
+
+// --- Hermes OTA: offer/ready/begin/ack/end against the memory flash sink ---
+static void test_hermes_ota() {
+    using namespace aiwatchos_hermes;
+    aiwatchos::TestHal hal;
+    hermes_linked(hal);
+
+    uint8_t key[32];
+    for (int i = 0; i < 32; ++i) key[i] = static_cast<uint8_t>(i);
+
+    // Fake image: 20000 bytes of a deterministic pattern.
+    const size_t img_size = 20000;
+    std::vector<uint8_t> img(img_size);
+    for (size_t i = 0; i < img_size; ++i) img[i] = static_cast<uint8_t>(i * 7 + 1);
+    char sha[65];
+    hermes_sha256_hex(img.data(), img_size, sha);
+
+    char offer[256];
+    snprintf(offer, sizeof(offer),
+             "{\"type\":\"ota.offer\",\"stream\":3,\"size\":%zu,\"sha256\":\"%s\",\"version\":\"9.9.9\"}",
+             img_size, sha);
+    hermes_test_inject_text(offer);
+    assert(outbound_has("\"type\":\"ota.ready\""));
+    // Recover the nonce the client generated for this update.
+    std::string ready = hermes_test_outbound_text(hermes_test_outbound_count() - 1);
+    size_t np = ready.find("\"nonce\":\"");
+    assert(np != std::string::npos);
+    std::string nonce = ready.substr(np + 9, 24);
+    hermes_test_clear_outbound();
+
+    // The host authorizes the image with the vector-verified OTA MAC.
+    std::string mac = hermes_ota_mac_b64(key, "hg-630dcd2966c43366", nonce.c_str(), sha, img_size);
+    std::string begin = "{\"type\":\"ota.begin\",\"mac\":\"" + mac + "\"}";
+    hermes_test_inject_text(begin.c_str());
+    assert(outbound_has("\"type\":\"ota.ack\""));
+    assert(outbound_has("\"offset\":0"));
+    hermes_test_clear_outbound();
+
+    // Stream the image in 4 KB channel-3 frames.
+    uint16_t seq = 0;
+    for (size_t off = 0; off < img_size; off += 4096, ++seq) {
+        size_t chunk = img_size - off < 4096 ? img_size - off : 4096;
+        std::vector<uint8_t> frame(4 + chunk);
+        hermes_binary_header_pack(frame.data(), kHermesChannelFirmware, 3, seq);
+        memcpy(frame.data() + 4, img.data() + off, chunk);
+        hermes_test_inject_binary(frame.data(), frame.size());
+    }
+    assert(outbound_has("\"offset\":16384"));   // 16 KB ack cadence
+    hermes_test_inject_text("{\"type\":\"ota.end\"}");
+    assert(outbound_has("\"type\":\"ota.done\""));
+    assert(outbound_has("\"version\":\"9.9.9\""));
+    const uint8_t* written = nullptr;
+    assert(hermes_test_ota_captured(&written) == img_size);
+    assert(written && memcmp(written, img.data(), img_size) == 0);
+    hermes_test_clear_outbound();
+
+    // A wrong MAC is refused before a single byte is written.
+    hermes_test_inject_text(offer);
+    assert(outbound_has("\"type\":\"ota.ready\""));
+    hermes_test_clear_outbound();
+    hermes_test_inject_text("{\"type\":\"ota.begin\",\"mac\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\"}");
+    assert(outbound_has("\"type\":\"ota.error\""));
+    assert(outbound_has("\"code\":\"unauthorized\""));
+    hermes_test_clear_outbound();
+
+    // An oversized offer is refused outright.
+    snprintf(offer, sizeof(offer),
+             "{\"type\":\"ota.offer\",\"stream\":3,\"size\":3000000,\"sha256\":\"%s\",\"version\":\"9.9.9\"}",
+             sha);
+    hermes_test_inject_text(offer);
+    assert(outbound_has("\"code\":\"too_large\""));
+
+    printf("test_hermes_ota: PASSED\n");
+}
+
+// --- Hermes failure modes: auth lockout + heartbeat death -------------------
+static void test_hermes_auth_failure() {
+    using namespace aiwatchos_hermes;
+    aiwatchos::TestHal hal;
+    aiwatchos::App app = make_hermes_app(hal);
+    app.init();
+    uint8_t key[32];
+    for (int i = 0; i < 32; ++i) key[i] = static_cast<uint8_t>(i);
+    hermes_test_reset(key);
+
+    // Enrolled challenge answered with the published-vector MAC.
+    hermes_test_transport_up();
+    hermes_test_clear_outbound();
+    hermes_test_inject_text("{\"type\":\"challenge\",\"nonce\":\"bm9uY2Utbm9uY2Utbm9uY2U=\",\"enrolled\":true}");
+    assert(hermes_test_outbound_count() == 1);
+    assert(hermes_test_outbound_text(0).find(
+               "\"mac\":\"AMUEF53Phk8+1vHw7R8PgiDwlPd8rXUx+cgyYv1YJX0=\"") != std::string::npos);
+
+    // auth_failed sticks: no reconnect is wanted and the state survives a
+    // transport drop, so the owner can forget + re-enroll deliberately.
+    hermes_test_inject_text("{\"type\":\"error\",\"code\":\"auth_failed\",\"message\":\"bad key\"}");
+    assert(hermes_link_state() == HermesLinkState::AuthFailed);
+    hermes_test_transport_down();
+    assert(hermes_link_state() == HermesLinkState::AuthFailed);
+    assert(hermes_health_line().find("LINK AUTH FAIL") != std::string::npos);
+
+    // Heartbeat death: welcomed at t=0 with heartbeat_s=20, 61 s of silence
+    // (3+ missed intervals) drops the link back to Offline.
+    hermes_test_reset(key);
+    hermes_test_transport_up();
+    hermes_test_inject_text("{\"type\":\"welcome\",\"session\":\"s2\",\"paired\":true,\"heartbeat_s\":20}");
+    assert(hermes_link_state() == HermesLinkState::Linked);
+    hal.advance_ms(61000);
+    hermes_pump(hal.now_ms());
+    assert(hermes_link_state() == HermesLinkState::Offline);
+
+    printf("test_hermes_auth_failure: PASSED\n");
 }
 
 int main() {
@@ -1151,6 +1505,12 @@ int main() {
     test_rtc_epoch_civil();              // drives civil <-> epoch conversions on known vectors
     test_rtc_registers();                // drives PCF85063 register pack/unpack + OS flag
     test_rtc_seam();                     // drives the RTC board seam + board_set_epoch_ms
+    test_hermes_proto_vectors();         // Hermes identity/auth vectors (shared with the server suite)
+    test_hermes_handshake();             // Hermes hello/TOFU/pairing state machine
+    test_hermes_conversation();          // Hermes turns, prompts, actions, cards, spoken replies
+    test_hermes_talk();                  // Hermes push-to-talk framing + SAY HELLO
+    test_hermes_ota();                   // Hermes OTA offer/begin/stream/verify
+    test_hermes_auth_failure();          // Hermes auth lockout + heartbeat death
 
     printf("\nAll AppManager tests PASSED.\n");
     return 0;
