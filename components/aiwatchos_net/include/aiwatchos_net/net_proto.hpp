@@ -14,6 +14,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <vector>
 
 namespace aiwatchos_net {
 namespace proto {
@@ -82,17 +83,92 @@ bool agent_status_combine(const char* activity_code, const char* status,
 // The settings/BLE/serial setup flows all funnel into one string:
 //   aiwatchos://setup?ssid=<..>&pass=<..>&token=<..>&vmtoken=<..>
 //                     &vm=<..>&host=<..>&domain=<..>
+//                     &ttsurl=<..>&ttskey=<..>&ttsmodel=<..>&ttsvoice=<..>
 // Values are form-encoded (%XX, '+' = space). Every field is optional;
 // empty means "leave unchanged" when applied over existing config.
 struct SetupFields {
     std::string ssid, pass, token, vm_token, vm, host, domain;
+    std::string tts_base_url, tts_api_key, tts_model, tts_voice;
     bool has_ssid = false, has_pass = false, has_token = false,
          has_vm_token = false, has_vm = false, has_host = false,
          has_domain = false;
+    bool has_tts_base_url = false, has_tts_api_key = false,
+         has_tts_model = false, has_tts_voice = false;
 };
 
 // Parses a setup string. Returns false when the scheme/prefix is wrong.
 bool parse_setup_string(const char* text, SetupFields* out);
+
+// --- Spoken replies (TTS) ---------------------------------------------------
+// Replies are spoken by an external OpenAI-shaped speech endpoint
+// (POST {base}/v1/audio/speech -> MP3) — see docs/tts-investigation.md
+// for why no speech source exists behind the Hatch token. Everything
+// format-shaped about the port lives here so it is host-testable; the
+// HTTP fetch and playback live in muse_tts.cpp (device only). No
+// provider is baked in: base URL, model, voice and key all come from
+// config (see net.hpp NetConfig), and an empty key disables the feature.
+
+// Hard cap on one fetched MP3 — the reference gadget's MP3_BUF scale.
+// A response that grows past this aborts the fetch; the reply stays text.
+inline constexpr size_t kSpeechMp3CapBytes = 512 * 1024;
+// Per-request input cap (code points) and per-reply chunk budget:
+// longer replies speak their first chunks; the rest stays text-only
+// (the caption always shows the full reply).
+inline constexpr size_t kSpeechChunkChars = 1000;
+inline constexpr size_t kSpeechMaxChunks = 3;
+
+// The text that gets spoken: the companion caption cleaner's rules
+// (apps/muse/include/muse_captions.hpp, captions clean()) — fenced
+// code -> one space, markdown links -> their text, markdown chars
+// removed, whitespace collapsed, trimmed — WITHOUT the caption's
+// 240-char clip: speech wants the whole reply, chunked by
+// speech_chunks() instead. A deliberate mirror, kept here for the same
+// reason muse_link.cpp keeps a local ADPCM copy: the component graph
+// stays acyclic (apps/muse depends on this component, not vice versa).
+// The two implementations share test vectors.
+std::string speech_clean(const std::string& text);
+
+// Splits cleaned text into speakable chunks of at most max_chars code
+// points each, preferring sentence boundaries (. ! ? U+2026), then
+// word boundaries, then a hard code-point cut (never mid-codepoint).
+// At most max_chunks chunks are returned; any remainder is dropped.
+std::vector<std::string> speech_chunks(const std::string& cleaned,
+                                       size_t max_chars,
+                                       size_t max_chunks);
+
+// "{base}/v1/audio/speech" with any trailing '/' on base stripped.
+// "" when base is empty.
+std::string speech_url(const std::string& base_url);
+
+// The request body: {"model":..,"voice":..,"input":..,
+// "response_format":"mp3"} with JSON string escaping.
+std::string speech_body(const std::string& model, const std::string& voice,
+                        const std::string& input);
+
+// Pipeline state for one spoken reply, driven by muse_tts.cpp and
+// unit-tested here. begin(n) starts fetching chunk 1; fetch_ok() moves
+// to playing; play_done() loops back to fetching while chunks remain,
+// else finishes idle; any failure lands in kFailed, from which begin()
+// may start a fresh reply. Events that don't apply to the current
+// state are no-ops. speaking() is the face signal: true only while
+// audio is actually playing.
+enum class SpeechState : uint8_t { kIdle, kFetching, kPlaying, kFailed };
+struct SpeechMachine {
+    SpeechState state = SpeechState::kIdle;
+    size_t chunks_total = 0;
+    size_t chunks_done = 0;   // chunks fully played
+    void begin(size_t chunks);
+    void fetch_ok();
+    void fetch_failed();
+    void play_done();
+    void play_failed();
+    void reset();
+    bool speaking() const { return state == SpeechState::kPlaying; }
+    bool active() const {
+        return state == SpeechState::kFetching ||
+               state == SpeechState::kPlaying;
+    }
+};
 
 }  // namespace proto
 }  // namespace aiwatchos_net
