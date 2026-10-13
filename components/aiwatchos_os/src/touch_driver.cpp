@@ -282,7 +282,11 @@ esp_err_t ft3168_init(void) {
     // while slower devices on the same bus (AXP2101, ES8311) answered
     // fine (boot log 2026-10-13, reads at 16.5 s + 13.52 s cadence).
     tp_io_cfg.scl_speed_hz = 100000;
-    tp_io_cfg.transaction_timeout_ms = -1;
+    // Finite transaction timeout (was -1 = wait forever): a wedged
+    // shared-bus transaction must fail and be retried by the caller,
+    // never hang the input path. 50 ms matches the AXP2101/RTC reads
+    // on the same bus.
+    tp_io_cfg.transaction_timeout_ms = 50;
     ESP_RETURN_ON_ERROR(esp_lcd_new_panel_io_i2c(s_touch_bus, &tp_io_cfg, &s_touch_io),
                         kTouchTag, "touch IO");
 
@@ -303,10 +307,6 @@ esp_err_t ft3168_init(void) {
     tp_cfg.flags.mirror_y = 0;
     ESP_RETURN_ON_ERROR(esp_lcd_touch_new_i2c_ft5x06(s_touch_io, &tp_cfg, &s_touch),
                         kTouchTag, "FT3168 touch");
-    // STAGE-3 DIAGNOSTIC (temporary): verbose I2C master logging so the
-    // mechanism of the first failing transaction (NCK vs hw/sw timeout)
-    // is visible in the boot capture. Remove when the fix lands.
-    esp_log_level_set("i2c_master", ESP_LOG_DEBUG);
     return ESP_OK;
 }
 
