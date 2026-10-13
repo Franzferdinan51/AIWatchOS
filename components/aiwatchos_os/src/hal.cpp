@@ -3,6 +3,7 @@
 //   - muse-gadget-206 esp32/components/muse/boards/board_waveshare_s3_206.c
 //   - HermesGadget firmware/esp32/main/board.cpp (CONFIG_HG_BOARD_AMOLED_206)
 #include "aiwatchos/hal.hpp"
+#include "aiwatchos/rtc.hpp"
 
 #ifdef __ESPRESSIF_IDF__
 #include "driver/gpio.h"
@@ -37,6 +38,7 @@ void Board::begin() {
 #ifdef __ESPRESSIF_IDF__
     extern esp_err_t co5300_init();
     extern esp_err_t ft3168_init();
+    extern esp_err_t pcf85063_init();
     extern esp_err_t axp2101_init();
     extern esp_err_t audio_codecs_init();
     extern void co5300_set_brightness(uint8_t);
@@ -47,6 +49,16 @@ void Board::begin() {
     }
     if (ft3168_init() != ESP_OK) {
         ESP_LOGE("aiwatchos", "touch init failed; touch input unavailable");
+    }
+    if (pcf85063_init() != ESP_OK) {
+        ESP_LOGE("aiwatchos", "RTC init failed; clock runs from the compiled base");
+    } else {
+        // RTC wins over the compiled base when its time is valid: rebase the
+        // software clock so now_ms() continues from RTC time + uptime.
+        uint64_t rtc_ms = 0;
+        if (rtc_read_epoch_ms(&rtc_ms)) {
+            g_now_ms = rtc_ms - static_cast<uint64_t>(esp_timer_get_time() / 1000);
+        }
     }
     if (axp2101_init() != ESP_OK) {
         ESP_LOGE("aiwatchos", "PMU init failed; battery state unknown");
@@ -179,14 +191,27 @@ PowerStatus Board::read_power() {
     return axp2101_read_power();
 }
 
-// --- Time (PCF85063 RTC via I2C once its driver lands; until then the
-// ESP32's microsecond timer advances the clock from the fixed base) ---
+// --- Time (PCF85063 RTC via I2C — driver in rtc_driver.cpp; begin() seeds
+// g_now_ms from the RTC when valid, and the ESP32's microsecond timer
+// advances the clock from that base between reads) ---
 uint64_t Board::now_ms() {
 #ifdef __ESPRESSIF_IDF__
     return g_now_ms + static_cast<uint64_t>(esp_timer_get_time() / 1000);
 #else
     return g_now_ms;
 #endif
+}
+
+// Set the wall clock (see rtc.hpp): rebase now_ms() onto epoch_ms and write
+// through to the PCF85063 so the time survives sleep and reboot. The entry
+// point for a future SNTP sync once it has network time.
+void board_set_epoch_ms(uint64_t epoch_ms) {
+#ifdef __ESPRESSIF_IDF__
+    g_now_ms = epoch_ms - static_cast<uint64_t>(esp_timer_get_time() / 1000);
+#else
+    g_now_ms = epoch_ms;
+#endif
+    rtc_write_epoch_ms(epoch_ms);
 }
 
 // Test helper: advance the monotonic clock by elapsed milliseconds. This lets unit tests

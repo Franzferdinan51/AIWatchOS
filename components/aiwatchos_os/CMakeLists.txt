@@ -5,6 +5,7 @@ set(COMPONENT_SRCS
     src/touch_driver.cpp
     src/audio_driver.cpp
     src/power_manager.cpp
+    src/rtc_driver.cpp
     src/app_manager.cpp
     src/launcher_ui.cpp
     src/clock_face.cpp

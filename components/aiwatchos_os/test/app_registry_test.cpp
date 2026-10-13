@@ -16,6 +16,7 @@
 // The MP3 test needs apps/muse/test_data/test_reply.mp3 (skips if missing).
 #include "aiwatchos/app.hpp"
 #include "aiwatchos/hal.hpp"      // for hal(), board_advance_test_time_ms, kDisplayWidth/Height
+#include "aiwatchos/rtc.hpp"      // for PCF85063 RTC driver verification
 #include "aiwatchos/app_manager.hpp"
 #include "aiwatchos/launcher_ui.hpp"   // for LauncherUI tap-to-launch verification
 #include "aiwatchos/settings_page.hpp"   // for Settings volume wiring verification
@@ -973,6 +974,154 @@ static void test_muse_outbox() {
     printf("test_muse_outbox: PASSED\n");
 }
 
+// --- Test the PCF85063 BCD codec and calendar validity rules ---
+static void test_rtc_bcd_and_validity() {
+    for (int v = 0; v <= 99; ++v) {
+        const uint8_t b = aiwatchos::rtc_to_bcd(static_cast<uint8_t>(v));
+        assert(aiwatchos::rtc_bcd_valid(b));
+        assert(aiwatchos::rtc_from_bcd(b) == v);
+    }
+    assert(aiwatchos::rtc_to_bcd(59) == 0x59 && aiwatchos::rtc_to_bcd(9) == 0x09);
+    assert(aiwatchos::rtc_bcd_valid(0x99) && aiwatchos::rtc_bcd_valid(0x00));
+    assert(!aiwatchos::rtc_bcd_valid(0x5A) && !aiwatchos::rtc_bcd_valid(0xA5));
+    assert(!aiwatchos::rtc_bcd_valid(0xFF));
+
+    assert(aiwatchos::rtc_days_in_month(2024, 2) == 29);   // leap year
+    assert(aiwatchos::rtc_days_in_month(2025, 2) == 28);
+    assert(aiwatchos::rtc_days_in_month(2000, 2) == 29);   // divisible by 400
+    assert(aiwatchos::rtc_days_in_month(2100, 2) == 28);   // divisible by 100 only
+    assert(aiwatchos::rtc_days_in_month(2026, 1) == 31);
+    assert(aiwatchos::rtc_days_in_month(2026, 4) == 30);
+    assert(aiwatchos::rtc_days_in_month(2026, 0) == 0);
+    assert(aiwatchos::rtc_days_in_month(2026, 13) == 0);
+
+    aiwatchos::RtcTime t{};   // defaults to year 2000: "never set" is invalid
+    assert(!aiwatchos::rtc_time_valid(t));
+    t = aiwatchos::RtcTime{2026, 10, 13, 2, 14, 47, 45};
+    assert(aiwatchos::rtc_time_valid(t));
+    t = aiwatchos::RtcTime{2024, 2, 29, 4, 12, 0, 0};
+    assert(aiwatchos::rtc_time_valid(t));      // leap day exists in 2024
+    t = aiwatchos::RtcTime{2025, 2, 29, 6, 12, 0, 0};
+    assert(!aiwatchos::rtc_time_valid(t));     // ... but not in 2025
+    t = aiwatchos::RtcTime{2023, 12, 31, 0, 23, 59, 59};
+    assert(!aiwatchos::rtc_time_valid(t));     // pre-2024 = unset/garbage
+    t = aiwatchos::RtcTime{2026, 13, 1, 5, 0, 0, 0};
+    assert(!aiwatchos::rtc_time_valid(t));     // month 13
+    t = aiwatchos::RtcTime{2026, 1, 1, 4, 24, 0, 0};
+    assert(!aiwatchos::rtc_time_valid(t));     // hour 24
+    t = aiwatchos::RtcTime{2099, 12, 31, 5, 23, 59, 59};
+    assert(aiwatchos::rtc_time_valid(t));      // top of the chip's range
+    printf("test_rtc_bcd_and_validity: PASSED\n");
+}
+
+// --- Test PCF85063 civil <-> epoch conversions against known vectors ---
+static void test_rtc_epoch_civil() {
+    aiwatchos::RtcTime t = aiwatchos::rtc_civil_from_epoch_ms(0);
+    assert(t.year == 1970 && t.month == 1 && t.day == 1);
+    assert(t.hour == 0 && t.minute == 0 && t.second == 0);
+    assert(t.weekday == 4);   // 1970-01-01 was a Thursday
+
+    t = aiwatchos::rtc_civil_from_epoch_ms(1700000000099ULL);
+    assert(t.year == 2023 && t.month == 11 && t.day == 14);
+    assert(t.hour == 22 && t.minute == 13 && t.second == 20);
+    assert(t.weekday == 2);   // Tuesday
+
+    t = aiwatchos::rtc_civil_from_epoch_ms(1791902865099ULL);
+    assert(t.year == 2026 && t.month == 10 && t.day == 13);
+    assert(t.hour == 14 && t.minute == 47 && t.second == 45);
+    assert(t.weekday == 2);   // Tuesday
+
+    // Leap day: 2024-02-29 00:00 UTC was a Thursday at a known epoch.
+    const aiwatchos::RtcTime leap{2024, 2, 29, 4, 0, 0, 0};
+    assert(aiwatchos::rtc_epoch_ms_from_civil(leap) == 1709164800000ULL);
+    // Feb 2024 has 29 days: Feb 28 -> Mar 1 spans two midnights.
+    const aiwatchos::RtcTime feb28{2024, 2, 28, 3, 0, 0, 0};
+    const aiwatchos::RtcTime mar1{2024, 3, 1, 5, 0, 0, 0};
+    assert(aiwatchos::rtc_epoch_ms_from_civil(mar1) -
+           aiwatchos::rtc_epoch_ms_from_civil(feb28) == 2ULL * 86400000ULL);
+
+    // Year boundary: one second past 2023-12-31 23:59:59 is 2024-01-01
+    // (a Monday) at a known epoch.
+    const aiwatchos::RtcTime nye{2023, 12, 31, 0, 23, 59, 59};
+    const uint64_t rolled = aiwatchos::rtc_epoch_ms_from_civil(nye) + 1000;
+    assert(rolled == 1704067200000ULL);
+    t = aiwatchos::rtc_civil_from_epoch_ms(rolled);
+    assert(t.year == 2024 && t.month == 1 && t.day == 1 && t.weekday == 1);
+    assert(t.hour == 0 && t.minute == 0 && t.second == 0);
+
+    // Round-trip a spread of epochs through civil and back (second-aligned).
+    const uint64_t vectors[] = {0ULL, 1700000000000ULL, 1709164800000ULL,
+                                1791902865000ULL, 4102444800000ULL};  // ..2100-01-01
+    for (uint64_t v : vectors) {
+        assert(aiwatchos::rtc_epoch_ms_from_civil(
+                   aiwatchos::rtc_civil_from_epoch_ms(v)) == v);
+    }
+    printf("test_rtc_epoch_civil: PASSED\n");
+}
+
+// --- Test PCF85063 register pack/unpack, OS flag, and garbage rejection ---
+static void test_rtc_registers() {
+    const aiwatchos::RtcTime in{2026, 10, 13, 2, 14, 47, 45};
+    uint8_t regs[7] = {};
+    aiwatchos::rtc_pack_registers(in, regs);
+    assert(regs[0] == 0x45 && regs[1] == 0x47 && regs[2] == 0x14);
+    assert(regs[3] == 0x13 && regs[4] == 0x02 && regs[5] == 0x10 && regs[6] == 0x26);
+
+    aiwatchos::RtcTime out{};
+    bool os = true;
+    assert(aiwatchos::rtc_unpack_registers(regs, &out, &os));
+    assert(!os);
+    assert(out.year == 2026 && out.month == 10 && out.day == 13 && out.weekday == 2);
+    assert(out.hour == 14 && out.minute == 47 && out.second == 45);
+
+    // Oscillator-stop flag: the fields still decode, but the flag is
+    // reported so the board seam can refuse the time.
+    regs[0] |= 0x80;
+    assert(aiwatchos::rtc_unpack_registers(regs, &out, &os));
+    assert(os);
+    regs[0] &= 0x7F;
+
+    // Garbage BCD (a nibble above 9) is rejected.
+    regs[0] = 0x7A;
+    assert(!aiwatchos::rtc_unpack_registers(regs, &out, &os));
+    regs[0] = 0x45;
+    // BCD-valid but impossible month (13) is rejected.
+    regs[5] = 0x13;
+    assert(!aiwatchos::rtc_unpack_registers(regs, &out, &os));
+    regs[5] = 0x10;
+    // A never-set chip (year 2000, e.g. after backup-power loss) is rejected.
+    const uint8_t unset_regs[7] = {0x00, 0x00, 0x00, 0x01, 0x06, 0x01, 0x00};
+    assert(!aiwatchos::rtc_unpack_registers(unset_regs, &out, &os));
+    printf("test_rtc_registers: PASSED\n");
+}
+
+// --- Test the RTC board seam: absent by default, injectable/writeable, and
+// board_set_epoch_ms() rebasing the real Board clock ---
+static void test_rtc_seam() {
+    uint64_t v = 0;
+    aiwatchos::rtc_test_set_present(false);
+    assert(!aiwatchos::rtc_read_epoch_ms(&v));   // no RTC present on the host
+
+    aiwatchos::rtc_test_inject_epoch_ms(1791902865000ULL);
+    assert(aiwatchos::rtc_read_epoch_ms(&v));
+    assert(v == 1791902865000ULL);
+
+    assert(aiwatchos::rtc_write_epoch_ms(1700000000000ULL));
+    assert(aiwatchos::rtc_read_epoch_ms(&v));
+    assert(v == 1700000000000ULL);   // a written RTC keeps the written time
+
+    // board_set_epoch_ms rebases Board::now_ms() (exact on the host path)
+    // and writes the value through to the RTC seam.
+    const uint64_t base_before = aiwatchos::hal().now_ms();
+    aiwatchos::board_set_epoch_ms(1791902865000ULL);
+    assert(aiwatchos::hal().now_ms() == 1791902865000ULL);
+    assert(aiwatchos::rtc_read_epoch_ms(&v));
+    assert(v == 1791902865000ULL);
+    aiwatchos::board_set_epoch_ms(base_before);   // restore for other tests
+    aiwatchos::rtc_test_set_present(false);
+    printf("test_rtc_seam: PASSED\n");
+}
+
 int main() {
     test_framebuffer_bounds();
     test_app_registry();
@@ -998,6 +1147,10 @@ int main() {
     test_hermes_vitals();                // drives the Hermes health dashboard
     test_muse_turn_log();                // drives the voice turn activity log
     test_muse_outbox();                  // drives the offline turn outbox
+    test_rtc_bcd_and_validity();         // drives the PCF85063 BCD codec + validity rules
+    test_rtc_epoch_civil();              // drives civil <-> epoch conversions on known vectors
+    test_rtc_registers();                // drives PCF85063 register pack/unpack + OS flag
+    test_rtc_seam();                     // drives the RTC board seam + board_set_epoch_ms
 
     printf("\nAll AppManager tests PASSED.\n");
     return 0;
