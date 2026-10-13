@@ -75,6 +75,14 @@ constexpr size_t kMaxSubLine = 128 * 1024;
 int64_t now_us() { return esp_timer_get_time(); }
 
 void* psram_alloc(size_t n) {
+    // Budget-audit rule (docs/ui/RESOURCE_BUDGET.md, red flag 2): large
+    // buffers are PSRAM-strict. heap_caps_malloc_prefer would silently
+    // fall back to internal DRAM if PSRAM allocation failed — a single
+    // 64 KB scratch buffer landing in DRAM would detonate the heap.
+    // Allocations >16 KB therefore fail closed (nullptr) instead.
+    if (n > 16 * 1024) {
+        return heap_caps_malloc(n, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    }
     return heap_caps_malloc_prefer(n, 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT,
                                    MALLOC_CAP_DEFAULT);
 }

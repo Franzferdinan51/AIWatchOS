@@ -30,3 +30,8 @@ CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
 # --- CPU / RTOS ---
 CONFIG_FREERTOS_HZ=100
 CONFIG_COMPILER_OPTIMIZATION_PERF=y
+
+# --- TLS buffer strategy (net component; resource-budget trim) ---
+# Dynamic SSL buffers: the TLS handshake is the DRAM peak event; dynamic
+# buffers free ~12-16 KB of steady-state DRAM vs fixed 16 KB in/out buffers.
+CONFIG_MBEDTLS_DYNAMIC_BUFFER=y
