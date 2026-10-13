@@ -29,6 +29,7 @@
 #include "aiwatchos/band_flush.hpp"      // for dirty-band flush verification
 #include "aiwatchos/font.hpp"            // for AA text/icon rendering verification
 #include "aiwatchos_hermes.hpp"   // for device-health dashboard verification
+#include "muse_captions.hpp"        // for companion caption/activity ports (M2/M3)
 #include "aiwatchos_muse.hpp"   // for push-to-talk turn buffering verification
 #include "muse_adpcm.h"         // for IMA-ADPCM round-trip verification
 #include "minimp3.h"            // for MP3 reply decode verification
@@ -1809,6 +1810,73 @@ static void test_aa_text() {
     printf("test_aa_text: PASSED\n");
 }
 
+// --- Companion caption ports (M3 cleaning, M2 activity captions/poses) ---
+static void test_muse_captions() {
+    using namespace aiwatchos_muse;
+    const std::string kEllipsis = "\xE2\x80\xA6";
+    // _clean: fenced code is dropped wholesale, links keep their text,
+    // markdown chars vanish, whitespace collapses.
+    assert(caption_from_reply("Here is `code` and **bold** text") ==
+           "Here is code and bold text");
+    assert(caption_from_reply("Before\n\n```dart\nvoid main() {}\n```\n\nAfter") ==
+           "Before After");
+    assert(caption_from_reply("See [the docs](https://example.com/x) now") ==
+           "See the docs now");
+    assert(caption_from_reply("# Title\n> quoted _line_ ~gone~") ==
+           "Title quoted line gone");
+    assert(caption_from_reply("  spaced   out\t\n lines  ") == "spaced out lines");
+    // An unclosed fence is not a fence (the regex needs the pair); its
+    // backticks are stripped as markdown chars and the text survives.
+    assert(caption_from_reply("a ``` b") == "a b");
+    // _clip: exactly at the limit passes through; one over cuts to
+    // limit-1 + ellipsis; the cut right-trims first.
+    std::string at(240, 'a');
+    assert(caption_from_reply(at) == at);
+    std::string over(241, 'a');
+    std::string clipped = caption_from_reply(over);
+    assert(clipped.size() == 239 + kEllipsis.size());
+    assert(clipped.compare(clipped.size() - kEllipsis.size(), kEllipsis.size(), kEllipsis) == 0);
+    std::string padded = std::string(238, 'b') + "   " + std::string(50, 'c');
+    std::string clipped2 = caption_from_reply(padded);
+    assert(clipped2 == std::string(238, 'b') + kEllipsis);
+
+    // activityCaption: known codes, tool labels, fallback, normalization.
+    std::string cap;
+    assert(activity_caption("thinking", &cap) && cap == "Thinking" + kEllipsis);
+    assert(activity_caption("browsing", &cap) && cap == "Looking something up" + kEllipsis);
+    assert(activity_caption("using_tool", &cap) && cap == "Using a tool" + kEllipsis);
+    assert(activity_caption("take_photo", &cap) && cap == "Taking a photo" + kEllipsis);
+    assert(activity_caption("get_location", &cap) && cap == "Getting location" + kEllipsis);
+    assert(activity_caption("usb_list_files", &cap) && cap == "Browsing " + kEllipsis);
+    assert(activity_caption("open_url", &cap) && cap == "Opening " + kEllipsis);
+    // Normalization: trim + lowercase + spaces to underscores.
+    assert(activity_caption("  TAKE PHOTO ", &cap) && cap == "Taking a photo" + kEllipsis);
+    // Fallback: words joined, first letter capitalized, rest untouched.
+    assert(activity_caption("fetching_weather_data", &cap) && cap == "Fetching weather data");
+    assert(activity_caption("idle", &cap) && cap == "Idle");
+    // Empty / punctuation-only codes have no caption.
+    assert(!activity_caption("", &cap));
+    assert(!activity_caption("   ", &cap));
+    assert(!activity_caption("___", &cap));
+    assert(!activity_caption(nullptr, &cap));
+
+    // poseForActivity mapping.
+    assert(activity_pose("listening") == ActivityPose::kListening);
+    assert(activity_pose("speaking") == ActivityPose::kSpeaking);
+    assert(activity_pose("error") == ActivityPose::kError);
+    assert(activity_pose("failed") == ActivityPose::kError);
+    assert(activity_pose("off") == ActivityPose::kOff);
+    assert(activity_pose("asleep") == ActivityPose::kOff);
+    assert(activity_pose("boot") == ActivityPose::kBoot);
+    assert(activity_pose("starting") == ActivityPose::kBoot);
+    assert(activity_pose("") == ActivityPose::kIdle);
+    assert(activity_pose("idle") == ActivityPose::kIdle);
+    assert(activity_pose("waiting") == ActivityPose::kIdle);
+    assert(activity_pose("searching") == ActivityPose::kThinking);
+    assert(activity_pose("working") == ActivityPose::kThinking);
+    printf("test_muse_captions: PASSED\n");
+}
+
 int main() {
     test_aa_text();                      // baked Inter AA renderer against real assets
     test_touch_synth();                  // Press/Move/Release from the point stream
@@ -1841,6 +1909,7 @@ int main() {
     test_hermes_vitals();                // drives the Hermes health dashboard
     test_muse_turn_log();                // drives the voice turn activity log
     test_muse_outbox();                  // drives the offline turn outbox
+    test_muse_captions();                // companion caption/activity ports (M2/M3)
     test_rtc_bcd_and_validity();         // drives the PCF85063 BCD codec + validity rules
     test_rtc_epoch_civil();              // drives civil <-> epoch conversions on known vectors
     test_rtc_registers();                // drives PCF85063 register pack/unpack + OS flag
