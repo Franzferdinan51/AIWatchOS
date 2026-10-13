@@ -1,0 +1,15 @@
+menu "AIWatchOS OS"
+
+config AIWATCHOS_DISPLAY_SLEEP_TIMEOUT_S
+    int "Display inactivity sleep timeout (seconds)"
+    default 30
+    range 0 3600
+    help
+        Seconds without touch or button input before the CO5300 panel is
+        put to sleep (display off + SLPIN) and the main loop pauses all
+        rendering. Wake is on touch, BOOT, or PWR press; the touch that
+        wakes the panel is swallowed so it cannot fire the UI element
+        under it. Set to 0 to disable the inactivity timeout (the PWR
+        short-press sleep/wake toggle still works).
+
+endmenu

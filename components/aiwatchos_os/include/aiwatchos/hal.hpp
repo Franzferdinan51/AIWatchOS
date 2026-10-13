@@ -96,6 +96,8 @@ class Board : public Hal {
     void set_framebuffer(uint16_t* fb);  // sets the RGB565 framebuffer pointer (called by app_main)
     uint16_t* framebuffer() const;        // returns the current framebuffer pointer
     void set_backlight(uint8_t percent) override;
+    void display_sleep(bool sleep);       // CO5300 display off/on + SLPIN/SLPOUT (display_driver.cpp)
+    bool display_asleep() const;          // state last requested via display_sleep()
     int read_touch(int* out_xs, int* out_ys) override;
     bool audio_start_playback(uint32_t sample_rate_hz) override;
     void audio_write(const int16_t* samples, size_t count) override;

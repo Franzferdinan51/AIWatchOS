@@ -5,19 +5,33 @@
 # must not be listed here ('table' is not a valid data subtype for gen_esp32part).
 # The table lives at 0x8000 per sdkconfig.defaults; the bootloader handles that.
 
+# Layout (explicit offsets; app partitions 64 KB-aligned):
+#   0x010000  factory            2 MB    main firmware image
+#   0x210000  ota_0              2 MB    OTA slot A
+#   0x410000  ota_1              2 MB    OTA slot B
+#   0x610000  ota_data           8 KB    boot slot selector
+#   0x620000  aiwatchos_assets  ~5 MB    FAT: fonts, images, app bundles
+#   0xB00000  nvs               64 KB    settings / device keys / pairing
+# OTA slots are 2 MB (0x200000) so a slot can hold the largest image the
+# HermesGadget ecosystem advertises (caps.ota.max_size = 2,031,616 bytes);
+# the previous 0x1C0000 slots were too small for that. The assets partition
+# keeps its previous size; only its offset moved. ~21 MB of flash remains
+# unallocated for future use. This device is always fresh-flashed, so the
+# layout change carries no OTA-compatibility concerns.
+
 # Factory app (main firmware image, ~2 MB for full OS + apps)
-factory,                               app,  factory, ,          0x200000,
+factory,                               app,  factory, 0x10000,   0x200000,
 
 # OTA slots (two slots for A/B updates via HermesGadget protocol).
 # CSV form is type=app subtype=ota_N (bare `ota` is not a valid type).
-ota_0,                                app,  ota_0,    ,          0x1C0000,
-ota_1,                                app,  ota_1,    ,          0x1C0000,
+ota_0,                                 app,  ota_0,   0x210000,  0x200000,
+ota_1,                                 app,  ota_1,   0x410000,  0x200000,
 
-# OTA data (2 KB — tells bootloader which slot to boot)
-ota_data,                              data, ota,   ,          0x2000,
+# OTA data (8 KB — tells bootloader which slot to boot)
+ota_data,                              data, ota,     0x610000,  0x2000,
 
-# Filesystem for assets (fonts, images, app bundles) — ~5 MB
-aiwatchos_assets,                      data, fat,    ,          0x4E0000,
+# Filesystem for assets (fonts, images, app bundles) — ~5 MB (size unchanged)
+aiwatchos_assets,                      data, fat,     0x620000,  0x4E0000,
 
 # NVS for settings / device keys / pairing state (persistent storage)
-nvs,                                   data, nvs,    ,          0x10000,
+nvs,                                   data, nvs,     0xB00000,  0x10000,

@@ -7,6 +7,7 @@
 #include "aiwatchos/launcher_ui.hpp"
 #include "aiwatchos/battery_display.hpp"
 #include "aiwatchos/hal.hpp"
+#include "aiwatchos/display_power.hpp"
 
 #include "aiwatchos/settings_page.hpp"
 #include "aiwatchos/notifications.hpp"
@@ -18,6 +19,7 @@
 
 #ifdef __ESPRESSIF_IDF__
 #include "esp_heap_caps.h"
+#include "sdkconfig.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #endif
@@ -93,22 +95,68 @@ extern "C" void app_main(void) {
     // --- 4. Main event loop (replaces Arduino's loop()) ---
     const uint32_t kFrameMs = 40;   // ~25 FPS, matching LVGL frame rate from board config
 
+    // Display power policy (see aiwatchos/display_power.hpp): sleeps the
+    // CO5300 after the configured inactivity timeout or on a PWR short
+    // press, and wakes it on touch / BOOT / PWR. The timeout comes from
+    // Kconfig (AIWATCHOS_DISPLAY_SLEEP_TIMEOUT_S, default 30 s) in firmware
+    // builds; host builds use the same default.
+#if defined(__ESPRESSIF_IDF__) && defined(CONFIG_AIWATCHOS_DISPLAY_SLEEP_TIMEOUT_S)
+    const uint32_t kDisplaySleepTimeoutMs =
+        static_cast<uint32_t>(CONFIG_AIWATCHOS_DISPLAY_SLEEP_TIMEOUT_S) * 1000u;
+#else
+    const uint32_t kDisplaySleepTimeoutMs = 30000;   // matches the Kconfig default
+#endif
+    static aiwatchos::DisplayPower g_power(kDisplaySleepTimeoutMs);
+
     while (true) {
-        // Read touch input and dispatch to the foreground app.
+        // Sample this frame's inputs first: the power policy needs the touch
+        // points and button state before anything is dispatched or rendered.
+        const uint64_t frame_now_ms = board.now_ms();
         int touch_xs[2] = {0}, touch_ys[2] = {0};
         int n_points = board.read_touch(touch_xs, touch_ys);
+        const uint32_t buttons = board.read_buttons();
 
-        for (int i = 0; i < n_points; ++i) {
-            aiwatchos::TouchEvent te{
-                touch_xs[i], touch_ys[i],
-                aiwatchos::TouchEvent::Press   // FT3168 reports press state via IRQ
-            };
-            // Dispatch to the foreground app first. If it doesn't handle the touch
-            // (e.g., clock_touch returns false), fall back to edge-swipe navigation so
-            // the user can always switch apps from any screen — this makes criterion 6
-            // (touch-driven launcher UI) reachable at runtime regardless of which app is active.
-            if (!g_app_mgr.on_touch(te)) {
-                g_launcher.on_touch(te);   // edge-swipe: left/right 30px triggers switch_prev/next
+        // Display power transitions. On wake, execution falls through and
+        // renders below, so the panel immediately shows the current frame;
+        // on sleep, the render pass is skipped for this frame and beyond.
+        const aiwatchos::DisplayPower::Action power_action =
+            g_power.update(frame_now_ms, n_points, buttons);
+        if (power_action == aiwatchos::DisplayPower::Action::kWake) {
+            board.display_sleep(false);
+        } else if (power_action == aiwatchos::DisplayPower::Action::kEnterSleep) {
+            board.display_sleep(true);
+        }
+
+        if (g_power.asleep()) {
+            // Panel asleep: input was still sampled above (that polling is
+            // what makes wake instant — the FT3168 INT line keeps producing
+            // touch reads while the panel sleeps), but tick/render/flush are
+            // skipped entirely. No DMA traffic reaches the sleeping panel,
+            // so there is no AMOLED burn-in and battery drain is minimal
+            // while the watch sits on the bench.
+#ifdef __ESPRESSIF_IDF__
+            vTaskDelay(pdMS_TO_TICKS(kFrameMs));
+#endif
+            continue;
+        }
+
+        // Dispatch touch to the foreground app — unless this touch is the one
+        // that woke the panel. DisplayPower swallows the waking press (and
+        // the rest of it, until all fingers lift) so it cannot also fire the
+        // UI element sitting under the waking finger.
+        if (!g_power.swallow_touch()) {
+            for (int i = 0; i < n_points; ++i) {
+                aiwatchos::TouchEvent te{
+                    touch_xs[i], touch_ys[i],
+                    aiwatchos::TouchEvent::Press   // FT3168 reports press state via IRQ
+                };
+                // Dispatch to the foreground app first. If it doesn't handle the touch
+                // (e.g., clock_touch returns false), fall back to edge-swipe navigation so
+                // the user can always switch apps from any screen — this makes criterion 6
+                // (touch-driven launcher UI) reachable at runtime regardless of which app is active.
+                if (!g_app_mgr.on_touch(te)) {
+                    g_launcher.on_touch(te);   // edge-swipe: left/right 30px triggers switch_prev/next
+                }
             }
         }
 
@@ -119,7 +167,7 @@ extern "C" void app_main(void) {
         fb.fill(0x0000);   // black background for AMOLED power saving
 
         // Status bar renders time and battery at the top of every screen.
-        uint64_t now_ms = board.now_ms();
+        uint64_t now_ms = frame_now_ms;
         char time_str[16];
         unsigned hours = static_cast<unsigned>((now_ms / 3600000) % 24);
         unsigned minutes = static_cast<unsigned>((now_ms / 60000) % 60);
