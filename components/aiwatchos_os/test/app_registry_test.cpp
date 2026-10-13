@@ -1477,7 +1477,118 @@ static void test_hermes_auth_failure() {
     printf("test_hermes_auth_failure: PASSED\n");
 }
 
+// --- Test Muse Gloss colour math (tokens, blend, gradient) ----------------
+static void test_gloss_color_math() {
+    using namespace aiwatchos;
+    // Token table sanity: the canonical museBlue from the companion theme.
+    assert(rgb565(0x18, 0x77, 0xF2) == 0x1BBE);
+    assert(rgb565_hex(0x1877F2) == colors::kBlue);
+    assert(rgb565_hex(0x14305A) == colors::kBubble);
+    assert(rgb565_hex(0xF2B33D) == hcolors::kGold);
+
+    // Blend endpoints are exact.
+    assert(blend565(0x1234, 0xABCD, 0) == 0x1234);
+    assert(blend565(0x1234, 0xABCD, 255) == 0xABCD);
+    // Half blend of black over white lands mid-scale on every channel.
+    uint16_t half = blend565(0xFFFF, 0x0000, 128);
+    assert(((half >> 11) & 0x1F) >= 14 && ((half >> 11) & 0x1F) <= 16);
+    assert(((half >> 5) & 0x3F) >= 30 && ((half >> 5) & 0x3F) <= 33);
+
+    // Lerp endpoints are exact.
+    assert(lerp565(0x1111, 0x2222, 0) == 0x1111);
+    assert(lerp565(0x1111, 0x2222, 256) == 0x2222);
+
+    // Gradient: first row is the top stop, mid row is the mid stop, and
+    // the red channel is monotonic across the whole ramp (no banding
+    // inversions) for a darkening gradient.
+    const uint16_t top = 0xFFFF, mid = 0x8410, bot = 0x0000;
+    assert(vgrad_color(top, mid, bot, 0, 100) == top);
+    assert(vgrad_color(top, mid, bot, 50, 100) == mid);
+    int prev_r = 32;
+    for (int y = 0; y < 100; ++y) {
+        int r = (vgrad_color(top, mid, bot, y, 100) >> 11) & 0x1F;
+        assert(r <= prev_r);
+        prev_r = r;
+    }
+    printf("test_gloss_color_math: PASSED\n");
+}
+
+// --- Test Muse Gloss framebuffer primitives -------------------------------
+static void test_gloss_primitives() {
+    using namespace aiwatchos;
+    static uint16_t buf[kDisplayWidth * kDisplayHeight];
+    Framebuffer fb{buf, kDisplayWidth, kDisplayHeight};
+    auto px = [&](int x, int y) { return buf[y * kDisplayWidth + x]; };
+    const uint16_t kBg = 0x0000, kFg = 0xFFFF;
+    fb.fill(kBg);
+
+    // Rounded rect: corner cut, top-centre + middle-left edges filled.
+    fb.fill_round_rect(20, 20, 100, 60, 16, kFg);
+    assert(px(20, 20) == kBg);        // corner is rounded away
+    assert(px(36, 20) == kFg);        // top row starts at the corner centre
+    assert(px(70, 50) == kFg);        // centre
+    assert(px(20, 50) == kFg);        // middle rows reach the left edge
+    assert(px(119, 79) == kBg);       // bottom-right corner cut
+
+    // Circle: centre + rim filled, bounding-box corner empty.
+    fb.fill_circle(200, 50, 20, kFg);
+    assert(px(200, 50) == kFg);
+    assert(px(220, 50) == kFg);
+    assert(px(185, 35) == kBg);
+
+    // Ring: band filled, hole + outside empty.
+    fb.ring(100, 160, 50, 6, kFg);
+    assert(px(147, 160) == kFg);
+    assert(px(100, 160) == kBg);      // hole
+    assert(px(152, 160) == kBg);      // outside
+
+    // Arc 270deg..360deg (top -> east quadrant, screen coords):
+    fb.arc(300, 160, 50, 6, 270.0f, 90.0f, kFg);
+    assert(px(300, 113) == kFg);      // top of the ring
+    assert(px(347, 160) == kFg);      // east end of the sweep
+    assert(px(300, 207) == kBg);      // bottom is outside the sweep
+    assert(px(253, 160) == kBg);      // west is outside the sweep
+
+    // Vertical gradient fill: first row is the top stop exactly.
+    fb.fill_vgrad(20, 240, 60, 40, 0xFFFF, 0x8410, 0x0000);
+    assert(px(30, 240) == 0xFFFF);
+    assert(px(30, 279) != 0xFFFF && px(30, 279) != 0x0000);
+
+    // Bubble: gradient body from the style, gloss brightens the top band,
+    // the rounded corner lets the background show through.
+    fb.fill(kBg);
+    fb.draw_bubble(50, 300, 200, 100, 22, bubble_style());
+    const uint16_t body = vgrad_color(colors::kBubbleTop, colors::kBubble,
+                                      colors::kBubbleBot, 48, 100);
+    assert(px(150, 348) == body);                       // body = G1 gradient
+    const uint16_t gloss_expect =
+        blend565(vgrad_color(colors::kBubbleTop, colors::kBubble,
+                             colors::kBubbleBot, 0, 100),
+                 colors::kWhite, 44);                   // 56*(10-2)/10 at row 2
+    assert(px(150, 302) == gloss_expect);               // G2 gloss band
+    assert(px(50, 300) == kBg);                         // corner cut
+
+    printf("test_gloss_primitives: PASSED\n");
+}
+
+// --- Test word wrap (hg::wrap_text port) -----------------------------------
+static void test_wrap_text() {
+    using namespace aiwatchos;
+    auto lines = wrap_text("aa bb cc", 5);
+    assert(lines.size() == 2 && lines[0] == "aa bb" && lines[1] == "cc");
+    lines = wrap_text("abcdefghij", 4);   // over-long word hard-breaks
+    assert(lines.size() == 3 && lines[0] == "abcd" && lines[2] == "ij");
+    lines = wrap_text("ab\ncd", 10);      // explicit newline honoured
+    assert(lines.size() == 2 && lines[0] == "ab" && lines[1] == "cd");
+    lines = wrap_text("", 8);
+    assert(lines.empty());
+    printf("test_wrap_text: PASSED\n");
+}
+
 int main() {
+    test_gloss_color_math();             // Muse Gloss token/blend/gradient math
+    test_gloss_primitives();             // rounded rect / circle / ring / arc / bubble
+    test_wrap_text();                    // hg word-wrap port
     test_framebuffer_bounds();
     test_app_registry();
     test_launch_and_dispatch();
