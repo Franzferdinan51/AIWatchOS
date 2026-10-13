@@ -43,12 +43,13 @@ config AIWATCHOS_NET_HATCH_HOST
     string "VM host override (empty: derive from the VM's wss URL)"
     default ""
     help
-        Host to open the TLS connection to, e.g. "abc123.hatch.example".
-        When empty, the host is parsed from the vm_ws_url returned by
-        the account API; with a direct VM token, "<vm>.<domain>" is used.
+        Host to open the TLS connection to. When empty, the edge
+        host (AIWATCHOS_NET_HATCH_DOMAIN) is used and the VM is
+        selected by the ?vm_id= upgrade query — the model every
+        official SDK client uses. Set this only for a private edge.
 
 config AIWATCHOS_NET_HATCH_DOMAIN
-    string "VM domain for direct-token host derivation"
+    string "Muse edge host (VMs are selected by ?vm_id=)"
     default "hatch.metaaivm.com"
 
 config AIWATCHOS_NET_SNTP_SERVER

@@ -119,9 +119,18 @@ std::string derive_host(const std::string& explicit_host,
                         const std::string& ws_url, const std::string& vm_id,
                         const std::string& domain) {
     if (!explicit_host.empty()) return explicit_host;
+    // The Muse edge host routes by the ?vm_id= query parameter; every
+    // official client (esp32 chat session, esp32 Link, Linux link
+    // client) dials that one host and treats vm_ws_url as metadata.
+    // Never construct a per-VM subdomain: "<vm_id>.<domain>" is not a
+    // routable service host. The configured domain IS the edge host
+    // (its default is hatch.metaaivm.com).
+    (void)vm_id;  // the VM is selected by the upgrade query, not the host
+    if (!domain.empty()) return domain;
+    // Only when the domain is explicitly cleared does the account
+    // response URL get a say (a private edge named nowhere else).
     std::string from_url = host_from_ws_url(ws_url);
     if (!from_url.empty()) return from_url;
-    if (!vm_id.empty() && !domain.empty()) return vm_id + "." + domain;
     return "";
 }
 

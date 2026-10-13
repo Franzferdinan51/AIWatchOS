@@ -49,8 +49,11 @@ std::string host_from_ws_url(const std::string& url);
 
 // Which host the TLS connection opens, in priority order:
 //   1. explicit_host (settings override)
-//   2. host parsed from the account API's vm_ws_url
-//   3. "<vm_id>.<domain>" when both are known
+//   2. domain — the Muse edge host (default hatch.metaaivm.com); it
+//      routes by the ?vm_id= upgrade query, as in every official SDK
+//      client. A per-VM subdomain is never constructed.
+//   3. host parsed from the vm_ws_url of the account API (only
+//      reachable when the domain is explicitly cleared)
 //   4. "" (unresolvable — caller must treat the link as unconfigured)
 std::string derive_host(const std::string& explicit_host,
                         const std::string& ws_url, const std::string& vm_id,
