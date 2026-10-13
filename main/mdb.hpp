@@ -28,6 +28,7 @@ void inject_button(uint32_t mask);   // Board button mask: bit0 BOOT, bit1 PWR
 void request_switch_app(const char* app_id);
 void request_wake();
 void request_sleep();
+void request_frame_card(bool on);
 bool display_asleep();
 const char* current_app_id();
 
@@ -37,6 +38,12 @@ namespace detail {
 // next injected frame while an injection sequence is active, and ORs
 // any injected button mask into this frame's buttons.
 void apply_frame(int* n_points, int* xs, int* ys, uint32_t* buttons);
+
+// True while the safe-area calibration card is latched on (`mdb frame`).
+// The main loop draws the card over every finished frame — after the
+// app and the status zone, before the band flush — so the card reaches
+// the glass intact instead of being erased by the next render.
+bool frame_card_requested();
 }  // namespace detail
 
 }  // namespace aiwatchos_mdb

@@ -10,6 +10,8 @@
 #include "aiwatchos/clock_face.hpp"
 #include "aiwatchos/launcher_ui.hpp"
 #include "aiwatchos/battery_display.hpp"
+#include "aiwatchos/colors.hpp"
+#include "aiwatchos/font5x7.hpp"
 #include "aiwatchos/hal.hpp"
 #include "aiwatchos/display_power.hpp"
 #include "aiwatchos/boot_escape.hpp"
@@ -59,6 +61,7 @@ volatile uint32_t g_inj_button_mask = 0;
 volatile int g_inj_button_frames = 0;
 char g_inj_switch[24] = {};
 volatile bool g_inj_switch_pending = false;
+volatile bool g_frame_card = false;
 
 
 void inj_push(int n, int x, int y) {
@@ -123,6 +126,8 @@ void request_sleep() {
     if (detail::g_power_hook && !detail::g_power_hook->asleep()) inject_button(0x02);
 }
 
+void request_frame_card(bool on) { g_frame_card = on; }
+
 bool display_asleep() {
     return detail::g_power_hook && detail::g_power_hook->asleep();
 }
@@ -153,8 +158,72 @@ void apply_frame(int* n_points, int* xs, int* ys, uint32_t* buttons) {
         if (g_inj_button_frames == 0) g_inj_button_mask = 0;
     }
 }
+
+bool frame_card_requested() { return g_frame_card; }
 }  // namespace detail
 }  // namespace aiwatchos_mdb
+
+// ---------------------------------------------------------------------------
+// Safe-area calibration card (MDB `mdb frame`) — phase 1 of the safe-area
+// calibration. The visible glass is smaller than the full 410x502 panel
+// on every side (rounded corners + bezel mask eat the edges), so the UI
+// safe area must be MEASURED, not guessed. While the card is latched,
+// the main loop draws it over every finished frame (after the app and
+// the status zone, before the band flush), so what reaches the glass is
+// exactly this buffer: black field, concentric 1px borders at insets
+// 0/8/16/24/32 (white/green/yellow/orange/red), edge ticks every 8 px,
+// numeric coordinate labels every 16 px (legacy 5x7, scale 1), a centre
+// crosshair and the title. The owner photographs the card on the glass;
+// the outermost fully-visible border plus the tick labels give the four
+// visible insets the phase-2 SAFE_* constants are built from. Latched
+// in RAM only: reboot or `mdb frame off` clears it.
+// ---------------------------------------------------------------------------
+void draw_frame_card(aiwatchos::Framebuffer& fb) {
+    using aiwatchos::rgb565_hex;
+    const int W = fb.width;
+    const int H = fb.height;
+    const int cx = W / 2;
+    const int cy = H / 2;
+    const uint16_t kWhite = rgb565_hex(0xFFFFFF);
+    fb.fill(0x0000);
+    // Centre crosshair (cyan), under everything else.
+    const uint16_t kCyan = rgb565_hex(0x00FFFF);
+    fb.hline(0, W - 1, cy, kCyan);
+    fb.vline(cx, 0, H - 1, kCyan);
+    // Concentric borders at the calibration insets.
+    static const int kInsets[5] = {0, 8, 16, 24, 32};
+    static const uint32_t kBorderHex[5] = {0xFFFFFF, 0x00FF00, 0xFFFF00,
+                                           0xFF8000, 0xFF0000};
+    for (int i = 0; i < 5; ++i) {
+        const int in = kInsets[i];
+        const uint16_t c = rgb565_hex(kBorderHex[i]);
+        fb.hline(in, W - 1 - in, in, c);
+        fb.hline(in, W - 1 - in, H - 1 - in, c);
+        fb.vline(in, in, H - 1 - in, c);
+        fb.vline(W - 1 - in, in, H - 1 - in, c);
+    }
+    // Edge ticks every 8 px (white, 5 px long) along the top + left.
+    for (int x = 0; x < W; x += 8) fb.vline(x, 0, 4, kWhite);
+    for (int y = 0; y < H; y += 8) fb.hline(0, 4, y, kWhite);
+    // Numeric labels every 16 px: the tick coordinate itself, drawn
+    // just inside its edge, so a clipped label is measurement data too.
+    char num[12];
+    for (int x = 0; x < W; x += 16) {
+        std::snprintf(num, sizeof(num), "%d", x);
+        fb.draw_text(x + 2, 10, num, kWhite, 1);
+    }
+    for (int y = 0; y < H; y += 16) {
+        std::snprintf(num, sizeof(num), "%d", y);
+        fb.draw_text(10, y + 2, num, kWhite, 1);
+    }
+    // Title centred just above the crosshair arm; size line below it.
+    const char* kTitle = "SAFE AREA TEST";
+    const int tw = aiwatchos::Framebuffer::text_width(kTitle, 2);
+    fb.draw_text(cx - tw / 2, cy - 32, kTitle, kWhite, 2);
+    const char* kSub = "410 X 502";
+    const int sw = aiwatchos::Framebuffer::text_width(kSub, 1);
+    fb.draw_text(cx - sw / 2, cy + 16, kSub, kWhite, 1);
+}
 
 extern "C" void app_main(void) {
     // --- 0. MDB (Muse Developer Bridge, docs/mdb.md): log ring +
@@ -494,6 +563,15 @@ extern "C" void app_main(void) {
                          aiwatchos::kStatusZoneBottom - 1, link_color);
         }
 #endif
+
+        // MDB safe-area calibration card (`mdb frame`): while latched,
+        // overdraw the finished frame — app + status zone and all — so
+        // the glass shows the card instead of the app. Drawn here, after
+        // every other render and before the band scan, the card is part
+        // of the flushed frame like anything else.
+        if (aiwatchos_mdb::detail::frame_card_requested()) {
+            draw_frame_card(fb);
+        }
 
         // Flush only the changed bands to the CO5300 (plan 1.6): hash
         // the frame in 4 horizontal bands and flush the dirty ones via

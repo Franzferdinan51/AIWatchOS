@@ -215,6 +215,18 @@ void cmd_screenshot() {
     if (ok) out_str("\nFBDUMP_END\n");
 }
 
+// --- safe-area calibration card ----------------------------------------
+// Latches the overlay the main loop draws over every frame (see
+// draw_frame_card in app_main.cpp). The card lives in the framebuffer,
+// so `mdb screenshot` shows the buffer half and a photo of the glass
+// shows the panel half; the difference is the measurement.
+void cmd_frame(const char* arg) {
+    const bool on = !(arg && strcmp(arg, "off") == 0);
+    request_frame_card(on);
+    if (on) request_wake();
+    out_str(on ? "OK frame on\n" : "OK frame off\n");
+}
+
 // --- I2C bench probe (touch NACK diagnosis) --------------------------
 // One command answers: who ACKs on the bus, whether the touch chip
 // answers raw register reads, which transaction flavor works, and
@@ -592,6 +604,7 @@ void cmd_help() {
     out_str(
         "MDB — Muse Developer Bridge (docs/mdb.md)\n"
         "  mdb screenshot            framebuffer dump (FBDUMP_BEGIN..END)\n"
+        "  mdb frame [off]           safe-area calibration card overlay\n"
         "  mdb health                state snapshot (key=value)\n"
         "  mdb logs                  recent log ring (~32 KB)\n"
         "  mdb i2c                   bus scan + raw touch/RTC/PMIC probe\n"
@@ -618,6 +631,7 @@ void dispatch(char* line) {
     }
     if (strcmp(verb, "help") == 0) { cmd_help(); return; }
     if (strcmp(verb, "screenshot") == 0) { cmd_screenshot(); return; }
+    if (strcmp(verb, "frame") == 0) { cmd_frame(strtok_r(nullptr, " \t", &save)); return; }
     if (strcmp(verb, "i2c") == 0) { cmd_i2c(); return; }
     if (strcmp(verb, "tpoll") == 0) { cmd_tpoll(); return; }
     if (strcmp(verb, "tpoll2") == 0) { cmd_tpoll2(); return; }
