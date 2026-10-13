@@ -230,10 +230,12 @@ extern "C" void app_main(void) {
             }
         }
 
-        // Render: clear framebuffer, draw status bar + clock face/app content.
-        fb.fill(0x0000);   // black background for AMOLED power saving
+        // Render (plan 3.0 order): G5 backdrop -> app -> shell status
+        // zone LAST, so the status bar is present and identical on
+        // every screen and no app can paint over it (audit X3).
+        aiwatchos::draw_shell_backdrop(fb);
+        g_app_mgr.render(fb);
 
-        // Status bar renders time and battery at the top of every screen.
         uint64_t now_ms = aiwatchos::local_display_ms(frame_now_ms);  // display-only TZ shift
         char time_str[16];
         unsigned hours = static_cast<unsigned>((now_ms / 3600000) % 24);
@@ -242,30 +244,28 @@ extern "C" void app_main(void) {
         g_status_bar.render(fb, time_str);
 
 #ifdef __ESPRESSIF_IDF__
-        // Link-state strip directly under the status bar (36 px tall):
-        // green = Muse linked, amber = connecting/retrying, dark grey =
-        // offline/unconfigured. Drawn with the existing framebuffer
-        // primitives only — no font involved.
+        // Link-state strip: the bottom 3px INSIDE the status zone
+        // (tokens section 8 position), state-coloured: ok = linked,
+        // warn = connecting/retrying, faint = off/unconfigured.
         {
-            uint16_t link_color = 0x2104;  // dark grey: off / no wifi
+            uint16_t link_color = aiwatchos::colors::kFaint;
             switch (aiwatchos_net::muse_link_state()) {
                 case aiwatchos_net::LinkState::kLinked:
-                    link_color = 0x07E0;  // green
+                    link_color = aiwatchos::colors::kOk;
                     break;
                 case aiwatchos_net::LinkState::kConnecting:
                 case aiwatchos_net::LinkState::kWaitingWifi:
                 case aiwatchos_net::LinkState::kBackoff:
-                    link_color = 0xFEA0;  // amber
+                    link_color = aiwatchos::colors::kWarn;
                     break;
                 case aiwatchos_net::LinkState::kOff:
                     break;
             }
-            fb.fill_rect(0, 36, aiwatchos::kDisplayWidth - 1, 38, link_color);
+            fb.fill_rect(0, aiwatchos::kStatusZoneH - 3,
+                         aiwatchos::kDisplayWidth - 1,
+                         aiwatchos::kStatusZoneH - 1, link_color);
         }
 #endif
-
-        // App renders its content below the status bar.
-        g_app_mgr.render(fb);
 
         // Flush only the changed bands to the CO5300 (plan 1.6): hash
         // the frame in 4 horizontal bands and flush the dirty ones via

@@ -1,87 +1,115 @@
-// Launcher UI — touch-driven app grid with tap-to-launch and edge-swipe navigation.
-// Renders on the 410x502 portrait AMOLED, below a status bar. Touch coordinates
-// from FT3168 map to screen space: x in [0, 409], y in [0, 501].
+// Launcher UI — Muse Gloss tile grid. See launcher_ui.hpp.
 #include "aiwatchos/launcher_ui.hpp"
 #include "aiwatchos/app_manager.hpp"
+#include "aiwatchos/colors.hpp"
+#include "aiwatchos/font.hpp"
+
+#include <cstring>
 
 namespace aiwatchos {
+namespace {
 
-constexpr uint16_t kBgColor     = 0x0000;   // black background
-constexpr uint16_t kLabelColor  = 0xFFFF;   // white text labels
-constexpr uint16_t kIconColor   = 0x7BEF;   // icon squares (medium gray)
+// Per-app tile identity: distinct icon + short label per app (labels
+// are capped at what fits a 96px tile in Micro — "Notifications" at
+// ~98px does not fit, so the bell tile reads "Alerts").
+struct TileDef {
+    const char* id;
+    const char* label;
+    Icon icon;
+};
+
+const TileDef kTileDefs[] = {
+    {"clock", "Clock", Icon::kClock},
+    {"launcher", "Apps", Icon::kSparkle},
+    {"muse", "Muse", Icon::kMic},
+    {"hermes", "Hermes", Icon::kFeather},
+    {"settings", "Settings", Icon::kGear},
+    {"notifications", "Alerts", Icon::kBell},
+    {"weather", "Weather", Icon::kCloudSun},
+};
+
+const TileDef* tile_def_for(const char* id) {
+    for (const TileDef& def : kTileDefs) {
+        if (std::strcmp(def.id, id) == 0) return &def;
+    }
+    return nullptr;
+}
+
+}  // namespace
 
 LauncherUI::LauncherUI(AppManager& mgr) : mgr_(mgr) {}
 
 void LauncherUI::render(Framebuffer& fb) {
-    fb.fill(kBgColor);
+    // No background fill: tiles float on the shell's G5 backdrop.
+    const size_t count = mgr_.count();
+    for (size_t i = 0; i < count; ++i) {
+        App* app = mgr_.app_at_index(i);
+        if (!app || !app->id) continue;
+        int x, y;
+        tile_origin(static_cast<int>(i), x, y);
+        const bool is_hermes = std::strcmp(app->id, "hermes") == 0;
 
-    const int status_bar_h = 36;
-    const int icon_size = 64;
-    const int cols = 3;
-    const int gap_x = (kDisplayWidth - cols * icon_size) / (cols + 1);
+        BubbleStyle style = bubble_style();
+        if (is_hermes) {
+            // Gold identity (tokens section 9): Hermes stops + gold
+            // shadow/icon/foot; the geometry is identical to Muse's.
+            style.top = hcolors::kBarTop;
+            style.mid = hcolors::kBar;
+            style.bot = hcolors::kBarBot;
+            style.shadow_color = hcolors::kGold;
+        }
+        style.shadow = shadow_tile();
+        fb.draw_bubble(x, y, kTileSize, kTileSize, 24, style);
 
-    // Draw app icons in a grid starting below the status bar.
-    size_t idx = 0;
-    for (int row = 0; ; ++row) {
-        int y = status_bar_h + 24 + row * (icon_size + 36);
-        if (y > kDisplayHeight - icon_size) break;
+        const TileDef* def = tile_def_for(app->id);
+        const Icon icon = def ? def->icon : Icon::kSparkle;
+        const char* label = def ? def->label : app->id;
+        const uint16_t fg = is_hermes ? hcolors::kGold : colors::kText;
+        draw_icon(fb, x + 28, y + 14, icon, FontFace::kIcon40, fg);
+        draw_text_aa_centered(fb, x + kTileSize / 2, y + 62, label,
+                              FontFace::kMicro, fg);
+        if (is_hermes) {
+            fb.fill_round_rect(x + 36, y + 84, 24, 4, 2, hcolors::kGold);
+        }
 
-        for (int col = 0; col < cols; ++col) {
-            // Check we still have apps to render.
-            int total_rows = static_cast<int>(mgr_.count() / cols) + 1;
-            if (row >= total_rows || idx >= mgr_.count()) break;
-
-            // Icon placeholder (rounded square). Real impl would render app icon from assets/
-            int x = gap_x + col * (icon_size + gap_x);
-
-            // Draw icon placeholder (rounded square).
-            fb.fill_rect(x, y, x + icon_size - 1, y + icon_size - 1, kIconColor);
-
-            idx++;
+        // Press feedback: +12% white wash over the tile for ~3 renders.
+        if (pressed_frames_ > 0 && static_cast<int>(i) == pressed_idx_) {
+            fb.fill_round_rect(x, y, kTileSize, kTileSize, 24,
+                               blend565(style.mid, colors::kWhite, 31));
         }
     }
+    if (pressed_frames_ > 0) --pressed_frames_;
 }
 
 bool LauncherUI::on_touch(const TouchEvent& event) {
-    // Edge-swipe: touch in the left/right 30px triggers app switch.
-    if (event.x < 30 && event.type == TouchEvent::Press) {
-        mgr_.switch_prev();
-        return true;
-    }
-    if (event.x > kDisplayWidth - 30 && event.type == TouchEvent::Press) {
-        mgr_.switch_next();
-        return true;
-    }
+    if (event.type != TouchEvent::Press) return false;
 
-    // Tap-to-launch: find which app icon was tapped and switch to it.
-    const int status_bar_h = 36;
-    const int icon_size = 64;
-    const int cols = 3;
-    const int gap_x = (kDisplayWidth - cols * icon_size) / (cols + 1);
-
-    if (event.y >= status_bar_h + 24 && event.type == TouchEvent::Press) {
-        int rel_y = event.y - (status_bar_h + 24);
-        int row = rel_y / (icon_size + 36);
-        int col = (event.x - gap_x) / (icon_size + gap_x);
-
-        if (col >= 0 && col < cols && row >= 0) {
-            // Reject taps landing in the gaps: integer division truncates
-            // toward zero, so without this a tap left of the grid (or in a
-            // gutter) would round into a neighboring icon and launch it.
-            int icon_x = gap_x + col * (icon_size + gap_x);
-            int icon_y = status_bar_h + 24 + row * (icon_size + 36);
-            if (event.x < icon_x || event.x >= icon_x + icon_size ||
-                event.y < icon_y || event.y >= icon_y + icon_size) {
-                return false;
-            }
-            size_t target_idx = static_cast<size_t>(row * cols + col);
-            App* target = mgr_.app_at_index(target_idx);
+    // Tiles first — they start at x=33, clear of the edge strips, and a
+    // tap in a gutter/gap must launch nothing (the hit test pins this).
+    const size_t count = mgr_.count();
+    for (size_t i = 0; i < count; ++i) {
+        int x, y;
+        tile_origin(static_cast<int>(i), x, y);
+        if (event.x >= x && event.x < x + kTileSize && event.y >= y &&
+            event.y < y + kTileSize) {
+            App* target = mgr_.app_at_index(i);
             if (target && target->id) {
-                return mgr_.switch_to(target->id);   // true: consumed and switched
+                pressed_idx_ = static_cast<int>(i);
+                pressed_frames_ = 3;
+                return mgr_.switch_to(target->id);
             }
         }
     }
 
+    // Edge-swipe navigation: left/right 30px strips switch apps.
+    if (event.x < 30) {
+        mgr_.switch_prev();
+        return true;
+    }
+    if (event.x > kDisplayWidth - 30) {
+        mgr_.switch_next();
+        return true;
+    }
     return false;
 }
 

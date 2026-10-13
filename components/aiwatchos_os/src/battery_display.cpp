@@ -1,93 +1,75 @@
-// Battery display — renders a status bar with time and battery % at the top
-// of the 410x502 screen. Called each frame by the OS shell before app rendering.
+// Status bar implementation — see battery_display.hpp.
 #include "aiwatchos/battery_display.hpp"
+
+#include <cstdio>
+
+#include "aiwatchos/colors.hpp"
+#include "aiwatchos/font.hpp"
 
 namespace aiwatchos {
 
-constexpr uint16_t kStatusBg    = 0x294A;   // dark blue-gray (RGB565)
-constexpr uint16_t kTextColor   = 0xFFFF;   // white text
-constexpr uint16_t kBatteryFill = 0x7BCF;   // medium gray for battery outline
-
-BatteryDisplay::BatteryDisplay(Hal& board) : board_(board) {}
-
-// 3x5 micro-font for the status-bar clock. Each glyph is 5 rows of 3 bits
-// (row 0 = top). Supports '0'-'9' and ':'; anything else renders blank.
-namespace {
-constexpr int kTimeScale = 4;   // 3x5 cells at 4x -> 12x20 px per glyph, fits the 36px bar
-
-const uint8_t kTimeFont[][5] = {
-    {0x7, 0x5, 0x5, 0x5, 0x7},   // '0'
-    {0x2, 0x6, 0x2, 0x2, 0x7},   // '1'
-    {0x7, 0x1, 0x7, 0x4, 0x7},   // '2'
-    {0x7, 0x1, 0x7, 0x1, 0x7},   // '3'
-    {0x5, 0x5, 0x7, 0x1, 0x1},   // '4'
-    {0x7, 0x4, 0x7, 0x1, 0x7},   // '5'
-    {0x7, 0x4, 0x7, 0x5, 0x7},   // '6'
-    {0x7, 0x1, 0x2, 0x2, 0x2},   // '7'
-    {0x7, 0x5, 0x7, 0x5, 0x7},   // '8'
-    {0x7, 0x5, 0x7, 0x1, 0x7},   // '9'
-    {0x0, 0x2, 0x0, 0x2, 0x0},   // ':'
-};
-
-const uint8_t* time_glyph(char c) {
-    if (c >= '0' && c <= '9') return kTimeFont[c - '0'];
-    if (c == ':') return kTimeFont[10];
-    return nullptr;
-}
-
-void draw_time_glyph(Framebuffer& fb, int x, int y, char c, uint16_t color) {
-    const uint8_t* rows = time_glyph(c);
-    if (!rows) return;
-    for (int r = 0; r < 5; ++r) {
-        for (int col = 0; col < 3; ++col) {
-            if (rows[r] & (0x4 >> col)) {
-                fb.fill_rect(x + col * kTimeScale, y + r * kTimeScale,
-                             x + col * kTimeScale + kTimeScale - 1,
-                             y + r * kTimeScale + kTimeScale - 1, color);
-            }
+void draw_shell_backdrop(Framebuffer& fb, int y0, int y1) {
+    // Bottom stop: night blended 12% toward blueDeep (tokens G5).
+    static const uint16_t kBackdropBot =
+        lerp565(colors::kNight, colors::kBlueDeep, 31);
+    if (y0 < 0) y0 = 0;
+    if (y1 > fb.height) y1 = fb.height;
+    for (int y = y0; y < y1; y += 4) {
+        const uint16_t c =
+            vgrad_color(colors::kInk, colors::kNight, kBackdropBot, y,
+                        fb.height);
+        const int rows = (y + 4 <= y1) ? 4 : (y1 - y);
+        for (int i = 0; i < rows; ++i) {
+            fb.fill_rect(0, y + i, fb.width - 1, y + i, c);
         }
     }
 }
-}  // namespace
 
 void BatteryDisplay::render(Framebuffer& fb, const char* time_str) {
-    PowerStatus ps = board_.read_power();
+    // Zone ownership: repaint the backdrop slice first — anything an
+    // app drew into y < kStatusZoneH is covered before the bar draws.
+    draw_shell_backdrop(fb, 0, kStatusZoneH);
 
-    // Draw status bar background (top 36 px).
-    fb.fill_rect(0, 0, kDisplayWidth - 1, StatusBarConfig{}.height, kStatusBg);
+    const int text_y =
+        (kStatusZoneH - font_line_height(FontFace::kMicro)) / 2 + 1;
 
-    // Draw battery icon in the top-right corner.
-    const int bat_w = 48;
-    const int bat_h = 20;
-    const int bat_x = kDisplayWidth - bat_w - 8;
-    const int bat_y = (StatusBarConfig{}.height - bat_h) / 2;
+    // Time, left, 20px margin, Micro in `text`.
+    if (time_str && time_str[0]) {
+        draw_text_aa(fb, 20, text_y, time_str, FontFace::kMicro,
+                     colors::kText);
+    }
 
-    // Battery outline.
-    fb.hline(bat_x, bat_x + bat_w, bat_y, kBatteryFill);
-    fb.hline(bat_x, bat_x + bat_w, bat_y + bat_h - 1, kBatteryFill);
-    fb.vline(bat_x, bat_y, bat_y + bat_h - 1, kBatteryFill);
-    fb.vline(bat_x + bat_w - 1, bat_y, bat_y + bat_h - 1, kBatteryFill);
+    // Battery cluster, right (tokens section 8): percent text in Micro
+    // `dim`, then a 25x12 outline (r3, `dim`) with a 2px nub; the fill
+    // is state-coloured: charging = ok, < 20% = danger, else `text`.
+    const PowerStatus power = board_.read_power();
+    const int pct = power.battery_percent < 0 ? 0
+                    : power.battery_percent > 100 ? 100
+                                                  : power.battery_percent;
+    char pct_str[8];
+    std::snprintf(pct_str, sizeof(pct_str), "%d%%", pct);
 
-    // Battery fill proportional to charge level.
-    int fill_w = static_cast<int>((bat_w - 4) * ps.battery_percent / 100u);
+    constexpr int kOutlineW = 25;
+    constexpr int kOutlineH = 12;
+    const int right = fb.width - 20;
+    const int oy = (kStatusZoneH - kOutlineH) / 2;
+    const int ox = right - 2 - kOutlineW;   // 2px nub to its right
+
+    draw_text_aa_right(fb, ox - 6, text_y, pct_str, FontFace::kMicro,
+                       colors::kDim);
+    fb.stroke_round_rect(ox, oy, kOutlineW, kOutlineH, 3, colors::kDim,
+                         255);
+    fb.fill_rect(ox + kOutlineW, oy + 3, ox + kOutlineW + 1, oy + 8,
+                 colors::kDim);   // nub, 2 wide x 6 tall
+
+    const int fill_w = 21 * pct / 100;   // inner width is 21px
     if (fill_w > 0) {
-        fb.fill_rect(bat_x + 2, bat_y + 2, bat_x + 2 + fill_w - 1, bat_y + bat_h - 3, kBatteryFill);
-    }
-
-    // Charging indicator: fill the battery icon solid when charging.
-    if (ps.charging && bat_w > 0) {
-        fb.fill_rect(bat_x + 2, bat_y + 2, bat_x + bat_w - 3, bat_y + bat_h - 3, kBatteryFill);
-    }
-
-    // Time readout ("H:MM" from app_main) rendered top-left with a 3x5 micro-font.
-    if (time_str) {
-        int pen_x = 8;
-        const int glyph_h = 5 * kTimeScale;
-        const int glyph_y = (StatusBarConfig{}.height - glyph_h) / 2;
-        for (const char* p = time_str; *p; ++p) {
-            draw_time_glyph(fb, pen_x, glyph_y, *p, kTextColor);
-            pen_x += 3 * kTimeScale + kTimeScale;   // glyph width + one column spacing
-        }
+        const uint16_t fill_color =
+            power.charging ? colors::kOk
+            : pct < 20     ? colors::kDanger
+                           : colors::kText;
+        fb.fill_round_rect(ox + 2, oy + 2, fill_w, kOutlineH - 4, 2,
+                           fill_color);
     }
 }
 

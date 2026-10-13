@@ -453,11 +453,12 @@ static void test_status_bar_time() {
 
     status.render(fb, "12:34");
 
-    // At least one clock pixel (white text) must appear in the left half of the bar.
+    // Time ink: full-coverage glyph pixels in `text` (0xF77F) in the
+    // left of the 44px status zone (Muse Gloss section 8 geometry).
     bool found_clock_pixel = false;
-    for (int y = 0; y < 36 && !found_clock_pixel; ++y) {
+    for (int y = 0; y < aiwatchos::kStatusZoneH && !found_clock_pixel; ++y) {
         for (int x = 0; x < aiwatchos::kDisplayWidth / 2; ++x) {
-            if (buf[y * aiwatchos::kDisplayWidth + x] == 0xFFFF) {
+            if (buf[y * aiwatchos::kDisplayWidth + x] == aiwatchos::colors::kText) {
                 found_clock_pixel = true;
                 break;
             }
@@ -465,14 +466,17 @@ static void test_status_bar_time() {
     }
     assert(found_clock_pixel);   // time glyphs were actually drawn
 
-    // Battery outline must still be drawn at the top-right.
-    const int bat_x = aiwatchos::kDisplayWidth - 48 - 8;
-    assert(buf[8 * aiwatchos::kDisplayWidth + bat_x] == 0x7BCF);
+    // Battery cluster: 25x12 outline in `dim` at the right (ox=363,
+    // oy=16); TestHal reports 85% not charging, so the fill is `text`.
+    const int ox = aiwatchos::kDisplayWidth - 20 - 2 - 25;
+    const int oy = (aiwatchos::kStatusZoneH - 12) / 2;
+    assert(buf[oy * aiwatchos::kDisplayWidth + (ox + 12)] == aiwatchos::colors::kDim);
+    assert(buf[(oy + 6) * aiwatchos::kDisplayWidth + (ox + 5)] == aiwatchos::colors::kText);
 
     // Null time string must not crash and must still draw the battery icon.
     fb.fill(0x0000);
     status.render(fb, nullptr);
-    assert(buf[8 * aiwatchos::kDisplayWidth + bat_x] == 0x7BCF);
+    assert(buf[oy * aiwatchos::kDisplayWidth + (ox + 12)] == aiwatchos::colors::kDim);
 
     printf("test_status_bar_time: PASSED\n");
 }
@@ -729,8 +733,9 @@ static void test_muse_play_reply() {
 
 // --- Test launcher hit-testing (drives the real LauncherUI::on_touch) ---
 static void test_launcher_hit_testing() {
-    // Grid: status 36 + 24 pad, 64px icons, gap_x = (410-3*64)/4 = 54.
-    // Icon (0,0) spans x in [54,118), y in [60,124).
+    // Muse Gloss tiles: 96x96 at x = 33/157/281, rows y = 64/212/360
+    // (DESIGN_TOKENS section 7). Tile 0 spans x in [33,129), y in
+    // [64,160); the gutter between tiles 0 and 1 is x in [129,157).
     aiwatchos::TestHal hal;
     aiwatchos::AppManager mgr(hal);
     aiwatchos::App app_a = aiwatchos::make_app("appA");
@@ -739,18 +744,20 @@ static void test_launcher_hit_testing() {
     mgr.register_app(&app_b);
     aiwatchos::LauncherUI launcher(mgr);
 
-    // Tap in the left gap (x=40, between edge-swipe zone and icon 0) must
-    // NOT launch appA: integer truncation used to round it into column 0.
-    aiwatchos::TouchEvent gap{40, 92, aiwatchos::TouchEvent::Press};
+    // Tap in the left margin (x=32, between the edge-swipe strip and
+    // tile 0) must NOT launch appA.
+    aiwatchos::TouchEvent gap{32, 92, aiwatchos::TouchEvent::Press};
     assert(launcher.on_touch(gap) == false);
     assert(std::string(mgr.current_app_id()) == "appA");
 
-    // Tap in the gutter between icon 0 and icon 1 must not launch either.
+    // Tap in the gutter between tile 0 and tile 1 must not launch either.
     aiwatchos::TouchEvent gutter{140, 92, aiwatchos::TouchEvent::Press};
     assert(launcher.on_touch(gutter) == false);
     assert(std::string(mgr.current_app_id()) == "appA");
 
-    // Tap inside icon 1 (x in [172,236)) launches appB.
+    // Tap inside tile 0 launches... tile 0 IS appA (already foreground,
+    // switch_to self is a no-op success); tile 1 (x in [157,253))
+    // launches appB.
     aiwatchos::TouchEvent icon{200, 92, aiwatchos::TouchEvent::Press};
     assert(launcher.on_touch(icon) == true);
     assert(std::string(mgr.current_app_id()) == "appB");
