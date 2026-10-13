@@ -117,8 +117,66 @@ void NotificationManager::add_notification(std::string title, std::string body) 
     if (notifications_.size() >= kMaxNotifications) {
         notifications_.erase(notifications_.begin());   // drop oldest
     }
-    notifications_.push_back({std::move(title), std::move(body), board_.now_ms()});
+    Notification n;
+    n.title = std::move(title);
+    n.body = std::move(body);
+    n.timestamp_ms = board_.now_ms();
+    notifications_.push_back(std::move(n));
     expanded_ = -1;
+}
+
+void NotificationManager::add_actionable(std::string title, std::string body,
+                                         std::string action_app,
+                                         std::string action_id,
+                                         uint64_t expires_ms) {
+    // Dedupe: one persistent entry per (app, id), updated in place.
+    for (auto& n : notifications_) {
+        if (!n.action_app.empty() && n.action_app == action_app &&
+            n.action_id == action_id) {
+            n.title = std::move(title);
+            n.body = std::move(body);
+            n.expires_ms = expires_ms;
+            n.timestamp_ms = board_.now_ms();
+            return;
+        }
+    }
+    if (notifications_.size() >= kMaxNotifications) {
+        notifications_.erase(notifications_.begin());   // drop oldest
+    }
+    Notification n;
+    n.title = std::move(title);
+    n.body = std::move(body);
+    n.timestamp_ms = board_.now_ms();
+    n.action_app = std::move(action_app);
+    n.action_id = std::move(action_id);
+    n.expires_ms = expires_ms;
+    notifications_.push_back(std::move(n));
+    expanded_ = -1;
+}
+
+bool NotificationManager::retire_action(const std::string& action_app,
+                                        const std::string& action_id) {
+    for (size_t i = 0; i < notifications_.size(); ++i) {
+        const Notification& n = notifications_[i];
+        if (!n.action_app.empty() && n.action_app == action_app &&
+            n.action_id == action_id) {
+            notifications_.erase(notifications_.begin() + i);
+            if (expanded_ == static_cast<int>(i)) expanded_ = -1;
+            return true;
+        }
+    }
+    return false;
+}
+
+bool NotificationManager::has_action(const std::string& action_app,
+                                     const std::string& action_id) const {
+    for (const auto& n : notifications_) {
+        if (!n.action_app.empty() && n.action_app == action_app &&
+            n.action_id == action_id) {
+            return true;
+        }
+    }
+    return false;
 }
 
 int NotificationManager::body_lines(const Notification& n, bool expanded) const {
@@ -185,6 +243,13 @@ void NotificationManager::render(Framebuffer& fb) {
                           static_cast<unsigned>((shown_ms / 60000) % 60));
             draw_text_aa_right(fb, kCardX + kCardW - 12, y + 12, time_buf,
                                FontFace::kMicro, colors::kFaint);
+            // H10: an expired actionable entry says so, in place of
+            // any affordance — it must never read as tappable.
+            if (expired(n)) {
+                draw_text_aa_right(fb, kCardX + kCardW - 12, y + 24,
+                                   "EXPIRED", FontFace::kMicro,
+                                   colors::kDanger);
+            }
 
             // Body lines.
             const int lh = font_line_height(FontFace::kCaption);
@@ -249,8 +314,18 @@ bool NotificationManager::on_touch(const TouchEvent& event) {
         case TouchEvent::Release: {
             const bool consumed = press_card_ >= 0;
             if (!drag_moved_ && press_card_ >= 0) {
-                // Tap: toggle expansion of the pressed card.
-                expanded_ = (expanded_ == press_card_) ? -1 : press_card_;
+                // Tap on a LIVE actionable entry fires its action
+                // (H10) instead of expanding. An expired entry never
+                // fires — it falls through to plain expand behavior.
+                const Notification& tapped = notifications_[press_card_];
+                if (!tapped.action_app.empty() && !expired(tapped) &&
+                    action_handler_) {
+                    const std::string app = tapped.action_app;
+                    action_handler_(app.c_str(), action_ctx_);
+                } else {
+                    // Tap: toggle expansion of the pressed card.
+                    expanded_ = (expanded_ == press_card_) ? -1 : press_card_;
+                }
             } else if (drag_moved_ && press_card_ >= 0 &&
                        event.x - press_x_ > 60) {
                 // Swipe right: dismiss.
@@ -272,6 +347,15 @@ bool NotificationManager::on_touch(const TouchEvent& event) {
 // Static state for callback-based app interface.
 namespace {
     NotificationManager* g_notifications = nullptr;
+}  // namespace
+
+NotificationManager* active_notifications() { return g_notifications; }
+
+void set_active_notifications(NotificationManager* mgr) {
+    g_notifications = mgr;
+}
+
+namespace {
 
     void notif_init() {}
 
@@ -300,7 +384,7 @@ namespace {
 App NotificationManager::make_app() {
     static Hal& board = hal();
     static NotificationManager mgr(board);
-    g_notifications = &mgr;
+    set_active_notifications(&mgr);
 
     // Fully qualify to avoid resolving as a recursive call to this member function.
     return aiwatchos::make_app("notifications", notif_init, notif_tick, notif_render, notif_touch);

@@ -94,6 +94,15 @@ extern "C" void app_main(void) {
 
     aiwatchos::App notif_app = aiwatchos::NotificationManager::make_app();
     g_app_mgr.register_app(&notif_app);
+    // H10: tapping a live actionable notification (e.g. a Hermes
+    // prompt) opens the producing app.
+    if (auto* nm = aiwatchos::active_notifications()) {
+        nm->set_action_handler(
+            [](const char* app_id, void* ctx) {
+                static_cast<aiwatchos::AppManager*>(ctx)->switch_to(app_id);
+            },
+            &g_app_mgr);
+    }
 
     aiwatchos::App weather_app = aiwatchos::WeatherApp::make_app();
     g_app_mgr.register_app(&weather_app);

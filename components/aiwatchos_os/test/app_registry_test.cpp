@@ -1930,6 +1930,75 @@ static void test_muse_pixel() {
     printf("test_muse_pixel: PASSED\n");
 }
 
+// --- Actionable notifications (H10 manager semantics) ---
+static int g_action_fires = 0;
+static std::string g_action_app_seen;
+static void record_action(const char* app_id, void* ctx) {
+    (void)ctx;
+    ++g_action_fires;
+    g_action_app_seen = app_id;
+}
+
+static void test_notifications_actionable() {
+    aiwatchos::TestHal hal;
+    hal.advance_ms(100000);
+    aiwatchos::NotificationManager mgr(hal);
+    mgr.set_action_handler(&record_action, nullptr);
+    const uint64_t t0 = hal.now_ms();
+
+    // One persistent entry per (app, id): re-posting updates in place.
+    mgr.add_actionable("Hermes prompt", "Allow camera?", "hermes", "p1",
+                       t0 + 60000);
+    mgr.add_actionable("Hermes prompt", "Allow camera? (updated)", "hermes",
+                       "p1", t0 + 90000);
+    assert(mgr.count() == 1);
+    assert(mgr.at(0).body == "Allow camera? (updated)");
+    assert(mgr.has_action("hermes", "p1"));
+    assert(!mgr.has_action("hermes", "other"));
+    assert(!mgr.expired(mgr.at(0)));
+
+    mgr.add_notification("Plain", "just news");
+    assert(mgr.count() == 2);
+
+    static uint16_t buf[aiwatchos::kDisplayWidth * aiwatchos::kDisplayHeight];
+    aiwatchos::Framebuffer fb{buf, aiwatchos::kDisplayWidth, aiwatchos::kDisplayHeight};
+    auto tap = [&](int x, int y) {
+        aiwatchos::TouchEvent press{x, y, aiwatchos::TouchEvent::Press};
+        aiwatchos::TouchEvent release{x, y, aiwatchos::TouchEvent::Release};
+        mgr.on_touch(press);
+        mgr.on_touch(release);
+    };
+    // Newest ("Plain") renders on top (y=56, one body line); the
+    // prompt card follows at y~131. Tapping it fires the action with
+    // the producing app id.
+    g_action_fires = 0;
+    tap(200, 160);
+    assert(g_action_fires == 1);
+    assert(g_action_app_seen == "hermes");
+
+    // After the deadline the entry stays but is EXPIRED: the tag
+    // renders (kDanger 0xFAEB, Micro, right side under the time) and a
+    // tap no longer fires the action.
+    hal.advance_ms(91000);
+    assert(mgr.expired(mgr.at(0)));
+    fb.fill(0x0000);
+    mgr.render(fb);
+    int danger = 0;
+    for (int y = 150; y <= 170; ++y)
+        for (int x = 320; x <= 380; ++x)
+            if (buf[y * aiwatchos::kDisplayWidth + x] == 0xFAEB) ++danger;
+    assert(danger > 3);
+    tap(200, 160);
+    assert(g_action_fires == 1);
+
+    // Retire removes exactly that entry.
+    assert(mgr.retire_action("hermes", "p1"));
+    assert(mgr.count() == 1);
+    assert(!mgr.has_action("hermes", "p1"));
+    assert(!mgr.retire_action("hermes", "p1"));
+    printf("test_notifications_actionable: PASSED\n");
+}
+
 int main() {
     test_aa_text();                      // baked Inter AA renderer against real assets
     test_touch_synth();                  // Press/Move/Release from the point stream
@@ -1958,6 +2027,7 @@ int main() {
     test_muse_play_reply();              // plays the fixture through the reply path
     test_launcher_hit_testing();         // drives real LauncherUI gap/icon taps
     test_notification_wrap();            // drives real multi-line body render
+    test_notifications_actionable();     // H10: dedupe/retire/expiry/tap-action
     test_muse_level_meter();             // drives the live mic RMS meter
     test_hermes_vitals();                // drives the Hermes health dashboard
     test_muse_turn_log();                // drives the voice turn activity log
