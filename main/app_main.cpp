@@ -461,9 +461,14 @@ extern "C" void app_main(void) {
 
         uint64_t now_ms = aiwatchos::local_display_ms(frame_now_ms);  // display-only TZ shift
         char time_str[16];
-        unsigned hours = static_cast<unsigned>((now_ms / 3600000) % 24);
+        // 12-hour, matching the clock face (stage-2 made the face
+        // 12-hour per the design; the status-zone mini-clock kept
+        // formatting 24-hour — same conversion as clock_face.cpp).
+        const unsigned hour24 =
+            static_cast<unsigned>((now_ms / 3600000) % 24);
+        const unsigned hour12 = (hour24 % 12 == 0) ? 12u : (hour24 % 12);
         unsigned minutes = static_cast<unsigned>((now_ms / 60000) % 60);
-        snprintf(time_str, sizeof(time_str), "%u:%02u", hours, minutes);
+        snprintf(time_str, sizeof(time_str), "%u:%02u", hour12, minutes);
         g_status_bar.render(fb, time_str);
 
 #ifdef __ESPRESSIF_IDF__
