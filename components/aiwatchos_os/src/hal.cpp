@@ -6,6 +6,7 @@
 #include "aiwatchos/rtc.hpp"
 
 #ifdef __ESPRESSIF_IDF__
+#include "sdkconfig.h"
 #include "driver/gpio.h"
 #include "esp_err.h"
 #include "esp_log.h"
@@ -233,6 +234,18 @@ void board_set_epoch_ms(uint64_t epoch_ms) {
     g_now_ms = epoch_ms;
 #endif
     rtc_write_epoch_ms(epoch_ms);
+}
+
+// Display-only local time-of-day (see hal.hpp): epoch + configured TZ
+// offset. Never used for timekeeping — now_ms() stays true UTC epoch.
+uint64_t local_display_ms(uint64_t epoch_ms) {
+#if defined(__ESPRESSIF_IDF__) && defined(CONFIG_AIWATCHOS_TZ_OFFSET_MIN)
+    int64_t shifted = static_cast<int64_t>(epoch_ms) +
+        static_cast<int64_t>(CONFIG_AIWATCHOS_TZ_OFFSET_MIN) * 60000;
+    return shifted < 0 ? 0 : static_cast<uint64_t>(shifted);
+#else
+    return epoch_ms;
+#endif
 }
 
 // Test helper: advance the monotonic clock by elapsed milliseconds. This lets unit tests

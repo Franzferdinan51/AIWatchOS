@@ -76,7 +76,9 @@ namespace {
         // the hands always point to the correct time, not a free-running counter that
         // drifts from real time. now_ms() returns epoch milliseconds in production and
         // is advanced by board_advance_test_time_ms() in unit tests.
-        uint64_t ms = hal().now_ms();
+        // Display derivation uses local time-of-day (configured TZ
+        // offset); now_ms() itself stays true UTC epoch.
+        uint64_t ms = local_display_ms(hal().now_ms());
         g_state.hour   = static_cast<uint8_t>((ms / 3600000ULL) % 24);
         g_state.minute = static_cast<uint8_t>((ms / 60000ULL) % 60);
         g_state.second = static_cast<uint8_t>((ms / 1000ULL) % 60);

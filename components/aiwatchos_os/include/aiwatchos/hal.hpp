@@ -121,12 +121,18 @@ Hal& hal();
 // returns a progressing value in unit tests (replaces PCF85063 RTC reads).
 void board_advance_test_time_ms(uint64_t ms);
 
-// Set the wall-clock time: shifts now_ms() so it reads `epoch_ms`
-// (milliseconds since the Unix epoch). Used by the network component when
-// SNTP sync lands; additive — it does not change the base the clock counts
-// from, only the offset applied on top of it. Safe to call repeatedly
-// (re-disciplining just recomputes the offset).
+// Set the wall-clock time: rebase now_ms() so it reads `epoch_ms`
+// (milliseconds since the Unix epoch) AND write through to the PCF85063
+// RTC so the time survives sleep and reboot. This is the single
+// discipline entry point: the network component calls it when SNTP
+// sync lands. Safe to call repeatedly.
 void board_set_epoch_ms(uint64_t epoch_ms);
+
+// Local time-of-day for DISPLAY derivations only (status bar, clock
+// face): epoch ms shifted by CONFIG_AIWATCHOS_TZ_OFFSET_MIN (default
+// -240 = EDT). The epoch stays true UTC everywhere else. Host builds
+// have no Kconfig, so the offset is 0 there.
+uint64_t local_display_ms(uint64_t epoch_ms);
 
 // Test-only: inject up to 2 touch points with screen-space coordinates. These are consumed
 // by the next Board::read_touch() call, simulating one IRQ-driven poll cycle from the FT3168.

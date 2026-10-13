@@ -12,4 +12,14 @@ config AIWATCHOS_DISPLAY_SLEEP_TIMEOUT_S
         under it. Set to 0 to disable the inactivity timeout (the PWR
         short-press sleep/wake toggle still works).
 
+config AIWATCHOS_TZ_OFFSET_MIN
+    int "Displayed time-of-day offset from UTC (minutes)"
+    default -240
+    range -720 840
+    help
+        Offset applied ONLY when deriving the displayed time-of-day
+        (status bar + clock face) from the UTC epoch. Default -240 =
+        EDT (UTC-4). The epoch itself stays true UTC everywhere else:
+        the PCF85063 RTC, SNTP discipline and all protocols keep UTC.
+
 endmenu

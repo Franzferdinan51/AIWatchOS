@@ -178,7 +178,7 @@ extern "C" void app_main(void) {
         fb.fill(0x0000);   // black background for AMOLED power saving
 
         // Status bar renders time and battery at the top of every screen.
-        uint64_t now_ms = frame_now_ms;
+        uint64_t now_ms = aiwatchos::local_display_ms(frame_now_ms);  // display-only TZ shift
         char time_str[16];
         unsigned hours = static_cast<unsigned>((now_ms / 3600000) % 24);
         unsigned minutes = static_cast<unsigned>((now_ms / 60000) % 60);
