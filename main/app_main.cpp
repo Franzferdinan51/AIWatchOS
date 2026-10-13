@@ -17,6 +17,10 @@
 #include <cstdio>
 
 #ifdef __ESPRESSIF_IDF__
+#include "aiwatchos_net/net.hpp"
+#endif
+
+#ifdef __ESPRESSIF_IDF__
 #include "esp_heap_caps.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -90,6 +94,13 @@ extern "C" void app_main(void) {
     // --- 3. Status bar with battery display ---
     static aiwatchos::BatteryDisplay g_status_bar(board);
 
+#ifdef __ESPRESSIF_IDF__
+    // --- 3b. Network: WiFi + SNTP + the Muse link (components/aiwatchos_net).
+    // Fails soft: with no credentials configured this leaves the watch in
+    // today's offline outbox mode, untouched.
+    aiwatchos_net::net_start();
+#endif
+
     // --- 4. Main event loop (replaces Arduino's loop()) ---
     const uint32_t kFrameMs = 40;   // ~25 FPS, matching LVGL frame rate from board config
 
@@ -125,6 +136,29 @@ extern "C" void app_main(void) {
         unsigned minutes = static_cast<unsigned>((now_ms / 60000) % 60);
         snprintf(time_str, sizeof(time_str), "%u:%02u", hours, minutes);
         g_status_bar.render(fb, time_str);
+
+#ifdef __ESPRESSIF_IDF__
+        // Link-state strip directly under the status bar (36 px tall):
+        // green = Muse linked, amber = connecting/retrying, dark grey =
+        // offline/unconfigured. Drawn with the existing framebuffer
+        // primitives only — no font involved.
+        {
+            uint16_t link_color = 0x2104;  // dark grey: off / no wifi
+            switch (aiwatchos_net::muse_link_state()) {
+                case aiwatchos_net::LinkState::kLinked:
+                    link_color = 0x07E0;  // green
+                    break;
+                case aiwatchos_net::LinkState::kConnecting:
+                case aiwatchos_net::LinkState::kWaitingWifi:
+                case aiwatchos_net::LinkState::kBackoff:
+                    link_color = 0xFEA0;  // amber
+                    break;
+                case aiwatchos_net::LinkState::kOff:
+                    break;
+            }
+            fb.fill_rect(0, 36, aiwatchos::kDisplayWidth - 1, 38, link_color);
+        }
+#endif
 
         // App renders its content below the status bar.
         g_app_mgr.render(fb);

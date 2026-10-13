@@ -11,6 +11,7 @@
 
 #ifdef __ESPRESSIF_IDF__
 #include "esp_heap_caps.h"
+#include "aiwatchos_net/net.hpp"
 #endif
 
 namespace aiwatchos_muse {
@@ -152,6 +153,22 @@ bool muse_turn_at(size_t idx, MuseTurn* out) {
 void muse_init() {
     if (g_state.initialized) return;
 
+#ifdef __ESPRESSIF_IDF__
+    // Transport wiring (device only): the net component's link task calls
+    // this pump when a session is up; the pump drains the outbox FIFO
+    // through the link's upload path. Offline/unconfigured, the pump is
+    // simply never invoked and turns keep buffering, as before.
+    aiwatchos_net::muse_link_set_outbox_pump(
+        [](void*) {
+            return muse_outbox_drain(
+                [](const uint8_t* data, size_t len, void*) {
+                    return aiwatchos_net::muse_link_upload_turn(data, len);
+                },
+                nullptr);
+        },
+        nullptr);
+#endif
+
     // The original muse_app_run() in main/app.c does:
     // 1. bsp_display_start() — CO5300 QSPI display init
     // 2. muse_pmu_init() — AXP2101 power management
@@ -237,12 +254,26 @@ void muse_render(aiwatchos::Framebuffer& fb) {
 
     // Phase prompt, mirroring the companion live session phases: idle,
     // listening, or a buffered turn waiting for the transport ("READY").
+    // Idle reflects the link state so the user can tell offline / linking /
+    // linked at a glance (device builds; host builds have no net stack and
+    // keep the plain prompt).
     const char* prompt = "HOLD TO TALK";
     if (g_state.listening) {
         prompt = "LISTENING";
     } else if (g_state.turn_bytes > 0) {
         prompt = "READY";
     }
+#ifdef __ESPRESSIF_IDF__
+    else {
+        switch (aiwatchos_net::muse_link_state()) {
+            case aiwatchos_net::LinkState::kLinked: prompt = "LINKED - HOLD TO TALK"; break;
+            case aiwatchos_net::LinkState::kConnecting: prompt = "CONNECTING"; break;
+            case aiwatchos_net::LinkState::kWaitingWifi: prompt = "WAITING FOR WIFI"; break;
+            case aiwatchos_net::LinkState::kBackoff: prompt = "LINK RETRYING"; break;
+            case aiwatchos_net::LinkState::kOff: break;  // plain prompt
+        }
+    }
+#endif
     int text_x = (aiwatchos::kDisplayWidth - static_cast<int>(strlen(prompt)) * 8) / 2;
 
     // Simple bitmap-style text rendering: draw each character as an 8x16 block.

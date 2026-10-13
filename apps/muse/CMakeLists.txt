@@ -6,7 +6,9 @@ idf_component_register(
     SRCS ${COMPONENT_SRCS}
     INCLUDE_DIRS include
     REQUIRES aiwatchos_os
-    PRIV_REQUIRES minimp3
+    # aiwatchos_net: the transport behind muse_outbox_drain's send seam
+    # (device builds; the adapter registers its pump under __ESPRESSIF_IDF__).
+    PRIV_REQUIRES minimp3 aiwatchos_net
 )
 
 # The muse-gadget-206 project is integrated as a submodule. Its components

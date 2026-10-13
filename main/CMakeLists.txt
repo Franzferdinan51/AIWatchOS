@@ -7,5 +7,5 @@ idf_component_register(
     INCLUDE_DIRS .
     # Component names come from their directory names: apps/muse -> muse,
     # apps/hermes -> hermes (not aiwatchos_muse / aiwatchos_hermes).
-    REQUIRES aiwatchos_os muse hermes
+    REQUIRES aiwatchos_os muse hermes aiwatchos_net
 )
