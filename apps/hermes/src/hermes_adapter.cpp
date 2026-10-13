@@ -792,7 +792,8 @@ void hermes_render(aiwatchos::Framebuffer& fb) {
         const uint32_t left_ms = 2000 - g_boot_hint_ms;
         char hold[48];
         std::snprintf(hold, sizeof(hold), "KEEP HOLDING: NEW SESSION IN %u.%us",
-                      left_ms / 1000, (left_ms % 1000) / 100);
+                      static_cast<unsigned>(left_ms / 1000),
+                      static_cast<unsigned>((left_ms % 1000) / 100));
         draw_text(fb, 16, aiwatchos::kDisplayHeight - 60, hold, 2, kAmberColor);
     }
     const char* hint = "HOLD BOTTOM: TALK";
