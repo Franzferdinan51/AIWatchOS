@@ -425,7 +425,7 @@ RxMsg* find_msg(const std::string& id, bool create) {
     for (auto& m : g_rx.msgs) {
         if (m.id == id) return &m;
     }
-    if (!create || id.empty() || g_rx.msgs.size() >= 4) return nullptr;
+    if (!create || id.empty() || g_rx.msgs.size() >= 8) return nullptr;
     g_rx.msgs.push_back(RxMsg{id, "", false});
     return &g_rx.msgs.back();
 }
@@ -468,11 +468,23 @@ void on_sub_line(const char* line) {
                 } else if (ev == "delta.message_done" ||
                            ev == "message.assistant") {
                     if (RxMsg* m = find_msg(mid, true)) {
-                        std::string full =
-                            json_str_field(p, "display_text", "content");
-                        if (full.empty()) full = json_str_field(p, "text");
-                        if (!full.empty()) m->text = full;
-                        m->done = true;
+                        // A message.assistant patch whose
+                        // display_text_ready is explicitly false is
+                        // not the final text yet (SDK on_event); the
+                        // message stays bound above, but is not done.
+                        const cJSON* ready =
+                            cJSON_GetObjectItemCaseSensitive(
+                                p, "display_text_ready");
+                        if (proto::event_finalizes(
+                                ev == "delta.message_done",
+                                cJSON_IsFalse(ready))) {
+                            std::string full =
+                                json_str_field(p, "display_text", "content");
+                            if (full.empty())
+                                full = json_str_field(p, "text");
+                            if (!full.empty()) m->text = full;
+                            m->done = true;
+                        }
                     }
                 }
                 g_rx.any_event = true;
@@ -577,6 +589,17 @@ void stream_data(StreamSlot& s, ConstByteSpan data) {
 }
 
 void stream_end(StreamSlot& s, bool ok) {
+    if (s.kind == kStreamSub) {
+        // The subscribe stream is the connection's reason to exist. The
+        // reference drops the whole connection when it ends (SDK
+        // muse_chat_session.cpp stream_end: K_SUB returns false — "the
+        // connection has to go") and reopens it on reconnect. Marking
+        // the link down makes poll_socket fail right after this frame
+        // is processed, so the link task tears down and resubscribes
+        // instead of sitting linked but permanently deaf.
+        ESP_LOGW(kTag, "subscription ended; reconnecting");
+        g_conn.up = false;
+    }
     if (s.kind == kStreamChat && ok) on_chat_body(g_chat_body);
     if (s.kind == kStreamChat) g_chat_body.clear();
     s.kind = kStreamNone;

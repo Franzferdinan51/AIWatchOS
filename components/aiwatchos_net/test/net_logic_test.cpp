@@ -92,10 +92,22 @@ int main() {
     CHECK(host_from_ws_url("not a url") == "");
     CHECK(host_from_ws_url("") == "");
     CHECK(derive_host("explicit.h", "wss://u.h/", "vm1", "d.example") == "explicit.h");
-    CHECK(derive_host("", "wss://u.h/", "vm1", "d.example") == "u.h");
-    CHECK(derive_host("", "", "vm1", "d.example") == "vm1.d.example");
-    CHECK(derive_host("", "", "", "d.example") == "");
+    // The edge host (domain) wins over the vm_ws_url host: official SDK
+    // clients dial the one edge host and route by ?vm_id=; vm_ws_url is
+    // metadata, and "<vm>.<domain>" is never a routable host.
+    CHECK(derive_host("", "wss://u.h/", "vm1", "d.example") == "d.example");
+    CHECK(derive_host("", "", "vm1", "d.example") == "d.example");
+    CHECK(derive_host("", "", "", "d.example") == "d.example");
+    // The URL host is only a fallback when the domain is cleared.
+    CHECK(derive_host("", "wss://u.h/", "vm1", "") == "u.h");
     CHECK(derive_host("", "", "vm1", "") == "");
+    CHECK(derive_host("", "", "", "") == "");
+
+    // --- event finalization gate (SDK on_event semantics) ---
+    CHECK(event_finalizes(true, false));    // delta.message_done
+    CHECK(event_finalizes(true, true));     // done wins regardless
+    CHECK(event_finalizes(false, false));   // assistant, ready or absent
+    CHECK(!event_finalizes(false, true));   // assistant, ready == false
 
     // --- setup-string parsing ---
     {
