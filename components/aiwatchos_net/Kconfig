@@ -1,0 +1,58 @@
+menu "AIWatchOS Network"
+
+config AIWATCHOS_NET_ENABLE
+    bool "Enable WiFi + Muse link"
+    default y
+    help
+        Brings up the shared network component (WiFi STA, SNTP) and the
+        Muse transport (WSS + Noise XX to the Hatch VM). When disabled,
+        or when no credentials are configured, the watch behaves exactly
+        as before: voice turns collect in the Muse outbox offline.
+
+config AIWATCHOS_NET_WIFI_SSID
+    string "WiFi SSID (build-time default)"
+    default ""
+    help
+        Default network to join. An NVS value saved through the settings
+        seam (namespace "aiwnet", key "ssid") overrides this at runtime.
+
+config AIWATCHOS_NET_WIFI_PASSWORD
+    string "WiFi password (build-time default)"
+    default ""
+
+config AIWATCHOS_NET_HATCH_TOKEN
+    string "Hatch device token (build-time default)"
+    default ""
+    help
+        Account device token used against https://api.muse.ai/fetch_vms
+        to resolve the VM and its per-VM credential. Leave empty when a
+        VM token is configured directly instead.
+
+config AIWATCHOS_NET_HATCH_VM_TOKEN
+    string "VM token directly (skips the account API)"
+    default ""
+    help
+        The per-VM bearer token for the /v1/noise connection itself.
+        When set (with a VM id and host), the account API is not called.
+
+config AIWATCHOS_NET_HATCH_VM
+    string "VM id (empty: the account's default VM)"
+    default ""
+
+config AIWATCHOS_NET_HATCH_HOST
+    string "VM host override (empty: derive from the VM's wss URL)"
+    default ""
+    help
+        Host to open the TLS connection to, e.g. "abc123.hatch.example".
+        When empty, the host is parsed from the vm_ws_url returned by
+        the account API; with a direct VM token, "<vm>.<domain>" is used.
+
+config AIWATCHOS_NET_HATCH_DOMAIN
+    string "VM domain for direct-token host derivation"
+    default "hatch.metaaivm.com"
+
+config AIWATCHOS_NET_SNTP_SERVER
+    string "SNTP server"
+    default "pool.ntp.org"
+
+endmenu
