@@ -658,6 +658,146 @@ static void test_settings_volume() {
     printf("test_settings_volume: PASSED\n");
 }
 
+// --- Test Settings registered rows (M22 status page + external toggle) ---
+namespace {
+struct FakeStatus {
+    int calls = 0;
+};
+size_t fake_status_provider(aiwatchos::SettingsStatusRow* rows, size_t max_rows,
+                            void* ctx) {
+    auto* st = static_cast<FakeStatus*>(ctx);
+    ++st->calls;
+    const char* vals[2][2] = {{"WiFi", "CONNECTED"}, {"Muse token", "PRESENT"}};
+    size_t n = 0;
+    for (; n < 2 && n < max_rows; ++n) {
+        std::snprintf(rows[n].label, sizeof(rows[n].label), "%s", vals[n][0]);
+        std::snprintf(rows[n].value, sizeof(rows[n].value), "%s", vals[n][1]);
+    }
+    return n;
+}
+struct FakeToggle {
+    bool on = false;
+    int sets = 0;
+};
+bool fake_toggle_get(void* ctx) { return static_cast<FakeToggle*>(ctx)->on; }
+void fake_toggle_set(void* ctx, bool on) {
+    auto* t = static_cast<FakeToggle*>(ctx);
+    t->on = on;
+    ++t->sets;
+}
+}  // namespace
+
+static void test_settings_registered_rows() {
+    // The OS settings page cannot depend on the net component, so main
+    // registers a status provider (About page, M22) and one toggle row
+    // (M10 speak). Drive both seams through the REAL page.
+    static FakeStatus status;
+    static FakeToggle toggle;
+    aiwatchos::settings_register_status_provider(&fake_status_provider,
+                                                 &status);
+    aiwatchos::SettingsToggleRow row;
+    row.label = "Speak replies";
+    row.get = &fake_toggle_get;
+    row.set = &fake_toggle_set;
+    row.ctx = &toggle;
+    assert(aiwatchos::settings_register_toggle(row) == true);
+    // The single slot is taken; a second registration is refused.
+    assert(aiwatchos::settings_register_toggle(row) == false);
+
+    aiwatchos::TestHal hal;
+    aiwatchos::SettingsPage page(hal);
+    static uint16_t buf[aiwatchos::kDisplayWidth * aiwatchos::kDisplayHeight];
+    aiwatchos::Framebuffer fb{buf, aiwatchos::kDisplayWidth,
+                              aiwatchos::kDisplayHeight};
+    fb.fill(0x0000);
+    page.render(fb);   // list with 6 rows renders
+
+    // About row (row 3, y 284..348) opens the status page; the provider
+    // is consulted on render; any press leaves the page again.
+    aiwatchos::TouchEvent open_about{200, 316, aiwatchos::TouchEvent::Press};
+    assert(page.on_touch(open_about) == true);
+    fb.fill(0x0000);
+    page.render(fb);
+    assert(status.calls > 0);
+    aiwatchos::TouchEvent exit_about{100, 100, aiwatchos::TouchEvent::Press};
+    assert(page.on_touch(exit_about) == true);
+
+    // Toggle row (row 5, y 436..500) flips the registered state.
+    aiwatchos::TouchEvent tap_toggle{200, 468, aiwatchos::TouchEvent::Press};
+    assert(page.on_touch(tap_toggle) == true);
+    assert(toggle.on && toggle.sets == 1);
+    assert(page.on_touch(tap_toggle) == true);
+    assert(!toggle.on && toggle.sets == 2);
+
+    printf("test_settings_registered_rows: PASSED\n");
+}
+
+// --- Test Hermes H1 history ring (direct protocol client) ----------------
+static void test_hermes_history() {
+    using namespace aiwatchos_hermes;
+    // Static storage: the client embeds the ~35 KB view (H1 ring) and
+    // must not sit on a test stack frame.
+    static HermesClient client_storage;
+    HermesClient& c = client_storage;
+    HermesSinks sinks{};   // no transport: sends drop by design
+    c.init(sinks, HermesConfig{});
+    uint8_t key[32] = {};
+    c.set_key(key);
+    c.on_transport_open(1000);
+    auto inject = [&c](const char* json, uint64_t t) {
+        c.on_text(json, std::strlen(json), t);
+    };
+    inject("{\"type\":\"welcome\",\"session\":\"s1\",\"paired\":true,\"heartbeat_s\":20}", 1100);
+    assert(c.view().history_count == 0);
+
+    char js[256];
+    auto run_turn = [&](int n, uint64_t t0) {
+        inject("{\"type\":\"turn.start\"}", t0);
+        std::snprintf(js, sizeof(js),
+                      "{\"type\":\"transcript\",\"text\":\"question %d\"}", n);
+        inject(js, t0 + 100);
+        std::snprintf(js, sizeof(js),
+                      "{\"type\":\"reply\",\"text\":\"answer %d\"}", n);
+        inject(js, t0 + 500);
+        inject("{\"type\":\"turn.end\",\"outcome\":\"success\"}", t0 + 900);
+    };
+
+    run_turn(1, 10000);
+    // The just-finished pair is the CURRENT exchange, not history yet.
+    assert(c.view().history_count == 0);
+    assert(std::strcmp(c.view().transcript, "question 1") == 0);
+
+    run_turn(2, 20000);   // turn 2's start archives turn 1, stamped at its end
+    assert(c.view().history_count == 1);
+    assert(std::strcmp(c.view().history[0].transcript, "question 1") == 0);
+    assert(std::strcmp(c.view().history[0].reply, "answer 1") == 0);
+    assert(c.view().history[0].end_ms == 10900);
+
+    for (int n = 3; n <= 8; ++n) run_turn(n, 10000ULL * static_cast<unsigned>(n));
+    // 7 archives total (turns 1..7); the ring holds the last 6, oldest
+    // evicted first.
+    assert(c.view().history_count == 6);
+    assert(std::strcmp(c.view().history[0].transcript, "question 2") == 0);
+    assert(std::strcmp(c.view().history[5].transcript, "question 7") == 0);
+    assert(std::strcmp(c.view().history[5].reply, "answer 7") == 0);
+
+    // session.new clears the ring: history is session-scoped.
+    assert(c.new_session(90000));
+    assert(c.view().history_count == 0);
+    assert(c.view().transcript[0] == '\0' && c.view().reply[0] == '\0');
+
+    // The transcript boundary archives too (flows without turn.start).
+    inject("{\"type\":\"transcript\",\"text\":\"typed hi\"}", 100000);
+    inject("{\"type\":\"reply\",\"text\":\"typed answer\"}", 100100);
+    inject("{\"type\":\"turn.end\",\"outcome\":\"success\"}", 100200);
+    inject("{\"type\":\"transcript\",\"text\":\"next\"}", 101000);
+    assert(c.view().history_count == 1);
+    assert(std::strcmp(c.view().history[0].reply, "typed answer") == 0);
+    assert(c.view().history[0].end_ms == 100200);
+
+    printf("test_hermes_history: PASSED\n");
+}
+
 // --- Test MP3 reply decoding (drives the vendored minimp3 on a fixture) ---
 static void test_minimp3_reply() {
     // Spoken replies arrive as MP3 and must decode to playable PCM. The
@@ -1856,6 +1996,14 @@ static void test_muse_captions() {
     assert(caption_from_reply("# Title\n> quoted _line_ ~gone~") ==
            "Title quoted line gone");
     assert(caption_from_reply("  spaced   out\t\n lines  ") == "spaced out lines");
+    // M10: the speech cleaner is the same cleaning WITHOUT the
+    // 240-char caption clip (the TTS engine chunks the full text).
+    {
+        std::string long_reply(300, 'x');
+        assert(caption_from_reply(long_reply).size() < 300);
+        assert(caption_clean_full(long_reply) == long_reply);
+        assert(caption_clean_full("**loud** and `clear`") == "loud and clear");
+    }
     // An unclosed fence is not a fence (the regex needs the pair); its
     // backticks are stripped as markdown chars and the text survives.
     assert(caption_from_reply("a ``` b") == "a b");
@@ -2382,6 +2530,7 @@ int main() {
     test_muse_turn_buffering();          // drives the REAL muse PTT pipeline into the turn buffer
     test_noise_crypto();                 // drives the vendored Noise crypto backend (or skips)
     test_settings_volume();              // drives Settings volume tap into the Hal
+    test_settings_registered_rows();     // M22 status page + registered toggle seams
     test_minimp3_reply();                // decodes the MP3 reply fixture (or skips)
     test_muse_play_reply();              // plays the fixture through the reply path
     test_launcher_hit_testing();         // drives real LauncherUI gap/icon taps
@@ -2389,6 +2538,7 @@ int main() {
     test_notifications_actionable();     // H10: dedupe/retire/expiry/tap-action
     test_muse_level_meter();             // drives the live mic RMS meter
     test_hermes_vitals();                // drives the Hermes health dashboard
+    test_hermes_history();               // H1: history ring archive/evict/clear
     test_muse_turn_log();                // drives the voice turn activity log
     test_muse_outbox();                  // drives the offline turn outbox
     test_muse_captions();                // companion caption/activity ports (M2/M3)

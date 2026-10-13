@@ -152,11 +152,173 @@ bool parse_setup_string(const char* text, SetupFields* out) {
             else if (key == "vm") { out->vm = val; out->has_vm = true; }
             else if (key == "host") { out->host = val; out->has_host = true; }
             else if (key == "domain") { out->domain = val; out->has_domain = true; }
+            else if (key == "ttsurl") { out->tts_url = val; out->has_tts_url = true; }
+            else if (key == "ttskey") { out->tts_key = val; out->has_tts_key = true; }
+            else if (key == "ttsmodel") { out->tts_model = val; out->has_tts_model = true; }
+            else if (key == "ttsvoice") { out->tts_voice = val; out->has_tts_voice = true; }
+            else if (key == "speak") {
+                out->tts_speak = (val == "1" || val == "true");
+                out->has_tts_speak = true;
+            }
         }
         if (amp == query.size()) break;
         pos = amp + 1;
     }
     return true;
+}
+
+bool heard_transcript_clean(const char* raw, char* out, size_t cap) {
+    if (!out || cap == 0) return false;
+    out[0] = '\0';
+    if (!raw) return false;
+    // Cut the server's attachment suffix: "\n[file:audio/wav ...]".
+    const char* end = raw + std::strlen(raw);
+    const char* att = std::strstr(raw, "\n[file:");
+    if (att) end = att;
+    // Trim surrounding whitespace (the heard line itself is one line).
+    const char* p = raw;
+    auto is_ws = [](char c) {
+        return c == ' ' || c == '\t' || c == '\r' || c == '\n';
+    };
+    while (p < end && is_ws(*p)) ++p;
+    while (end > p && is_ws(end[-1])) --end;
+    if (p >= end) return false;
+    // The pre-transcription placeholder is not a transcript.
+    if (static_cast<size_t>(end - p) == 12 &&
+        std::strncmp(p, "[Voice note]", 12) == 0) {
+        return false;
+    }
+    size_t n = static_cast<size_t>(end - p);
+    if (n >= cap) {
+        n = cap - 1;
+        // Never split a UTF-8 code point at the cap.
+        while (n > 0 && (static_cast<unsigned char>(p[n]) & 0xC0) == 0x80) --n;
+    }
+    std::memcpy(out, p, n);
+    out[n] = '\0';
+    return n > 0;
+}
+
+namespace {
+
+// JSON string escaping for the TTS request body: quotes, backslash,
+// and control characters; all other bytes (UTF-8 included) pass through
+// raw, which JSON permits.
+void json_escape_into(const std::string& in, std::string* out) {
+    static const char kHex[] = "0123456789abcdef";
+    for (unsigned char c : in) {
+        switch (c) {
+            case '"': *out += "\\\""; break;
+            case '\\': *out += "\\\\"; break;
+            case '\n': *out += "\\n"; break;
+            case '\r': *out += "\\r"; break;
+            case '\t': *out += "\\t"; break;
+            default:
+                if (c < 0x20) {
+                    *out += "\\u00";
+                    *out += kHex[c >> 4];
+                    *out += kHex[c & 15];
+                } else {
+                    *out += static_cast<char>(c);
+                }
+        }
+    }
+}
+
+bool tts_is_ws(char c) {
+    return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' ||
+           c == '\v';
+}
+
+std::string tts_trimmed(const std::string& in) {
+    size_t b = 0, e = in.size();
+    while (b < e && tts_is_ws(in[b])) ++b;
+    while (e > b && tts_is_ws(in[e - 1])) --e;
+    return in.substr(b, e - b);
+}
+
+// Largest prefix of `s` (starting at byte `pos`) of at most `max` bytes
+// that ends on a UTF-8 code-point boundary.
+size_t tts_utf8_span(const std::string& s, size_t pos, size_t max) {
+    size_t n = max;
+    if (pos + n > s.size()) n = s.size() - pos;
+    while (n > 0 && pos + n < s.size() &&
+           (static_cast<unsigned char>(s[pos + n]) & 0xC0) == 0x80) {
+        --n;
+    }
+    return n ? n : max;   // degenerate bytes: take the raw span
+}
+
+}  // namespace
+
+std::vector<std::string> tts_chunks(const std::string& text, size_t max_chars) {
+    std::vector<std::string> out;
+    const std::string trimmed = tts_trimmed(text);
+    if (trimmed.empty() || max_chars == 0) return out;
+    if (trimmed.size() <= max_chars) {
+        out.push_back(trimmed);
+        return out;
+    }
+    // Sentence spans: a boundary follows [.!?] + whitespace (the
+    // companion's (?<=[.!?])\s+ split); punctuation stays with its
+    // sentence, the separating whitespace is dropped.
+    std::vector<std::string> sentences;
+    size_t start = 0;
+    for (size_t i = 0; i < trimmed.size(); ++i) {
+        const char c = trimmed[i];
+        if ((c == '.' || c == '!' || c == '?') && i + 1 < trimmed.size() &&
+            tts_is_ws(trimmed[i + 1])) {
+            sentences.push_back(trimmed.substr(start, i + 1 - start));
+            size_t j = i + 1;
+            while (j < trimmed.size() && tts_is_ws(trimmed[j])) ++j;
+            start = j;
+            i = j - 1;
+        }
+    }
+    if (start < trimmed.size()) sentences.push_back(trimmed.substr(start));
+
+    std::string cur;
+    auto flush = [&]() {
+        if (!cur.empty()) {
+            out.push_back(cur);
+            cur.clear();
+        }
+    };
+    for (const std::string& s : sentences) {
+        if (s.size() > max_chars) {
+            // Oversize single sentence: flush, then hard-split at the
+            // cap (see header note — no request may exceed it).
+            flush();
+            size_t pos = 0;
+            while (pos < s.size()) {
+                const size_t n = tts_utf8_span(s, pos, max_chars);
+                out.push_back(s.substr(pos, n));
+                pos += n;
+            }
+            continue;
+        }
+        if (!cur.empty() && cur.size() + 1 + s.size() > max_chars) flush();
+        if (!cur.empty()) cur += ' ';
+        cur += s;
+    }
+    flush();
+    return out;
+}
+
+std::string tts_request_json(const std::string& model, const std::string& voice,
+                             const std::string& input) {
+    std::string out = "{\"model\":\"";
+    json_escape_into(model, &out);
+    out += "\",\"input\":\"";
+    json_escape_into(input, &out);
+    out += "\",\"response_format\":\"mp3\"";
+    if (!voice.empty()) {
+        out += ",\"voice\":\"";
+        json_escape_into(voice, &out);
+        out += "\"";
+    }
+    out += "}";
+    return out;
 }
 
 bool agent_status_combine(const char* activity_code, const char* status,

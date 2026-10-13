@@ -107,6 +107,65 @@ extern "C" void app_main(void) {
     aiwatchos::App weather_app = aiwatchos::WeatherApp::make_app();
     g_app_mgr.register_app(&weather_app);
 
+#ifdef __ESPRESSIF_IDF__
+    // M22: provisioning status for the Settings About page. The OS
+    // settings layer cannot depend on the net component, so main —
+    // which links both — registers the provider. Presence/state words
+    // ONLY: no secret value (token, password, key) is ever rendered.
+    aiwatchos::settings_register_status_provider(
+        [](aiwatchos::SettingsStatusRow* rows, size_t max_rows,
+           void*) -> size_t {
+            const aiwatchos_net::NetConfig& cfg = aiwatchos_net::net_config();
+            size_t n = 0;
+            auto add = [&](const char* label, const char* value) {
+                if (n >= max_rows) return;
+                std::snprintf(rows[n].label, sizeof(rows[n].label), "%s",
+                              label);
+                std::snprintf(rows[n].value, sizeof(rows[n].value), "%s",
+                              value);
+                ++n;
+            };
+            add("WiFi", cfg.wifi_configured()
+                            ? aiwatchos_net::wifi_state_name(
+                                  aiwatchos_net::wifi_state())
+                            : "NOT SET");
+            add("Muse token",
+                (!cfg.hatch_token.empty() || !cfg.vm_token.empty())
+                    ? "PRESENT"
+                    : "MISSING");
+            add("VM", cfg.vm_id.empty() ? "DEFAULT" : "SET");
+            add("Muse link",
+                aiwatchos_net::muse_link_state_name(
+                    aiwatchos_net::muse_link_state()));
+            add("Hermes pairing",
+                aiwatchos_hermes::hermes_paired() ? "PAIRED" : "NOT PAIRED");
+            add("Speech (TTS)",
+                !aiwatchos_net::muse_tts_provisioned()
+                    ? "NO KEY"
+                    : (aiwatchos_net::muse_tts_speak_enabled() ? "ON"
+                                                                : "OFF"));
+            return n;
+        },
+        nullptr);
+
+    // M10: the "Speak replies" toggle row in OS Settings (the volume
+    // slider next to it already drives the HAL playback gain). State
+    // lives in net config (NVS-persisted); the settings layer only
+    // sees these callbacks.
+    {
+        aiwatchos::SettingsToggleRow speak_row;
+        speak_row.label = "Speak replies";
+        speak_row.icon = aiwatchos::Icon::kVolume;
+        speak_row.get = [](void*) {
+            return aiwatchos_net::muse_tts_speak_enabled();
+        };
+        speak_row.set = [](void*, bool on) {
+            aiwatchos_net::muse_tts_set_speak_enabled(on);
+        };
+        aiwatchos::settings_register_toggle(speak_row);
+    }
+#endif
+
     // --- 3. Status bar with battery display ---
     static aiwatchos::BatteryDisplay g_status_bar(board);
 

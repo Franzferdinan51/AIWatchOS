@@ -39,6 +39,15 @@ void load_once() {
     g_cfg.host = CONFIG_AIWATCHOS_NET_HATCH_HOST;
     g_cfg.domain = CONFIG_AIWATCHOS_NET_HATCH_DOMAIN;
     g_cfg.sntp_server = CONFIG_AIWATCHOS_NET_SNTP_SERVER;
+    g_cfg.tts_url = CONFIG_AIWATCHOS_NET_TTS_URL;
+    g_cfg.tts_key = CONFIG_AIWATCHOS_NET_TTS_KEY;
+    g_cfg.tts_model = CONFIG_AIWATCHOS_NET_TTS_MODEL;
+    g_cfg.tts_voice = CONFIG_AIWATCHOS_NET_TTS_VOICE;
+#ifdef CONFIG_AIWATCHOS_NET_TTS_SPEAK
+    g_cfg.tts_speak = true;   // unset bool Kconfigs get no define
+#else
+    g_cfg.tts_speak = false;
+#endif
 
     nvs_handle_t h = 0;
     if (nvs_open(kNs, NVS_READONLY, &h) == ESP_OK) {
@@ -49,6 +58,14 @@ void load_once() {
         g_cfg.vm_id = nvs_read_str(h, "vm", g_cfg.vm_id);
         g_cfg.host = nvs_read_str(h, "host", g_cfg.host);
         g_cfg.domain = nvs_read_str(h, "domain", g_cfg.domain);
+        g_cfg.tts_url = nvs_read_str(h, "ttsurl", g_cfg.tts_url);
+        g_cfg.tts_key = nvs_read_str(h, "ttskey", g_cfg.tts_key);
+        g_cfg.tts_model = nvs_read_str(h, "ttsmodel", g_cfg.tts_model);
+        g_cfg.tts_voice = nvs_read_str(h, "ttsvoice", g_cfg.tts_voice);
+        uint8_t speak = 0;
+        if (nvs_get_u8(h, "ttsspeak", &speak) == ESP_OK) {
+            g_cfg.tts_speak = speak != 0;
+        }
         nvs_close(h);
     }
 }
@@ -76,6 +93,11 @@ bool net_save_config(const NetConfig& cfg) {
     nvs_set_str(h, "vm", cfg.vm_id);
     nvs_set_str(h, "host", cfg.host);
     nvs_set_str(h, "domain", cfg.domain);
+    nvs_set_str(h, "ttsurl", cfg.tts_url);
+    nvs_set_str(h, "ttskey", cfg.tts_key);
+    nvs_set_str(h, "ttsmodel", cfg.tts_model);
+    nvs_set_str(h, "ttsvoice", cfg.tts_voice);
+    nvs_set_u8(h, "ttsspeak", cfg.tts_speak ? 1 : 0);
     esp_err_t err = nvs_commit(h);
     nvs_close(h);
     if (err != ESP_OK) return false;
@@ -96,6 +118,11 @@ bool net_apply_setup_string(const char* text) {
     if (f.has_vm) cfg.vm_id = f.vm;
     if (f.has_host) cfg.host = f.host;
     if (f.has_domain) cfg.domain = f.domain;
+    if (f.has_tts_url) cfg.tts_url = f.tts_url;
+    if (f.has_tts_key) cfg.tts_key = f.tts_key;
+    if (f.has_tts_model) cfg.tts_model = f.tts_model;
+    if (f.has_tts_voice) cfg.tts_voice = f.tts_voice;
+    if (f.has_tts_speak) cfg.tts_speak = f.tts_speak;
     return net_save_config(cfg);
 }
 

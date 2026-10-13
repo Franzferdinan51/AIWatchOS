@@ -63,7 +63,8 @@ bool hermes_new_session();
 
 // Borrowed reference to everything the renderer draws. The view lives
 // inside the client (PSRAM on device); callers must not copy it (it is
-// ~7 KB) and should hold no assumptions across client events.
+// ~35 KB with the H1 history ring) and should hold no assumptions
+// across client events.
 const HermesView& hermes_view();
 
 // Drive the client from a periodic context (TTL expiry, heartbeat-death
