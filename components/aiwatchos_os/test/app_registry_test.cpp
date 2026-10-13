@@ -458,9 +458,10 @@ static void test_status_bar_time() {
     status.render(fb, "12:34");
 
     // Time ink: full-coverage glyph pixels in `text` (0xF77F) in the
-    // left of the 44px status zone (Muse Gloss section 8 geometry).
+    // left of the status zone (Muse Gloss section 8 geometry; the zone
+    // now starts at kStatusZoneTop, the glass safe-area inset).
     bool found_clock_pixel = false;
-    for (int y = 0; y < aiwatchos::kStatusZoneH && !found_clock_pixel; ++y) {
+    for (int y = 0; y < aiwatchos::kStatusZoneBottom && !found_clock_pixel; ++y) {
         for (int x = 0; x < aiwatchos::kDisplayWidth / 2; ++x) {
             if (buf[y * aiwatchos::kDisplayWidth + x] == aiwatchos::colors::kText) {
                 found_clock_pixel = true;
@@ -471,9 +472,10 @@ static void test_status_bar_time() {
     assert(found_clock_pixel);   // time glyphs were actually drawn
 
     // Battery cluster: 25x12 outline in `dim` at the right (ox=363,
-    // oy=16); TestHal reports 85% not charging, so the fill is `text`.
+    // oy = kStatusZoneTop + 16); TestHal reports 85% not charging, so
+    // the fill is `text`.
     const int ox = aiwatchos::kDisplayWidth - 20 - 2 - 25;
-    const int oy = (aiwatchos::kStatusZoneH - 12) / 2;
+    const int oy = aiwatchos::kStatusZoneTop + (aiwatchos::kStatusZoneH - 12) / 2;
     assert(buf[oy * aiwatchos::kDisplayWidth + (ox + 12)] == aiwatchos::colors::kDim);
     assert(buf[(oy + 6) * aiwatchos::kDisplayWidth + (ox + 5)] == aiwatchos::colors::kText);
 

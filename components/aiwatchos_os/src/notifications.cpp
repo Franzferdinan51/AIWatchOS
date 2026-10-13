@@ -209,7 +209,7 @@ void NotificationManager::render(Framebuffer& fb) {
         const auto lines =
             wrap_px(n.body, FontFace::kCaption, kBodyW, expanded ? -1 : 2);
         const int h = card_height(static_cast<int>(lines.size()));
-        if (y + h >= kStatusZoneH && y < kDisplayHeight) {
+        if (y + h >= kStatusZoneBottom && y < kDisplayHeight) {
             // Card shadow: the baked card sprite stretched vertically
             // to this card's height (its reference height is 152).
             if (const AlphaSprite* shadow = shadow_card()) {

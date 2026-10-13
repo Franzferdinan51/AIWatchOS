@@ -27,10 +27,12 @@ void draw_shell_backdrop(Framebuffer& fb, int y0, int y1) {
 
 void BatteryDisplay::render(Framebuffer& fb, const char* time_str) {
     // Zone ownership: repaint the backdrop slice first — anything an
-    // app drew into y < kStatusZoneH is covered before the bar draws.
-    draw_shell_backdrop(fb, 0, kStatusZoneH);
+    // app drew into y < kStatusZoneBottom is covered before the bar
+    // draws. The zone itself starts at kStatusZoneTop (top safe-area
+    // inset — the glass masks the first rows; see battery_display.hpp).
+    draw_shell_backdrop(fb, 0, kStatusZoneBottom);
 
-    const int text_y =
+    const int text_y = kStatusZoneTop +
         (kStatusZoneH - font_line_height(FontFace::kMicro)) / 2 + 1;
 
     // Time, left, 20px margin, Micro in `text`.
@@ -52,7 +54,7 @@ void BatteryDisplay::render(Framebuffer& fb, const char* time_str) {
     constexpr int kOutlineW = 25;
     constexpr int kOutlineH = 12;
     const int right = fb.width - 20;
-    const int oy = (kStatusZoneH - kOutlineH) / 2;
+    const int oy = kStatusZoneTop + (kStatusZoneH - kOutlineH) / 2;
     const int ox = right - 2 - kOutlineW;   // 2px nub to its right
 
     draw_text_aa_right(fb, ox - 6, text_y, pct_str, FontFace::kMicro,

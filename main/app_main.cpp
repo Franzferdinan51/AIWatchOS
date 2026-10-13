@@ -489,9 +489,9 @@ extern "C" void app_main(void) {
                 case aiwatchos_net::LinkState::kOff:
                     break;
             }
-            fb.fill_rect(0, aiwatchos::kStatusZoneH - 3,
+            fb.fill_rect(0, aiwatchos::kStatusZoneBottom - 3,
                          aiwatchos::kDisplayWidth - 1,
-                         aiwatchos::kStatusZoneH - 1, link_color);
+                         aiwatchos::kStatusZoneBottom - 1, link_color);
         }
 #endif
 
