@@ -6,6 +6,9 @@
 // first real fetch lands, the app renders an honest NO DATA YET state — the
 // hard-coded placeholder reading this file used to ship is gone.
 #include "aiwatchos/weather_app.hpp"
+#include "aiwatchos/colors.hpp"
+#include "aiwatchos/font.hpp"
+#include <cctype>
 #include <cstdio>
 #include <cstring>
 
@@ -15,12 +18,6 @@
 
 namespace aiwatchos {
 
-constexpr uint16_t kBgColor      = 0x0000;   // black (AMOLED native)
-constexpr uint16_t kHeaderCol    = 0x294A;   // dark blue header band
-constexpr uint16_t kTempColor    = 0xFFFF;   // white large temperature text
-constexpr uint16_t kCondColor    = 0xBDEF;   // light gray condition label
-constexpr uint16_t kHumidityCol  = 0x7BCF;   // medium gray humidity
-constexpr uint16_t kDimColor     = 0x7BCF;   // medium gray status/updated lines
 
 // A reading is stale once it is older than one refresh interval (by then the
 // service should have refreshed it). The interval mirrors the weather
@@ -36,10 +33,42 @@ namespace {
     WeatherSnapshotFn g_snapshot_fn = nullptr;
     WeatherRefreshFn g_refresh_fn = nullptr;
 
-    void draw_centered(Framebuffer& fb, int y, const char* text,
-                       uint16_t color, int scale = 2) {
-        int x = (kDisplayWidth - Framebuffer::text_width(text, scale)) / 2;
-        fb.draw_text(x, y, text, color, scale);
+    bool contains_ci(const char* text, const char* needle) {
+        const size_t n = std::strlen(needle);
+        for (const char* p = text; *p; ++p) {
+            size_t i = 0;
+            while (i < n && p[i] &&
+                   std::tolower(static_cast<unsigned char>(p[i])) ==
+                       needle[i]) {
+                ++i;
+            }
+            if (i == n) return true;
+        }
+        return false;
+    }
+
+    // Condition glyph + tint from NWS's own description words.
+    void condition_visual(const char* text, Icon* icon, uint16_t* tint) {
+        if (contains_ci(text, "thunder") || contains_ci(text, "rain") ||
+            contains_ci(text, "shower") || contains_ci(text, "drizzle")) {
+            *icon = Icon::kCloudRain;
+            *tint = colors::kBlue;
+        } else if (contains_ci(text, "snow") || contains_ci(text, "flurr") ||
+                   contains_ci(text, "blizzard")) {
+            *icon = Icon::kCloudSnow;
+            *tint = colors::kText;
+        } else if (contains_ci(text, "partly") ||
+                   contains_ci(text, "mostly")) {
+            *icon = Icon::kCloudSun;
+            *tint = colors::kWarn;
+        } else if (contains_ci(text, "sun") || contains_ci(text, "clear") ||
+                   contains_ci(text, "fair")) {
+            *icon = Icon::kSun;
+            *tint = colors::kWarn;
+        } else {
+            *icon = Icon::kCloud;
+            *tint = colors::kDim;
+        }
     }
 }  // namespace
 
@@ -78,74 +107,93 @@ void WeatherApp::on_resume() {
 }
 
 void WeatherApp::render(Framebuffer& fb) {
-    // Status bar.
-    fb.fill_rect(0, 0, kDisplayWidth - 1, 36, kHeaderCol);
-
-    const int center_y = kDisplayHeight / 2 - 30;
-
+    // The shell paints backdrop + status zone; content starts below.
     if (!snapshot_.has_data) {
         // Honest empty state — no invented numbers, and the reason why.
-        draw_centered(fb, center_y, "NO DATA YET", kTempColor, 3);
-        const char* why = "OFFLINE";
+        draw_icon(fb, kDisplayWidth / 2 - 20, 176, Icon::kWifiOff,
+                  FontFace::kIcon40, colors::kDim);
+        draw_text_aa_centered(fb, kDisplayWidth / 2, 240, "NO DATA YET",
+                              FontFace::kTitle, colors::kText);
+        const char* why = "Offline";
         if (provider_seen_) {
             switch (snapshot_.status) {
-                case WeatherServiceStatus::kConnecting:  why = "CONNECTING";  break;
-                case WeatherServiceStatus::kFetchFailed: why = "FETCH FAILED"; break;
-                case WeatherServiceStatus::kOk:          why = "NO DATA YET";  break;
-                case WeatherServiceStatus::kUnconfigured: why = "OFFLINE";    break;
+                case WeatherServiceStatus::kConnecting:  why = "Connecting";   break;
+                case WeatherServiceStatus::kFetchFailed: why = "Fetch failed"; break;
+                case WeatherServiceStatus::kOk:          why = "No data yet";  break;
+                case WeatherServiceStatus::kUnconfigured: why = "Offline";     break;
             }
         }
-        draw_centered(fb, center_y + 64, why, kCondColor, 2);
+        draw_text_aa_centered(fb, kDisplayWidth / 2, 286, why,
+                              FontFace::kCaption, colors::kDim);
         return;
     }
 
-    // Center: large temperature display (e.g. "74F") at font scale 4
-    // (20x28 px glyphs), centered with the real text width. Fahrenheit;
-    // the 5x7 charset has no degree glyph, so a plain F follows the value.
-    char temp_str[12];
-    snprintf(temp_str, sizeof(temp_str), "%.0fF", snapshot_.temperature_f);
-    int temp_x = (kDisplayWidth - Framebuffer::text_width(temp_str, 4)) / 2;
-    fb.draw_text(temp_x, center_y, temp_str, kTempColor, 4);
+    // Condition glyph (64px face, tinted by condition family).
+    Icon icon;
+    uint16_t tint;
+    condition_visual(snapshot_.condition_text, &icon, &tint);
+    draw_icon(fb, kDisplayWidth / 2 - 32, 76, icon, FontFace::kIconWx64,
+              tint);
 
-    // Condition text below temperature: NWS's own words (textDescription,
-    // carried verbatim in the snapshot), truncated to the render line
-    // width when longer. An empty description shows as "Unknown" — the
-    // service never invents one.
+    // Hero temperature in Display 96 (`textNum`); the Display face
+    // carries a real degree glyph.
+    char temp_str[12];
+    std::snprintf(temp_str, sizeof(temp_str), "%.0f\xC2\xB0",
+                  snapshot_.temperature_f);
+    draw_text_aa_centered(fb, kDisplayWidth / 2, 150, temp_str,
+                          FontFace::kDisplay, colors::kTextNum);
+
+    // Condition in Title, NWS's own words, pixel-truncated to the row.
     char cond[WeatherSnapshot::kConditionTextCap];
     std::strncpy(cond, snapshot_.condition_text, sizeof(cond) - 1);
     cond[sizeof(cond) - 1] = '\0';
-    size_t cond_len = std::strlen(cond);
-    while (cond_len > 0 &&
-           Framebuffer::text_width(cond, 2) > kDisplayWidth) {
-        cond[--cond_len] = '\0';
+    while (cond[0] &&
+           text_width_aa(cond, FontFace::kTitle) > kDisplayWidth - 32) {
+        cond[std::strlen(cond) - 1] = '\0';
     }
-    fb.fill_rect(0, center_y + 48, kDisplayWidth - 1, center_y + 48 + 36, kBgColor);   // clear band
-    draw_centered(fb, center_y + 48, cond[0] ? cond : "Unknown", kCondColor, 2);
+    draw_text_aa_centered(fb, kDisplayWidth / 2, 262,
+                          cond[0] ? cond : "Unknown", FontFace::kTitle,
+                          colors::kText);
 
-    // "UPDATED HH:MM" (local display time) + STALE tag when the reading is
-    // older than one refresh interval.
-    const uint64_t now = hal().now_ms();
+    // Info cells: the two facts the NWS snapshot actually carries.
+    // (Hi/lo, wind and location are NOT in the snapshot — plan 3.6
+    // defers them rather than inventing numbers.)
     const uint64_t local = local_display_ms(snapshot_.fetched_epoch_ms);
-    const unsigned hh = static_cast<unsigned>((local / 3600000ull) % 24ull);
-    const unsigned mm = static_cast<unsigned>((local / 60000ull) % 60ull);
-    char upd_str[24];
-    if (weather_is_stale(now, snapshot_.fetched_epoch_ms, kStaleAfterMs)) {
-        snprintf(upd_str, sizeof(upd_str), "UPDATED %02u:%02u STALE", hh, mm);
-    } else {
-        snprintf(upd_str, sizeof(upd_str), "UPDATED %02u:%02u", hh, mm);
-    }
-    draw_centered(fb, kDisplayHeight - 116, upd_str, kDimColor, 2);
-
-    // Humidity at bottom ("--%" when the station reported null — an
-    // honest unknown, not a fabricated 0%).
-    char hum_str[16];
+    char upd_val[8];
+    std::snprintf(upd_val, sizeof(upd_val), "%02u:%02u",
+                  static_cast<unsigned>((local / 3600000ull) % 24ull),
+                  static_cast<unsigned>((local / 60000ull) % 60ull));
+    char hum_val[8];
     if (snapshot_.has_humidity) {
-        snprintf(hum_str, sizeof(hum_str), "%d%%", snapshot_.humidity_pct);
+        std::snprintf(hum_val, sizeof(hum_val), "%d%%", snapshot_.humidity_pct);
     } else {
-        snprintf(hum_str, sizeof(hum_str), "--%%");
+        std::snprintf(hum_val, sizeof(hum_val), "--%%");
     }
-    int hum_x = (kDisplayWidth - Framebuffer::text_width(hum_str)) / 2;
-    fb.draw_text(hum_x, kDisplayHeight - 80, hum_str, kHumidityCol);
+    struct Cell {
+        const char* label;
+        const char* value;
+    };
+    const Cell cells[2] = {{"HUMIDITY", hum_val}, {"UPDATED", upd_val}};
+    BubbleStyle cell_style = bubble_style();
+    cell_style.shadow = nullptr;
+    for (int i = 0; i < 2; ++i) {
+        const int cx = 20 + i * (179 + 12);
+        const int ccx = cx + 179 / 2;
+        fb.draw_bubble(cx, 330, 179, 76, 16, cell_style);
+        draw_text_aa_centered(fb, ccx, 342, cells[i].label, FontFace::kMicro,
+                              colors::kDim);
+        draw_text_aa_centered(fb, ccx, 364, cells[i].value, FontFace::kBody,
+                              colors::kText);
+    }
+
+    // Freshness line: LIVE, or STALE once the reading is older than
+    // one refresh interval.
+    const bool stale = weather_is_stale(hal().now_ms(),
+                                        snapshot_.fetched_epoch_ms,
+                                        kStaleAfterMs);
+    draw_text_aa_centered(fb, kDisplayWidth / 2, 428,
+                          stale ? "STALE" : "LIVE", FontFace::kCaption,
+                          stale ? colors::kWarn : colors::kOk);
 }
 
 bool WeatherApp::on_touch(const TouchEvent& event) {

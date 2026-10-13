@@ -9,6 +9,9 @@
 #include "aiwatchos_hermes.hpp"
 #include "hermes_internal.hpp"
 
+#include "aiwatchos/colors.hpp"
+#include "aiwatchos/font.hpp"
+
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -26,15 +29,17 @@
 namespace aiwatchos_hermes {
 namespace {
 
-// RGB565 colours for the Hermes conversation UI.
-constexpr uint16_t kHermesBg = 0x0000;      // black AMOLED background
-constexpr uint16_t kHeaderColor = 0x294A;   // dark blue header band
-constexpr uint16_t kTextColor = 0xFFFF;     // white text
-constexpr uint16_t kDimColor = 0xBDEF;      // light gray body text
-constexpr uint16_t kStatusColor = 0x7BCF;   // medium gray status lines
-constexpr uint16_t kAmberColor = 0xFEA0;    // notices / pairing
-constexpr uint16_t kGreenColor = 0x07E0;    // YES / online
-constexpr uint16_t kRedColor = 0xF800;      // NO / errors
+// Hermes identity (DESIGN_TOKENS section 9): the Muse-blue OS with
+// a gold dialect — same geometry, gold replaces blue in chrome, and
+// its own text ramp. State colours stay state colours.
+namespace hc = aiwatchos::hcolors;
+constexpr uint16_t kHermesBg = hc::kBg;         // deep blue-black
+constexpr uint16_t kTextColor = hc::kText;      // warm white
+constexpr uint16_t kDimColor = hc::kDim;        // slate body text
+constexpr uint16_t kStatusColor = hc::kDim;     // status lines
+constexpr uint16_t kAmberColor = hc::kGold;     // notices / pairing
+constexpr uint16_t kGreenColor = hc::kYes;      // YES / online accents
+constexpr uint16_t kRedColor = hc::kNo;         // NO / errors
 
 aiwatchos::Hal* g_hal = nullptr;
 HermesClient* g_client = nullptr;
@@ -163,56 +168,113 @@ const char* link_word(HermesLinkState s) {
     return "OFFLINE";
 }
 
-// --- Text rendering: the shared OS 5x7 font ------------------------------
-// All Hermes text goes through Framebuffer::draw_text (the OS-wide font in
-// aiwatchos/font5x7.hpp) — the same glyphs and metrics as every other app.
-// This file originally carried a private 3x5 micro-font, written as a
-// stopgap before the shared font existed; it was deleted in integration
-// round 2. The helpers below keep the render code's call shapes and layer
-// this app's word-wrap on the shared metrics.
+// --- Text rendering --------------------------------------------------
+// All Hermes text goes through the baked AA faces (aiwatchos/font.hpp)
+// — the same glyphs as every other app. The helpers keep the render
+// code's historical call shapes: the old 5x7 `scale` argument now
+// selects a face (2 = Body, 3 = Title, 4/6 = Pair) and wrapping is
+// measured in pixels, not character cells.
+
+aiwatchos::FontFace face_for_scale(int scale) {
+    switch (scale) {
+        case 2: return aiwatchos::FontFace::kBody;
+        case 3: return aiwatchos::FontFace::kTitle;
+        case 4:
+        case 6: return aiwatchos::FontFace::kPair;
+        default: return aiwatchos::FontFace::kBody;
+    }
+}
 
 void draw_text(aiwatchos::Framebuffer& fb, int x, int y, const char* s,
                int scale, uint16_t color) {
-    fb.draw_text(x, y, s, color, scale);
+    aiwatchos::draw_text_aa(fb, x, y, s, face_for_scale(scale), color);
 }
 
 int text_w(const char* s, int scale) {
-    return aiwatchos::Framebuffer::text_width(s, scale);
+    return aiwatchos::text_width_aa(s, face_for_scale(scale));
 }
 
-// Word-wrapped text block; returns the y just past the last drawn line.
+// Word-wrapped text block (pixel-measured); returns the y just past
+// the last drawn line.
 int draw_wrapped(aiwatchos::Framebuffer& fb, int x, int y, int max_w,
                  const char* s, int scale, uint16_t color, int max_lines) {
-    if (scale < 1) scale = 1;
-    const int advance = aiwatchos::Framebuffer::text_advance(scale);
-    const int line_step = aiwatchos::Framebuffer::text_height(scale) + 2;
-    const int chars_per_line = max_w / advance;
-    if (chars_per_line <= 0 || !s) return y;
+    if (!s) return y;
+    const aiwatchos::FontFace face = face_for_scale(scale);
+    const int line_step = aiwatchos::font_line_height(face) + 2;
     int lines = 0;
     const char* p = s;
     while (*p && lines < max_lines) {
-        // Take one line: greedy word wrap over the remaining text.
-        int len = 0, last_space = -1;
-        while (p[len] && len < chars_per_line) {
-            if (p[len] == ' ') last_space = len;
+        // Greedy word wrap measured in pixels.
+        int best = 0;        // chars that fit (at a word boundary)
+        int len = 0;         // scan cursor
+        int last_space = -1;
+        while (p[len]) {
             if (p[len] == '\n') break;
+            if (p[len] == ' ') last_space = len;
+            char probe[176];
+            const int n = len + 1;
+            if (n >= static_cast<int>(sizeof(probe))) break;
+            std::memcpy(probe, p, static_cast<size_t>(n));
+            probe[n] = '\0';
+            if (aiwatchos::text_width_aa(probe, face) > max_w) break;
             ++len;
+            if (last_space == len - 1) best = len - 1;
         }
-        int take = len;
-        if (p[len] && p[len] != '\n' && last_space > 0) take = last_space;
-        char line[80];
+        int take;
+        if (!p[len]) {
+            take = len;                     // the rest fits / end of text
+        } else if (p[len] == '\n') {
+            take = len;
+        } else if (last_space > 0) {
+            take = last_space;              // break at the last space
+        } else {
+            take = len > 0 ? len : 1;       // one overlong word: hard cut
+        }
+        if (take <= 0) break;
+        char line[176];
         if (take >= static_cast<int>(sizeof(line))) {
             take = static_cast<int>(sizeof(line)) - 1;
         }
         std::memcpy(line, p, static_cast<size_t>(take));
         line[take] = '\0';
-        fb.draw_text(x, y, line, color, scale);
+        aiwatchos::draw_text_aa(fb, x, y, line, face, color);
         y += line_step;
         ++lines;
         p += take;
         while (*p == ' ' || *p == '\n') ++p;
     }
     return y;
+}
+
+// Count the lines draw_wrapped would produce (for sizing bubbles).
+int wrapped_line_count(const char* s, int max_w, int scale, int max_lines) {
+    if (!s) return 0;
+    const aiwatchos::FontFace face = face_for_scale(scale);
+    int lines = 0;
+    const char* p = s;
+    while (*p && lines < max_lines) {
+        int len = 0, last_space = -1;
+        while (p[len]) {
+            if (p[len] == '\n') break;
+            if (p[len] == ' ') last_space = len;
+            char probe[176];
+            const int n = len + 1;
+            if (n >= static_cast<int>(sizeof(probe))) break;
+            std::memcpy(probe, p, static_cast<size_t>(n));
+            probe[n] = '\0';
+            if (aiwatchos::text_width_aa(probe, face) > max_w) break;
+            ++len;
+        }
+        int take;
+        if (!p[len] || p[len] == '\n') take = len;
+        else if (last_space > 0) take = last_space;
+        else take = len > 0 ? len : 1;
+        if (take <= 0) break;
+        ++lines;
+        p += take;
+        while (*p == ' ' || *p == '\n') ++p;
+    }
+    return lines;
 }
 
 }  // namespace
@@ -405,8 +467,9 @@ void hermes_tick(uint32_t elapsed_ms) {
 
 void hermes_render(aiwatchos::Framebuffer& fb) {
     fb.fill(kHermesBg);
-    fb.fill_rect(0, 0, aiwatchos::kDisplayWidth - 1, 36, kHeaderColor);
-    draw_text(fb, 16, 11, "HERMES", 3, kTextColor);
+    // Gold identity title (tokens section 9). No header band — the OS
+    // status zone lives above and is repainted by the shell.
+    draw_text(fb, 16, 46, "Hermes", 3, kAmberColor);
 
     // The view is read in place under the client lock — never copied. It is
     // ~7 KB of text buffers and this runs on the OS main task's stack.
@@ -420,54 +483,85 @@ void hermes_render(aiwatchos::Framebuffer& fb) {
         image_h = v.image_h;
     }
 
-    // State headline + device id.
+    // State headline.
     char headline[48];
     std::snprintf(headline, sizeof(headline), "LINK %s", link_word(v.link));
-    draw_text(fb, 16, 48, headline, 3,
-              v.link == HermesLinkState::Linked ? kGreenColor
-              : v.link == HermesLinkState::AuthFailed ? kRedColor : kAmberColor);
-    if (g_client) {
-        draw_text(fb, 16, 76, g_client->device_id(), 2, kStatusColor);
-    }
+    draw_text(fb, 16, 88, headline, 2,
+              v.link == HermesLinkState::Linked ? hc::kOnline
+              : v.link == HermesLinkState::AuthFailed
+                    ? aiwatchos::colors::kDanger
+                    : kAmberColor);
 
-    // Device-health battery bar — geometry unchanged from the original
-    // dashboard (host tests pin these pixels).
+    // Device-health battery bar (tokens section 8 geometry, gold
+    // dialect): r-pill outline faint, state-coloured fill, percent in
+    // Body at the right. The old white charging square is gone — the
+    // fill colour carries the charging state (kOk), red under 20%.
     if (g_hal) {
         aiwatchos::PowerStatus ps = g_hal->read_power();
         constexpr int kBarX = 16, kBarY = 120, kBarW = 200, kBarH = 20;
-        fb.hline(kBarX, kBarX + kBarW - 1, kBarY, kStatusColor);
-        fb.hline(kBarX, kBarX + kBarW - 1, kBarY + kBarH - 1, kStatusColor);
-        fb.vline(kBarX, kBarY, kBarY + kBarH - 1, kStatusColor);
-        fb.vline(kBarX + kBarW - 1, kBarY, kBarY + kBarH - 1, kStatusColor);
+        fb.fill_round_rect(kBarX, kBarY, kBarW, kBarH, 10, hc::kFaint);
+        fb.fill_round_rect(kBarX + 2, kBarY + 2, kBarW - 4, kBarH - 4, 8,
+                           hc::kBar);
         if (ps.battery_percent <= 100) {
-            int fill = (kBarW - 4) * ps.battery_percent / 100;
+            const uint16_t fill_color =
+                ps.charging ? aiwatchos::colors::kOk
+                : ps.battery_percent < 20 ? aiwatchos::colors::kDanger
+                                           : kAmberColor;
+            const int fill = (kBarW - 4) * ps.battery_percent / 100;
             if (fill > 0) {
-                fb.fill_rect(kBarX + 2, kBarY + 2,
-                             kBarX + 2 + fill - 1, kBarY + kBarH - 3, kStatusColor);
+                fb.fill_round_rect(kBarX + 2, kBarY + 2, fill, kBarH - 4, 8,
+                                   fill_color);
             }
+            char pct_buf[8];
+            std::snprintf(pct_buf, sizeof(pct_buf), "%u%%",
+                          static_cast<unsigned>(ps.battery_percent));
+            draw_text(fb, kBarX + kBarW + 12, kBarY - 1, pct_buf, 2,
+                      kTextColor);
         }
-        if (ps.charging) {
-            fb.fill_rect(kBarX + kBarW + 14, kBarY,
-                         kBarX + kBarW + 29, kBarY + kBarH - 1, kTextColor);
+        // Micro row: uptime left, device id right.
+        char up_buf[16];
+        hermes_uptime_str(now_ms(), up_buf, sizeof(up_buf));
+        char up_line[32];
+        std::snprintf(up_line, sizeof(up_line), "UP %s", up_buf);
+        aiwatchos::draw_text_aa(fb, 16, 146, up_line,
+                                aiwatchos::FontFace::kMicro, kDimColor);
+        if (g_client) {
+            aiwatchos::draw_text_aa_right(
+                fb, aiwatchos::kDisplayWidth - 16, 146,
+                g_client->device_id(), aiwatchos::FontFace::kMicro,
+                kDimColor);
         }
     }
 
-    const int kContentY = 156;
+    const int kContentY = 170;
     const int kContentW = aiwatchos::kDisplayWidth - 32;
 
     if (v.link == HermesLinkState::AuthFailed) {
-        draw_wrapped(fb, 16, kContentY, kContentW, v.error, 2, kRedColor, 3);
+        draw_wrapped(fb, 16, kContentY, kContentW, v.error, 2, aiwatchos::colors::kDanger, 3);
         draw_wrapped(fb, 16, kContentY + 60, kContentW,
                      "ON THE HERMES HOST RUN: HERMES GADGET FORGET THIS DEVICE, THEN REBOOT THE WATCH TO RE-ENROLL.",
                      2, kDimColor, 8);
     } else if (v.prompt_active) {
         draw_wrapped(fb, 16, kContentY, kContentW, v.prompt_title, 3, kAmberColor, 2);
         draw_wrapped(fb, 16, kContentY + 48, kContentW, v.prompt_text, 2, kTextColor, 8);
-        // YES / NO targets.
-        fb.fill_rect(16, 380, 197, 440, kGreenColor);
-        fb.fill_rect(213, 380, 394, 440, kRedColor);
-        draw_text(fb, 76, 402, "YES", 4, kHermesBg);
-        draw_text(fb, 284, 402, "NO", 4, kHermesBg);
+        // YES / NO targets: gloss bubbles (state colours are allowed
+        // here — they ARE the state). Touch zones unchanged.
+        aiwatchos::BubbleStyle yes_style;
+        yes_style.top = aiwatchos::blend565(hc::kYes, aiwatchos::colors::kWhite, 70);
+        yes_style.mid = hc::kYes;
+        yes_style.bot = aiwatchos::blend565(hc::kYes, aiwatchos::colors::kBlack, 70);
+        yes_style.border_alpha = 100;
+        yes_style.shadow = nullptr;
+        aiwatchos::BubbleStyle no_style = yes_style;
+        no_style.top = aiwatchos::blend565(hc::kNo, aiwatchos::colors::kWhite, 70);
+        no_style.mid = hc::kNo;
+        no_style.bot = aiwatchos::blend565(hc::kNo, aiwatchos::colors::kBlack, 70);
+        fb.draw_bubble(16, 380, 181, 60, 16, yes_style);
+        fb.draw_bubble(213, 380, 181, 60, 16, no_style);
+        const int yes_w = text_w("YES", 4);
+        const int no_w = text_w("NO", 4);
+        draw_text(fb, 16 + (181 - yes_w) / 2, 380 + 10, "YES", 4, kHermesBg);
+        draw_text(fb, 213 + (181 - no_w) / 2, 380 + 10, "NO", 4, kHermesBg);
     } else if (v.link == HermesLinkState::Pairing && v.pairing_code[0]) {
         draw_text(fb, 16, kContentY, "PAIRING CODE", 2, kStatusColor);
         int code_w = text_w(v.pairing_code, 6);
@@ -485,6 +579,18 @@ void hermes_render(aiwatchos::Framebuffer& fb) {
         draw_wrapped(fb, 16, kContentY + 104, kContentW, cmd,
                      2, kTextColor, 6);
     } else if (v.card_active) {
+        // Card surface: a gold-dialect dialogue bubble sized to the
+        // wrapped title + body.
+        const int title_lines = wrapped_line_count(v.card_title, kContentW, 3, 2);
+        const int body_lines = wrapped_line_count(v.card_body, kContentW, 2, 12);
+        const int card_h = 16 + title_lines * 36 + 8 + body_lines * 24 + 12;
+        aiwatchos::BubbleStyle card_style = aiwatchos::bubble_style();
+        card_style.top = hc::kBarTop;
+        card_style.mid = hc::kBar;
+        card_style.bot = hc::kBarBot;
+        card_style.shadow = nullptr;
+        fb.draw_bubble(8, kContentY - 8, aiwatchos::kDisplayWidth - 16,
+                       card_h, 16, card_style);
         draw_wrapped(fb, 16, kContentY, kContentW, v.card_title, 3, kTextColor, 2);
         draw_wrapped(fb, 16, kContentY + 48, kContentW, v.card_body, 2, kDimColor, 12);
     } else if (v.image_active && image_px && image_w > 0 && image_h > 0) {
@@ -528,15 +634,23 @@ void hermes_render(aiwatchos::Framebuffer& fb) {
             draw_wrapped(fb, 16, y, kContentW, v.reply, 2, kTextColor, 12);
         } else if (v.link == HermesLinkState::Linked && !v.busy) {
             // One-tap smoke message + push-to-talk affordance.
-            fb.fill_rect(105, 300, 305, 348, kHeaderColor);
-            draw_text(fb, 137, 316, "SAY HELLO", 3, kTextColor);
+            aiwatchos::BubbleStyle hello_style;
+            hello_style.top = aiwatchos::blend565(kAmberColor, aiwatchos::colors::kWhite, 90);
+            hello_style.mid = kAmberColor;
+            hello_style.bot = aiwatchos::blend565(kAmberColor, aiwatchos::colors::kBlack, 60);
+            hello_style.border_alpha = 100;
+            hello_style.shadow = nullptr;
+            fb.draw_bubble(105, 300, 200, 48, 16, hello_style);
+            const int hello_w = text_w("SAY HELLO", 3);
+            draw_text(fb, 105 + (200 - hello_w) / 2, 300 + 7, "SAY HELLO", 3,
+                      kHermesBg);
             draw_text(fb, 16, 364, "OR HOLD BOTTOM TO TALK", 2, kStatusColor);
         } else if (v.link == HermesLinkState::Offline) {
             draw_wrapped(fb, 16, y, kContentW,
                          "NO LINK. THE WATCH JOINS WIFI AND CONNECTS TO THE HERMES HUB AUTOMATICALLY.",
                          2, kDimColor, 6);
             if (v.error[0]) {
-                draw_wrapped(fb, 16, y + 92, kContentW, v.error, 2, kRedColor, 2);
+                draw_wrapped(fb, 16, y + 92, kContentW, v.error, 2, aiwatchos::colors::kDanger, 2);
             }
         } else if (v.link == HermesLinkState::Connecting) {
             draw_text(fb, 16, y, "CONNECTING...", 2, kDimColor);
@@ -548,14 +662,13 @@ void hermes_render(aiwatchos::Framebuffer& fb) {
         }
     }
 
-    // Hint bar (same band as the original layout).
-    fb.fill_rect(0, aiwatchos::kDisplayHeight - 48,
-                 aiwatchos::kDisplayWidth - 1, aiwatchos::kDisplayHeight - 1, kHeaderColor);
+    // Hint floats over the background (no band — the shell owns the
+    // only chrome at the top; the bottom stays clean).
     const char* hint = "HOLD BOTTOM: TALK";
     if (v.prompt_active) hint = "TAP YES OR NO";
     else if (v.card_active || v.image_active) hint = "TAP: DISMISS";
     else if (v.link != HermesLinkState::Linked) hint = "HERMES GADGET";
-    draw_text(fb, 16, aiwatchos::kDisplayHeight - 32, hint, 2, kDimColor);
+    draw_text(fb, 16, aiwatchos::kDisplayHeight - 30, hint, 2, kDimColor);
 }
 
 bool hermes_on_touch(const aiwatchos::TouchEvent& event) {

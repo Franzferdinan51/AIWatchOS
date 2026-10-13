@@ -945,13 +945,24 @@ static void test_hermes_vitals() {
     hal.set_power(true, 85, true);
     fb.fill(0x0000);
     app.render(fb);
-    assert(buf[129 * aiwatchos::kDisplayWidth + 150] == 0x7BCF);   // deep fill
-    assert(buf[129 * aiwatchos::kDisplayWidth + 230] == 0xFFFF);   // charging marker
+    // Fill carries the state colour now: charging = kOk green.
+    assert(buf[129 * aiwatchos::kDisplayWidth + 150] == 0x6F97);   // deep fill
+    // The white charging square is deleted; the percent readout (Body,
+    // warm white 0xEF7E) sits right of the bar instead.
+    {
+        int pct_ink = 0;
+        for (int y = 118; y <= 142; ++y) {
+            for (int x = 226; x <= 300; ++x) {
+                if (buf[y * aiwatchos::kDisplayWidth + x] == 0xEF7E) ++pct_ink;
+            }
+        }
+        assert(pct_ink > 15);
+    }
     hal.set_power(true, 0, false);
     fb.fill(0x0000);
     app.render(fb);
-    assert(buf[129 * aiwatchos::kDisplayWidth + 150] == 0x0000);   // empty bar
-    assert(buf[129 * aiwatchos::kDisplayWidth + 230] == 0x0000);   // no marker
+    assert(buf[129 * aiwatchos::kDisplayWidth + 150] == 0x18E5);   // empty bar surface
+    assert(buf[129 * aiwatchos::kDisplayWidth + 230] != 0xFFFF);  // no marker
 
     printf("test_hermes_vitals: PASSED\n");
 }
@@ -1366,7 +1377,7 @@ static void test_hermes_conversation() {
     static uint16_t buf[aiwatchos::kDisplayWidth * aiwatchos::kDisplayHeight];
     aiwatchos::Framebuffer fb{buf, aiwatchos::kDisplayWidth, aiwatchos::kDisplayHeight};
     app.render(fb);
-    assert(buf[10 * aiwatchos::kDisplayWidth + 10] == 0x294A);
+    assert(buf[10 * aiwatchos::kDisplayWidth + 10] == 0x0862);   // bg: header band deleted
 
     // A prompt is answered exactly once.
     hermes_test_inject_text("{\"type\":\"prompt\",\"id\":\"q1\",\"title\":\"Confirm\",\"text\":\"Do it?\",\"ttl_s\":300}");
