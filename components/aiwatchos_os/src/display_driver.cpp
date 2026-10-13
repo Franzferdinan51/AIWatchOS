@@ -42,22 +42,48 @@ static esp_lcd_panel_handle_t s_panel = nullptr;
 static esp_lcd_panel_io_handle_t s_io = nullptr;
 constexpr int kBounceRows = 20;   // rows copied through DMA at a time to limit PSRAM contention
 constexpr int kBounceBytes = kBounceRows * kDisplayWidth * 2;
-static uint16_t* s_bounce_buf = nullptr;
+// Perf (audit suspect #5): TWO bounce buffers, ping-ponged. The old
+// single-buffer flush strictly serialized swap -> DMA -> wait per
+// 20-row chunk (~10 ms per chunk on-device, ~250 ms for a full frame
+// against a 20.6 ms wire floor). With two buffers the CPU byte-swap of
+// chunk N+1 overlaps the DMA of chunk N — the muse_lcd_bands pattern
+// from muse-gadget-206 (band queue + 2 chunk buffers + ISR completion
+// counting) adapted to this driver's synchronous call shape: the
+// flush still returns only when the last chunk has landed, so band
+// commit semantics upstream are unchanged.
+static uint16_t* s_bounce_buf[2] = {nullptr, nullptr};
 
-// Transfer-completion signal for the bounce buffer. esp_lcd_panel_io
-// queues color transfers asynchronously: draw_bitmap returns once the
-// chunk is QUEUED, not when the DMA has read the buffer. Without
-// waiting for completion before the next chunk overwrites s_bounce_buf,
-// queued chunks read back a mix of later rows — horizontal banding
-// across anything flushed in more chunks than the queue holds. This is
-// HermesGadget's pattern for the same panel (port_amoled.cpp:
-// on_color_trans_done gives a binary semaphore the flush waits on).
+// Transfer-completion accounting. esp_lcd_panel_io queues color
+// transfers asynchronously: draw_bitmap returns once the chunk is
+// QUEUED, not when the DMA has read the buffer. The ISR counts
+// completions in s_trans_completed (and pokes the semaphore waiters
+// re-check); the flush task counts issues in s_trans_queued. Buffer
+// b = issue % 2 may be refilled once completions reach issue - 1
+// (its previous transfer, issue - 2, has finished). Transfers
+// complete in issue order on this IO, which is what makes the
+// arithmetic sound.
 static SemaphoreHandle_t s_trans_done = nullptr;
+static volatile uint32_t s_trans_completed = 0;
+static uint32_t s_trans_queued = 0;
 static bool on_color_trans_done(esp_lcd_panel_io_handle_t,
                                 esp_lcd_panel_io_event_data_t*, void*) {
     BaseType_t woken = pdFALSE;
+    ++s_trans_completed;
     if (s_trans_done) xSemaphoreGiveFromISR(s_trans_done, &woken);
     return woken == pdTRUE;
+}
+
+// Wait until at least `target` issued transfers have completed.
+// The timeout is a wedge guard (the pre-pipeline code waited forever);
+// on expiry the flush fails and the band simply is not committed, so
+// it is retried on the next frame instead of hanging the UI task.
+static bool trans_wait(uint32_t target) {
+    while (s_trans_completed < target) {
+        if (xSemaphoreTake(s_trans_done, pdMS_TO_TICKS(100)) != pdTRUE) {
+            return false;
+        }
+    }
+    return true;
 }
 
 // CO5300 init sequence for the 410x502 panel, taken from the upstream
@@ -149,8 +175,9 @@ esp_err_t co5300_init(void) {
     ESP_RETURN_ON_ERROR(esp_lcd_panel_init(s_panel), kTag, "panel init");
     ESP_RETURN_ON_ERROR(esp_lcd_panel_disp_on_off(s_panel, true), kTag, "display on");
 
-    s_bounce_buf = static_cast<uint16_t*>(heap_caps_malloc(kBounceBytes, MALLOC_CAP_DMA));
-    if (!s_bounce_buf) {
+    s_bounce_buf[0] = static_cast<uint16_t*>(heap_caps_malloc(kBounceBytes, MALLOC_CAP_DMA));
+    s_bounce_buf[1] = static_cast<uint16_t*>(heap_caps_malloc(kBounceBytes, MALLOC_CAP_DMA));
+    if (!s_bounce_buf[0] || !s_bounce_buf[1]) {
         return ESP_ERR_NO_MEM;
     }
 
@@ -165,7 +192,7 @@ esp_err_t co5300_init(void) {
     {
         constexpr int kGramCols = 432;   // vendor window: 0..431
         constexpr int kClearRows = 9;    // 432*9*2 = 7776 B <= bounce
-        memset(s_bounce_buf, 0, kGramCols * kClearRows * 2);
+        memset(s_bounce_buf[0], 0, kGramCols * kClearRows * 2);
         for (int y = 0; y < kDisplayHeight; y += kClearRows) {
             const int rows = (y + kClearRows <= kDisplayHeight)
                                  ? kClearRows
@@ -174,10 +201,15 @@ esp_err_t co5300_init(void) {
             // the (all-zero) buffer head — safe.
             ESP_RETURN_ON_ERROR(
                 esp_lcd_panel_draw_bitmap(s_panel, 0, y, kGramCols,
-                                          y + rows, s_bounce_buf),
+                                          y + rows, s_bounce_buf[0]),
                 kTag, "GRAM clear");
             if (s_trans_done) xSemaphoreTake(s_trans_done, portMAX_DELAY);
         }
+        // The clear's completions are counted in s_trans_completed
+        // like any other transfer; sync the issue counter past them so
+        // the flush pipeline's arithmetic starts from a clean origin
+        // (init is single-threaded — nothing else can transfer here).
+        s_trans_queued = s_trans_completed;
     }
     ESP_RETURN_ON_ERROR(esp_lcd_panel_set_gap(s_panel, 22, 0), kTag,
                         "set gap 22");
@@ -200,7 +232,8 @@ esp_err_t co5300_init(void) {
 // app constants and never in the framebuffer. Verify on first power-on
 // with the settings colour-test screen (draw_color_test_pattern).
 static esp_err_t co5300_flush_rows(uint16_t* fb, uint16_t y0, uint16_t y1) {
-    if (!s_panel || !s_bounce_buf || !fb || y0 >= y1 || y1 > kDisplayHeight) {
+    if (!s_panel || !s_bounce_buf[0] || !s_bounce_buf[1] || !fb ||
+        y0 >= y1 || y1 > kDisplayHeight) {
         return ESP_ERR_INVALID_STATE;
     }
     // The CO5300 only accepts windows that start on an even row and
@@ -217,19 +250,38 @@ static esp_err_t co5300_flush_rows(uint16_t* fb, uint16_t y0, uint16_t y1) {
     if (ay1 > kDisplayHeight) ay1 = kDisplayHeight;
     for (uint16_t y = ay0; y < ay1; y += kBounceRows) {
         uint16_t rows = (y + kBounceRows <= ay1) ? kBounceRows : static_cast<uint16_t>(ay1 - y);
+        const uint32_t issue = s_trans_queued;
+        uint16_t* buf = s_bounce_buf[issue & 1u];
+        // This buffer's previous transfer was issue-2; it must have
+        // completed before we overwrite the buffer (completions reach
+        // issue-1 at that point). First two issues never wait.
+        if (issue >= 2 && !trans_wait(issue - 1)) {
+            return ESP_ERR_TIMEOUT;
+        }
+        // Byte-swap two pixels per 32-bit word (n is always even:
+        // rows * 410). Same wire format as the old per-pixel loop.
         const uint16_t* src = &fb[y * kDisplayWidth];
         const int n = rows * kDisplayWidth;
-        for (int i = 0; i < n; ++i) {
-            const uint16_t px = src[i];
-            s_bounce_buf[i] = static_cast<uint16_t>((px >> 8) | (px << 8));
+        const uint32_t* src32 = reinterpret_cast<const uint32_t*>(src);
+        uint32_t* dst32 = reinterpret_cast<uint32_t*>(buf);
+        const int pairs = n / 2;
+        for (int i = 0; i < pairs; ++i) {
+            const uint32_t w = src32[i];
+            dst32[i] = ((w << 8) & 0xFF00FF00u) | ((w >> 8) & 0x00FF00FFu);
         }
-        // draw_bitmap sets the address window internally. Wait for this
-        // chunk's DMA to finish before the loop overwrites the bounce
-        // buffer with the next chunk (see s_trans_done above).
-        esp_err_t err = esp_lcd_panel_draw_bitmap(s_panel, 0, y, kDisplayWidth, y + rows, s_bounce_buf);
+        if (n & 1) {
+            const uint16_t px = src[n - 1];
+            buf[n - 1] = static_cast<uint16_t>((px >> 8) | (px << 8));
+        }
+        // draw_bitmap sets the address window internally and queues
+        // the transfer; the NEXT chunk's swap now overlaps this DMA.
+        esp_err_t err = esp_lcd_panel_draw_bitmap(s_panel, 0, y, kDisplayWidth, y + rows, buf);
         if (err != ESP_OK) return err;
-        if (s_trans_done) xSemaphoreTake(s_trans_done, portMAX_DELAY);
+        s_trans_queued = issue + 1;
     }
+    // Synchronous contract (unchanged): return only once every chunk
+    // of this flush has actually landed in GRAM.
+    if (!trans_wait(s_trans_queued)) return ESP_ERR_TIMEOUT;
     return ESP_OK;
 }
 

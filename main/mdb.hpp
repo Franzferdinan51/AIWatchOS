@@ -36,14 +36,41 @@ namespace detail {
 // Once per main-loop frame, before the power policy sees the sample:
 // applies a pending app switch, replaces the touch points with the
 // next injected frame while an injection sequence is active, and ORs
-// any injected button mask into this frame's buttons.
-void apply_frame(int* n_points, int* xs, int* ys, uint32_t* buttons);
+// any injected button mask into this frame's buttons. Returns true if
+// anything was applied (the perf-wave loop uses it as a redraw hint).
+bool apply_frame(int* n_points, int* xs, int* ys, uint32_t* buttons);
 
 // True while the safe-area calibration card is latched on (`mdb frame`).
 // The main loop draws the card over every finished frame — after the
 // app and the status zone, before the band flush — so the card reaches
 // the glass intact instead of being erased by the next render.
 bool frame_card_requested();
+
+// Frame-pipeline performance counters (perf-wave diagnostics, kept
+// in the shipping build: a handful of counters + stage timers is the
+// cheapest way to prove frame behaviour on the glass-less bench).
+// The main loop is the only writer; the console task reads them for
+// `mdb perf` / `mdb health`. Like the rest of the MDB state, a torn
+// 64-bit read on the console side is acceptable.
+// Window fields (frames..flush_us_max) are zeroed by perf_reset();
+// the switch fields are last-event records and survive resets.
+struct PerfStats {
+    uint32_t frames = 0;         // awake loop iterations in the window
+    uint32_t renders = 0;        // iterations that composed a frame
+    uint32_t flush_frames = 0;   // iterations that flushed >= 1 band
+    uint64_t period_us_sum = 0;
+    uint32_t period_us_max = 0;
+    uint64_t render_us_sum = 0;
+    uint32_t render_us_max = 0;
+    uint64_t hash_us_sum = 0;
+    uint32_t hash_us_max = 0;
+    uint64_t flush_us_sum = 0;
+    uint32_t flush_us_max = 0;
+    uint32_t switch_ms_last = 0;  // switch detect -> first frame flushed
+    uint32_t switch_ms_max = 0;
+};
+extern PerfStats g_perf;
+void perf_reset();
 }  // namespace detail
 
 }  // namespace aiwatchos_mdb

@@ -217,7 +217,25 @@ void Board::mic_stop() {
 extern PowerStatus axp2101_read_power();
 
 PowerStatus Board::read_power() {
+    // Perf (audit suspect #3): the fuel gauge changes slowly, but this
+    // used to run 5 I2C register reads on EVERY call — and the render
+    // paths call it from the status bar, the clock face and the Hermes
+    // screen every frame, putting ~11-12 transactions (50 ms timeout
+    // each) on the UI path per frame and contending with touch on the
+    // shared bus. Cache at 1 Hz on the monotonic clock; every consumer
+    // (render, health, Hermes telemetry) tolerates 1 s staleness.
+#ifdef __ESPRESSIF_IDF__
+    static PowerStatus s_cache{};
+    static int64_t s_cache_us = -1000000;   // stale at boot: first call reads
+    const int64_t now_us = esp_timer_get_time();
+    if (now_us - s_cache_us < 1000000) return s_cache;
+    const PowerStatus fresh = axp2101_read_power();
+    s_cache = fresh;
+    s_cache_us = now_us;
+    return s_cache;
+#else
     return axp2101_read_power();
+#endif
 }
 
 // --- Time (PCF85063 RTC via I2C — driver in rtc_driver.cpp; begin() seeds

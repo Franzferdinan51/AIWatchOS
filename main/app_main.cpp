@@ -32,6 +32,7 @@
 
 #ifdef __ESPRESSIF_IDF__
 #include "esp_heap_caps.h"
+#include "esp_timer.h"
 #include "sdkconfig.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -78,6 +79,18 @@ void inj_push(int n, int x, int y) {
 namespace detail {
 aiwatchos::DisplayPower* g_power_hook = nullptr;
 aiwatchos::AppManager* g_apps_hook = nullptr;
+
+PerfStats g_perf;
+void perf_reset() {
+    // Zero the window; the switch records are last-event state and
+    // survive resets (a transition measurement reads them after the
+    // fact, in a later `mdb perf` window than the reset).
+    const uint32_t sl = g_perf.switch_ms_last;
+    const uint32_t sm = g_perf.switch_ms_max;
+    g_perf = PerfStats{};
+    g_perf.switch_ms_last = sl;
+    g_perf.switch_ms_max = sm;
+}
 }  // namespace detail
 
 void inject_tap(int x, int y) {
@@ -138,10 +151,12 @@ const char* current_app_id() {
 }
 
 namespace detail {
-void apply_frame(int* n_points, int* xs, int* ys, uint32_t* buttons) {
+bool apply_frame(int* n_points, int* xs, int* ys, uint32_t* buttons) {
+    bool applied = false;
     if (g_inj_switch_pending) {
         g_inj_switch_pending = false;
         if (g_apps_hook) g_apps_hook->switch_to(g_inj_switch);
+        applied = true;
     }
     if (g_inj_head != g_inj_tail) {
         const InjFrame& f = g_inj_frames[g_inj_head];
@@ -151,17 +166,44 @@ void apply_frame(int* n_points, int* xs, int* ys, uint32_t* buttons) {
             xs[0] = f.x;
             ys[0] = f.y;
         }
+        applied = true;
     }
     if (g_inj_button_frames > 0) {
         *buttons |= g_inj_button_mask;
         g_inj_button_frames = g_inj_button_frames - 1;
         if (g_inj_button_frames == 0) g_inj_button_mask = 0;
+        applied = true;
     }
+    return applied;
 }
 
 bool frame_card_requested() { return g_frame_card; }
 }  // namespace detail
 }  // namespace aiwatchos_mdb
+
+// ---------------------------------------------------------------------------
+// Perf timing helpers (perf-wave F0). On host builds the clock reads 0
+// and the accumulators compile away — the loop's perf statements are
+// written once and cost nothing off-device.
+// ---------------------------------------------------------------------------
+namespace {
+inline uint64_t perf_now_us() {
+#ifdef __ESPRESSIF_IDF__
+    return static_cast<uint64_t>(esp_timer_get_time());
+#else
+    return 0;
+#endif
+}
+inline void perf_accum(uint64_t& sum, uint32_t& mx, uint64_t v) {
+#ifdef __ESPRESSIF_IDF__
+    sum += v;
+    if (v > mx) mx = v > 0xFFFFFFFFull ? 0xFFFFFFFFu
+                                       : static_cast<uint32_t>(v);
+#else
+    (void)sum; (void)mx; (void)v;
+#endif
+}
+}  // namespace
 
 // ---------------------------------------------------------------------------
 // Safe-area calibration card (MDB `mdb frame`) — phase 1 of the safe-area
@@ -408,10 +450,12 @@ extern "C" void app_main(void) {
     static aiwatchos::BootEscape g_boot_escape;
     static aiwatchos::TouchSynth g_touch_synth;
     static aiwatchos::BandFlush g_band_flush;
-    // App-switch brightness dip state (plan 3.0 transition).
+    // App-switch tracking (transition timing only — see the switch
+    // block below; the panel itself is never brightness-masked).
     const char* last_app_id = nullptr;
-    int dip_step = -1;
-    uint8_t dip_saved = 100;
+    // Perf (F0): previous awake iteration start + switch-detect time.
+    uint64_t prev_iter_us = 0;
+    uint64_t switch_t0_us = 0;
 
     while (true) {
         // Sample this frame's inputs first: the power policy needs the touch
@@ -465,6 +509,7 @@ extern "C" void app_main(void) {
                                                   synth_events);
 
         if (g_power.asleep()) {
+            prev_iter_us = 0;   // period chain restarts at the wake frame
             // Panel asleep: input was still sampled above (that polling is
             // what makes wake instant — the FT3168 INT line keeps producing
             // touch reads while the panel sleeps), but tick/render/flush are
@@ -475,6 +520,20 @@ extern "C" void app_main(void) {
             vTaskDelay(pdMS_TO_TICKS(kFrameMs));
 #endif
             continue;
+        }
+
+        // Perf (F0): awake-iteration accounting (period + frame count).
+        {
+            const uint64_t iter_us = perf_now_us();
+            if (prev_iter_us) {
+                perf_accum(aiwatchos_mdb::detail::g_perf.period_us_sum,
+                           aiwatchos_mdb::detail::g_perf.period_us_max,
+                           iter_us - prev_iter_us);
+            }
+            prev_iter_us = iter_us;
+#ifdef __ESPRESSIF_IDF__
+            aiwatchos_mdb::detail::g_perf.frames++;
+#endif
         }
 
         // Dispatch touch to the foreground app — unless this touch is the one
@@ -504,28 +563,33 @@ extern "C" void app_main(void) {
         // Tick the foreground app (updates AI conversation state, voice pipeline).
         g_app_mgr.tick(kFrameMs);
 
-        // App-switch dip (plan 3.0): when the foreground app changes,
-        // brightness dips toward black and back over ~6 frames, so the
-        // user never sees a full-brightness cut between two screens.
+        // App-switch transition (perf-wave close-out): NO brightness
+        // dip and NO clear. The panel keeps displaying the outgoing
+        // app's last flushed frame in GRAM while this iteration
+        // composes the incoming app's first frame in full in the
+        // framebuffer; the band flush below then swaps it in as one
+        // composed frame. The old plan-3.0 dip ramped brightness
+        // 45/15/0/15/45/100 across ~6 frames after the switch — at the
+        // perf-wave frame rate that read on the glass as a flicker
+        // (owner report 2026-10-13), so the dip is gone entirely:
+        // brightness is never touched on a switch. All this block does
+        // now is timestamp the switch for the perf readout.
         {
             const char* current_id = g_app_mgr.current_app_id();
-            if (dip_step < 0 && last_app_id && current_id &&
+            if (!switch_t0_us && last_app_id && current_id &&
                 std::strcmp(last_app_id, current_id) != 0) {
-                dip_saved = board.backlight_percent();
-                dip_step = 0;
+                switch_t0_us = perf_now_us();
             }
             if (current_id) last_app_id = current_id;
-            if (dip_step >= 0) {
-                static const uint8_t kDipPct[6] = {45, 15, 0, 15, 45, 100};
-                board.set_backlight(static_cast<uint8_t>(
-                    dip_saved * kDipPct[dip_step] / 100));
-                if (++dip_step >= 6) dip_step = -1;
-            }
         }
 
         // Render (plan 3.0 order): G5 backdrop -> app -> shell status
         // zone LAST, so the status bar is present and identical on
         // every screen and no app can paint over it (audit X3).
+        const uint64_t t_render0 = perf_now_us();
+#ifdef __ESPRESSIF_IDF__
+        aiwatchos_mdb::detail::g_perf.renders++;
+#endif
         aiwatchos::draw_shell_backdrop(fb);
         g_app_mgr.render(fb);
 
@@ -581,7 +645,15 @@ extern "C" void app_main(void) {
         // the HAL row-range flush. A static screen costs zero QSPI
         // traffic; changed bands commit their hashes only on success.
         {
+            const uint64_t t_hash0 = perf_now_us();
+            perf_accum(aiwatchos_mdb::detail::g_perf.render_us_sum,
+                       aiwatchos_mdb::detail::g_perf.render_us_max,
+                       t_hash0 - t_render0);
             const uint8_t dirty = g_band_flush.scan(fb.pixels, fb.width, fb.height);
+            const uint64_t t_flush0 = perf_now_us();
+            perf_accum(aiwatchos_mdb::detail::g_perf.hash_us_sum,
+                       aiwatchos_mdb::detail::g_perf.hash_us_max,
+                       t_flush0 - t_hash0);
             uint8_t flushed = 0;
             for (int b = 0; b < aiwatchos::BandFlush::kBands; ++b) {
                 if (!(dirty & (1u << b))) continue;
@@ -592,6 +664,28 @@ extern "C" void app_main(void) {
                 }
             }
             g_band_flush.commit(flushed);
+            if (dirty) {
+                perf_accum(aiwatchos_mdb::detail::g_perf.flush_us_sum,
+                           aiwatchos_mdb::detail::g_perf.flush_us_max,
+                           perf_now_us() - t_flush0);
+#ifdef __ESPRESSIF_IDF__
+                aiwatchos_mdb::detail::g_perf.flush_frames++;
+#endif
+            }
+            // Perf readout: a switch's transition completes when the
+            // incoming app's first composed frame has been flushed
+            // (same iteration as detection — composition and flush are
+            // synchronous in this loop, so this is the glass-visible
+            // switch latency from the shell's point of view).
+            if (switch_t0_us) {
+                const uint32_t ms = static_cast<uint32_t>(
+                    (perf_now_us() - switch_t0_us) / 1000);
+                aiwatchos_mdb::detail::g_perf.switch_ms_last = ms;
+                if (ms > aiwatchos_mdb::detail::g_perf.switch_ms_max) {
+                    aiwatchos_mdb::detail::g_perf.switch_ms_max = ms;
+                }
+                switch_t0_us = 0;
+            }
         }
 
         // Delay for one frame (~40 ms). Without this yield the loop would

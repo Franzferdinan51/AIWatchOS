@@ -1008,7 +1008,15 @@ void hermes_render(aiwatchos::Framebuffer& fb) {
     }
 
     // Hint floats over the background (no band — the shell owns the
-    // only chrome at the top; the bottom stays clean).
+    // only chrome at the top; the bottom stays clean). Both bottom
+    // lines anchor to the AA Body face's real line height: the hint's
+    // line box ENDS exactly at the safe-area bottom line. (The old
+    // -14 offset assumed the pre-AA 5x7 scale-2 height of 14 px; the
+    // Body face is 23 px tall, so the glyphs ran past the safe line
+    // and the shell's safe-area clip half-erased them.)
+    const int kHintY = aiwatchos::kDisplayHeight - aiwatchos::kSafeBottom -
+                       aiwatchos::font_line_height(
+                           aiwatchos::FontFace::kBody);
     // H5: while BOOT is held past the hint threshold, count the hold
     // down over the bottom hint line.
     if (g_boot_hint_ms >= 600 && !g_boot_fired) {
@@ -1021,16 +1029,15 @@ void hermes_render(aiwatchos::Framebuffer& fb) {
                       static_cast<unsigned>(left_ms / 1000),
                       static_cast<unsigned>((left_ms % 1000) / 100));
         draw_text(fb, 16,
-                  aiwatchos::kDisplayHeight - aiwatchos::kSafeBottom - 44,
+                  kHintY - aiwatchos::font_line_height(
+                               aiwatchos::FontFace::kBody) - 4,
                   hold, 2, kAmberColor);
     }
     const char* hint = "HOLD BOTTOM: TALK";
     if (v.prompt_active) hint = "TAP YES OR NO";
     else if (v.card_active || v.image_active) hint = "TAP: DISMISS";
     else if (v.link != HermesLinkState::Linked) hint = "HERMES GADGET";
-    draw_text(fb, 16,
-              aiwatchos::kDisplayHeight - aiwatchos::kSafeBottom - 14, hint,
-              2, kDimColor);
+    draw_text(fb, 16, kHintY, hint, 2, kDimColor);
 }
 
 bool hermes_on_touch(const aiwatchos::TouchEvent& event) {

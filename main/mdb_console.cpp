@@ -529,12 +529,56 @@ void cmd_health() {
             wx_age_s = static_cast<long>(now - static_cast<time_t>(wx.fetched_epoch_ms / 1000));
         }
     }
+    snprintf(buf, sizeof(buf), "perf_switch_ms_last=%u\n",
+             static_cast<unsigned>(detail::g_perf.switch_ms_last));
+    out_str(buf);
     snprintf(buf, sizeof(buf), "weather_status=%s weather_age_s=%ld current_app=%s asleep=%d\n",
              wx_name, wx_age_s,
              current_app_id() ? current_app_id() : "?",
              display_asleep() ? 1 : 0);
     out_str(buf);
     out_str("MDB_HEALTH_END\n");
+}
+
+void cmd_perf() {
+    const aiwatchos_mdb::detail::PerfStats& p = aiwatchos_mdb::detail::g_perf;
+    char buf[256];
+    auto avg_ms = [](uint64_t sum_us, uint32_t n) -> double {
+        return n ? static_cast<double>(sum_us) / 1000.0 / n : 0.0;
+    };
+    out_str("MDB_PERF_BEGIN\n");
+    snprintf(buf, sizeof(buf), "frames=%u renders=%u flush_frames=%u\n",
+             static_cast<unsigned>(p.frames),
+             static_cast<unsigned>(p.renders),
+             static_cast<unsigned>(p.flush_frames));
+    out_str(buf);
+    snprintf(buf, sizeof(buf),
+             "period_ms_avg=%.2f period_ms_max=%.2f\n",
+             avg_ms(p.period_us_sum, p.frames),
+             p.period_us_max / 1000.0);
+    out_str(buf);
+    snprintf(buf, sizeof(buf),
+             "render_ms_avg=%.2f render_ms_max=%.2f\n",
+             avg_ms(p.render_us_sum, p.renders),
+             p.render_us_max / 1000.0);
+    out_str(buf);
+    snprintf(buf, sizeof(buf),
+             "hash_ms_avg=%.2f hash_ms_max=%.2f\n",
+             avg_ms(p.hash_us_sum, p.renders),
+             p.hash_us_max / 1000.0);
+    out_str(buf);
+    snprintf(buf, sizeof(buf),
+             "flush_ms_avg=%.2f flush_ms_max=%.2f\n",
+             avg_ms(p.flush_us_sum, p.flush_frames),
+             p.flush_us_max / 1000.0);
+    out_str(buf);
+    snprintf(buf, sizeof(buf),
+             "switch_ms_last=%u switch_ms_max=%u\n",
+             static_cast<unsigned>(p.switch_ms_last),
+             static_cast<unsigned>(p.switch_ms_max));
+    out_str(buf);
+    out_str("MDB_PERF_END\n");
+    aiwatchos_mdb::detail::perf_reset();
 }
 
 void cmd_logs() {
@@ -636,6 +680,7 @@ void dispatch(char* line) {
     if (strcmp(verb, "tpoll") == 0) { cmd_tpoll(); return; }
     if (strcmp(verb, "tpoll2") == 0) { cmd_tpoll2(); return; }
     if (strcmp(verb, "health") == 0) { cmd_health(); return; }
+    if (strcmp(verb, "perf") == 0) { cmd_perf(); return; }
     if (strcmp(verb, "logs") == 0) { cmd_logs(); return; }
     if (strcmp(verb, "touch") == 0) { cmd_touch(); return; }
     if (strcmp(verb, "panic") == 0) { cmd_panic(); return; }
