@@ -107,10 +107,20 @@ void WeatherApp::render(Framebuffer& fb) {
     int temp_x = (kDisplayWidth - Framebuffer::text_width(temp_str, 4)) / 2;
     fb.draw_text(temp_x, center_y, temp_str, kTempColor, 4);
 
-    // Condition text below temperature, derived from the WMO weather code.
-    const char* cond = weather_condition_text(snapshot_.weather_code);
+    // Condition text below temperature: NWS's own words (textDescription,
+    // carried verbatim in the snapshot), truncated to the render line
+    // width when longer. An empty description shows as "Unknown" — the
+    // service never invents one.
+    char cond[WeatherSnapshot::kConditionTextCap];
+    std::strncpy(cond, snapshot_.condition_text, sizeof(cond) - 1);
+    cond[sizeof(cond) - 1] = '\0';
+    size_t cond_len = std::strlen(cond);
+    while (cond_len > 0 &&
+           Framebuffer::text_width(cond, 2) > kDisplayWidth) {
+        cond[--cond_len] = '\0';
+    }
     fb.fill_rect(0, center_y + 48, kDisplayWidth - 1, center_y + 48 + 36, kBgColor);   // clear band
-    draw_centered(fb, center_y + 48, cond, kCondColor, 2);
+    draw_centered(fb, center_y + 48, cond[0] ? cond : "Unknown", kCondColor, 2);
 
     // "UPDATED HH:MM" (local display time) + STALE tag when the reading is
     // older than one refresh interval.
@@ -126,9 +136,14 @@ void WeatherApp::render(Framebuffer& fb) {
     }
     draw_centered(fb, kDisplayHeight - 116, upd_str, kDimColor, 2);
 
-    // Humidity at bottom.
+    // Humidity at bottom ("--%" when the station reported null — an
+    // honest unknown, not a fabricated 0%).
     char hum_str[16];
-    snprintf(hum_str, sizeof(hum_str), "%d%%", snapshot_.humidity_pct);
+    if (snapshot_.has_humidity) {
+        snprintf(hum_str, sizeof(hum_str), "%d%%", snapshot_.humidity_pct);
+    } else {
+        snprintf(hum_str, sizeof(hum_str), "--%%");
+    }
     int hum_x = (kDisplayWidth - Framebuffer::text_width(hum_str)) / 2;
     fb.draw_text(hum_x, kDisplayHeight - 80, hum_str, kHumidityCol);
 }

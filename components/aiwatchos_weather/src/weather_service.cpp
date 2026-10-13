@@ -28,16 +28,28 @@ namespace {
 
 const char* kTag = "aiw-weather";
 
-// Open-Meteo current-conditions responses are ~350 bytes; 4 KB is generous
-// headroom and a hard cap — a longer body aborts the fetch instead of
-// growing memory (resource discipline: fixed cap, PSRAM, fail closed).
-constexpr size_t kMaxBody = 4096;
+// NWS GeoJSON bodies: /points ~4 KB, /observations/latest ~5 KB, and the
+// station list only fits because the service asks for ?limit=1 (~4 KB;
+// unabridged it runs ~75 KB). 16 KB is a hard cap with generous headroom
+// — a longer body aborts the fetch instead of growing memory (resource
+// discipline: fixed cap, PSRAM, fail closed).
+constexpr size_t kMaxBody = 16384;
 constexpr uint32_t kTaskPeriodMs = 2000;
+
+// NWS usage policy: every request must carry an identifying User-Agent.
+constexpr const char* kUserAgent =
+    "AIWatchOS/1.0 (github.com/Franzferdinan51/AIWatchOS)";
+constexpr const char* kAccept = "application/geo+json";
 
 aiwatchos::WeatherSnapshot g_snapshot;
 SemaphoreHandle_t g_mutex = nullptr;
 volatile bool g_refresh_requested = false;
 bool g_started = false;
+
+// Resolved latest-observation URL, cached in RAM after the first
+// successful chain walk; cleared on any failure so the next cycle
+// re-derives the chain (stations do get replaced/renamed).
+char g_obs_url[192] = {};
 
 uint32_t refresh_interval_ms() {
 #ifdef CONFIG_AIWATCHOS_WEATHER_REFRESH_MIN
@@ -90,25 +102,10 @@ esp_err_t on_http_event(esp_http_client_event_t* evt) {
     return ESP_OK;
 }
 
-// One blocking fetch attempt. Runs ONLY on the weather task.
-bool do_fetch() {
-    char url[256];
-    std::snprintf(url, sizeof(url),
-                  "https://api.open-meteo.com/v1/forecast?latitude=%s"
-                  "&longitude=%s&current=temperature_2m,relative_humidity_2m,"
-                  "weather_code&temperature_unit=fahrenheit",
-                  CONFIG_AIWATCHOS_WEATHER_LAT, CONFIG_AIWATCHOS_WEATHER_LON);
-
-    // Response buffer in PSRAM with a hard cap; fail closed if PSRAM is
-    // unavailable rather than eating internal DRAM.
-    char* body = static_cast<char*>(
-        heap_caps_malloc(kMaxBody + 1, MALLOC_CAP_SPIRAM));
-    if (!body) {
-        ESP_LOGE(kTag, "PSRAM alloc failed — fetch skipped");
-        return false;
-    }
+// One blocking GET into the shared capped buffer. True only on HTTP 200
+// with the complete body (NUL-terminated into buf).
+bool http_get(const char* url, char* body, size_t* out_len) {
     BodySink sink{body, 0, kMaxBody, false};
-
     esp_http_client_config_t cfg{};
     cfg.url = url;
     cfg.event_handler = &on_http_event;
@@ -120,34 +117,107 @@ bool do_fetch() {
     bool ok = false;
     esp_http_client_handle_t client = esp_http_client_init(&cfg);
     if (client) {
+        esp_http_client_set_header(client, "User-Agent", kUserAgent);
+        esp_http_client_set_header(client, "Accept", kAccept);
         esp_err_t err = esp_http_client_perform(client);
         int status = esp_http_client_get_status_code(client);
         esp_http_client_cleanup(client);
         if (err != ESP_OK) {
-            ESP_LOGW(kTag, "fetch failed: %s", esp_err_to_name(err));
+            ESP_LOGW(kTag, "GET %s failed: %s", url, esp_err_to_name(err));
         } else if (status != 200) {
-            ESP_LOGW(kTag, "fetch HTTP %d", status);
+            ESP_LOGW(kTag, "GET %s -> HTTP %d", url, status);
         } else if (sink.overflow) {
-            ESP_LOGW(kTag, "response exceeded %u-byte cap", (unsigned)kMaxBody);
+            ESP_LOGW(kTag, "GET %s exceeded %u-byte cap", url,
+                     (unsigned)kMaxBody);
         } else {
             body[sink.len] = '\0';
-            float temp_f = 0;
-            int humidity = 0, code = -1;
-            if (weather_parse_current(body, &temp_f, &humidity, &code)) {
-                aiwatchos::WeatherSnapshot snap = current();
-                snap.has_data = true;
-                snap.temperature_f = temp_f;
-                snap.humidity_pct = humidity;
-                snap.weather_code = code;
-                snap.fetched_epoch_ms = aiwatchos::hal().now_ms();
-                snap.status = aiwatchos::WeatherServiceStatus::kOk;
-                publish(snap);
-                ESP_LOGI(kTag, "weather: %.1fF, %d%%, code %d", temp_f,
-                         humidity, code);
-                ok = true;
-            } else {
-                ESP_LOGW(kTag, "unparseable weather response");
-            }
+            *out_len = sink.len;
+            ok = true;
+        }
+    }
+    return ok;
+}
+
+// Walks the NWS chain (points -> station list -> station id) and caches
+// the latest-observation URL in g_obs_url. False on any failed hop.
+bool resolve_obs_url(char* body) {
+    size_t len = 0;
+    char points_url[160];
+    std::snprintf(points_url, sizeof(points_url),
+                  "https://api.weather.gov/points/%s,%s",
+                  CONFIG_AIWATCHOS_WEATHER_LAT,
+                  CONFIG_AIWATCHOS_WEATHER_LON);
+    if (!http_get(points_url, body, &len)) return false;
+
+    char stations_url[256];
+    if (!weather_nws_parse_stations_url(body, stations_url,
+                                        sizeof(stations_url))) {
+        ESP_LOGW(kTag, "points response had no observationStations");
+        return false;
+    }
+    // Only the nearest station is wanted; unabridged lists run ~75 KB.
+    std::strncat(stations_url, std::strchr(stations_url, '?') ? "&limit=1"
+                                                              : "?limit=1",
+                 sizeof(stations_url) - std::strlen(stations_url) - 1);
+    if (!http_get(stations_url, body, &len)) return false;
+
+    char station_id[16];
+    if (!weather_nws_parse_station_id(body, station_id, sizeof(station_id))) {
+        ESP_LOGW(kTag, "station list had no stationIdentifier");
+        return false;
+    }
+    std::snprintf(g_obs_url, sizeof(g_obs_url),
+                  "https://api.weather.gov/stations/%s/observations/latest",
+                  station_id);
+    ESP_LOGI(kTag, "NWS station resolved: %s", station_id);
+    return true;
+}
+
+// One blocking fetch attempt (chain walk if needed + the observation
+// read). Runs ONLY on the weather task.
+bool do_fetch() {
+    // Response buffer in PSRAM with a hard cap; fail closed if PSRAM is
+    // unavailable rather than eating internal DRAM.
+    char* body = static_cast<char*>(
+        heap_caps_malloc(kMaxBody + 1, MALLOC_CAP_SPIRAM));
+    if (!body) {
+        ESP_LOGE(kTag, "PSRAM alloc failed — fetch skipped");
+        return false;
+    }
+
+    bool ok = false;
+    size_t len = 0;
+    if (g_obs_url[0] == '\0' && !resolve_obs_url(body)) {
+        ESP_LOGW(kTag, "NWS chain resolution failed");
+    } else if (!http_get(g_obs_url, body, &len)) {
+        g_obs_url[0] = '\0';   // stale chain — re-derive next cycle
+    } else {
+        float temp_f = 0;
+        int humidity = 0;
+        bool has_humidity = false;
+        char desc[aiwatchos::WeatherSnapshot::kConditionTextCap];
+        if (weather_nws_parse_observation(body, &temp_f, &humidity,
+                                          &has_humidity, desc,
+                                          sizeof(desc))) {
+            aiwatchos::WeatherSnapshot snap = current();
+            snap.has_data = true;
+            snap.temperature_f = temp_f;
+            snap.humidity_pct = humidity;
+            snap.has_humidity = has_humidity;
+            std::strncpy(snap.condition_text, desc,
+                         sizeof(snap.condition_text) - 1);
+            snap.condition_text[sizeof(snap.condition_text) - 1] = '\0';
+            snap.fetched_epoch_ms = aiwatchos::hal().now_ms();
+            snap.status = aiwatchos::WeatherServiceStatus::kOk;
+            publish(snap);
+            ESP_LOGI(kTag, "weather: %.0fF, humidity %s, \"%s\"", temp_f,
+                     has_humidity ? "reported" : "n/a", desc);
+            ok = true;
+        } else {
+            // Includes the null-temperature case (station lagging): the
+            // chain itself may be stale too — re-derive next cycle.
+            ESP_LOGW(kTag, "unparseable/lagging observation response");
+            g_obs_url[0] = '\0';
         }
     }
     heap_caps_free(body);
@@ -208,7 +278,7 @@ void weather_service_start() {
     // (mbedTLS with dynamic buffers fits comfortably; the Muse link task's
     // 24 KB was flagged oversized by the resource audit — don't copy it).
     xTaskCreate(&weather_task, "aiw_weather", 8192, nullptr, 3, nullptr);
-    ESP_LOGI(kTag, "weather service started (lat %s, lon %s)",
+    ESP_LOGI(kTag, "weather service started (NWS, lat %s, lon %s)",
              CONFIG_AIWATCHOS_WEATHER_LAT, CONFIG_AIWATCHOS_WEATHER_LON);
 }
 

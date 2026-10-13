@@ -1,9 +1,9 @@
 # aiwatchos_weather — real current conditions for the OS weather app.
 #
-# weather_parse.cpp is pure apart from cJSON so the host test in test/ can
-# build it with plain g++ (against the ESP-IDF tree's own cJSON, the same
-# source the firmware links). weather_service.cpp is firmware-only: the
-# HTTPS fetch task (esp_http_client + TLS bundle), WiFi state from
+# weather_parse.cpp is pure C++ (field-wise NWS GeoJSON scanning, no JSON
+# DOM — see the file) so the host test in test/ builds it with plain g++
+# and no ESP-IDF at all. weather_service.cpp is firmware-only: the HTTPS
+# fetch task (esp_http_client + TLS bundle), WiFi state from
 # aiwatchos_net, snapshots published into aiwatchos_os's weather app.
 idf_component_register(
     SRCS
@@ -12,8 +12,7 @@ idf_component_register(
     INCLUDE_DIRS "include"
     # aiwatchos_os: provider seam + WeatherSnapshot + Board clock.
     # aiwatchos_net: wifi_connected() / net_config().
-    # json: cJSON (same component the account API uses).
-    REQUIRES aiwatchos_os aiwatchos_net esp_http_client esp-tls json
+    REQUIRES aiwatchos_os aiwatchos_net esp_http_client esp-tls
              esp_timer freertos esp_system
 )
 

@@ -1,8 +1,9 @@
 // AIWatchOS weather app — displays current temperature and conditions on the 410x502 AMOLED.
 // Data is REAL: the network-side weather service (components/aiwatchos_weather)
-// fetches current conditions from Open-Meteo over HTTPS and publishes snapshots
-// through the provider seam below. This app never invents numbers: until the
-// first successful fetch lands it renders an honest NO DATA YET state.
+// fetches current conditions from the US National Weather Service
+// (api.weather.gov) over HTTPS and publishes snapshots through the provider
+// seam below. This app never invents numbers: until the first successful
+// fetch lands it renders an honest NO DATA YET state.
 // Designed for hardware constraints: simple geometry, no bitmaps, bounded strings.
 #pragma once
 
@@ -11,11 +12,6 @@
 #include "aiwatchos/hal.hpp"   // for kDisplayWidth/kDisplayHeight constants
 
 namespace aiwatchos {
-
-// WMO weather interpretation code (Open-Meteo `weather_code`) -> short human
-// label ("Clear", "Partly Cloudy", "Rain", ...). Unknown codes -> "Unknown".
-// Pure function, host-testable; defined in src/weather_data.cpp.
-const char* weather_condition_text(int wmo_code);
 
 // Staleness rule: a reading fetched at `fetched_epoch_ms` is stale once its
 // age exceeds `stale_after_ms` (one full refresh interval — by then a refresh
@@ -36,10 +32,16 @@ enum class WeatherServiceStatus : uint8_t {
 // One published weather reading. `has_data` is false until the first
 // successful fetch — there is deliberately no default/fake reading.
 struct WeatherSnapshot {
+    static constexpr size_t kConditionTextCap = 48;
     bool has_data = false;
-    float temperature_f = 0.0f;   // Fahrenheit (Open-Meteo temperature_unit=fahrenheit)
-    int humidity_pct = 0;         // relative humidity, 0..100
-    int weather_code = -1;        // WMO code; label derives via weather_condition_text()
+    float temperature_f = 0.0f;   // Fahrenheit, whole degrees (NWS reports
+                                  // deg C; the service converts + rounds)
+    int humidity_pct = 0;         // relative humidity, 0..100 — meaningful
+                                  // only when has_humidity (NWS stations may
+                                  // report an explicit null instead)
+    bool has_humidity = false;
+    char condition_text[kConditionTextCap] = {};  // NWS textDescription
+                                  // verbatim ("Partly Cloudy"); may be empty
     uint64_t fetched_epoch_ms = 0;  // board epoch (RTC/SNTP-disciplined) at fetch time
     WeatherServiceStatus status = WeatherServiceStatus::kUnconfigured;
 };

@@ -1,20 +1,21 @@
 menu "AIWatchOS Weather"
 
 config AIWATCHOS_WEATHER_ENABLE
-    bool "Enable Open-Meteo weather fetch"
+    bool "Enable NWS weather fetch"
     default y
     help
         Starts the weather service task: current conditions for the
-        configured location are fetched from Open-Meteo (no API key)
-        over HTTPS and shown by the weather app. With WiFi unconfigured
-        the service stays idle and the app shows its NO DATA YET state.
+        configured location are fetched from the US National Weather
+        Service (api.weather.gov — no API key, US coverage) over HTTPS
+        and shown by the weather app. With WiFi unconfigured the
+        service stays idle and the app shows its NO DATA YET state.
 
 config AIWATCHOS_WEATHER_LAT
     string "Latitude (decimal degrees)"
     default "39.864"
     help
         Default location is Huber Heights, Ohio. Any decimal latitude,
-        e.g. "39.864". Used verbatim in the Open-Meteo query.
+        e.g. "39.864". Used verbatim in the NWS /points lookup.
 
 config AIWATCHOS_WEATHER_LON
     string "Longitude (decimal degrees)"

@@ -1,28 +1,58 @@
-// AIWatchOS weather service — real current conditions from Open-Meteo.
+// AIWatchOS weather service — real current conditions from the US
+// National Weather Service (api.weather.gov).
 //
-// The OS weather app (components/aiwatchos_os) renders whatever this service
-// publishes through the provider seam (aiwatchos::weather_set_provider). The
-// blocking HTTPS fetch runs on this component's own task, never on the UI
-// loop: fetch on start, then every AIWATCHOS_WEATHER_REFRESH_MIN minutes
-// while WiFi is configured, plus whenever the app nudges a refresh and the
-// data is stale. Failures keep the last-good reading and report an honest
-// status — nothing here ever fabricates a number.
+// The OS weather app (components/aiwatchos_os) renders whatever this
+// service publishes through the provider seam
+// (aiwatchos::weather_set_provider). The blocking HTTPS fetch runs on
+// this component's own task, never on the UI loop: fetch on start, then
+// every AIWATCHOS_WEATHER_REFRESH_MIN minutes while WiFi is configured,
+// plus whenever the app nudges a refresh and the data is stale. Failures
+// keep the last-good reading and report an honest status — nothing here
+// ever fabricates a number.
 //
-// Open-Meteo needs no API key: GET
-//   https://api.open-meteo.com/v1/forecast?latitude=<lat>&longitude=<lon>
-//     &current=temperature_2m,relative_humidity_2m,weather_code
-//     &temperature_unit=fahrenheit
+// NWS needs no API key; its policy asks only for an identifying
+// User-Agent, which the service sends on every request. Lookup chain
+// (documented NWS flow):
+//   GET /points/{lat},{lon}            -> properties.observationStations
+//   GET <observationStations>?limit=1  -> features[0] stationIdentifier
+//   GET /stations/{id}/observations/latest
+// The resolved latest-observation URL is cached in RAM after the first
+// successful chain walk and re-derived from scratch on any failure.
 #pragma once
+
+#include <cstddef>
 
 namespace aiwatchos_weather {
 
-// Extracts the `current` reading from an Open-Meteo forecast response body.
-// Pure apart from cJSON: host-testable with the fixture in test/. Returns
-// false on malformed JSON, a missing `current` object, or any field that
-// is absent or not a number (partial responses are rejected whole — a
-// half-reading would be a fabricated one).
-bool weather_parse_current(const char* json, float* out_temp_f,
-                           int* out_humidity_pct, int* out_weather_code);
+// Converts a Celsius temperature to whole Fahrenheit (x9/5+32, rounded
+// to the nearest int) — the display policy for the watch face.
+int weather_fahrenheit_from_celsius(double celsius);
+
+// Extracts properties.observationStations (the station-list URL) from a
+// /points response body. Field-wise scan, no JSON DOM (see
+// weather_parse.cpp for why). False on malformed/truncated input.
+bool weather_nws_parse_stations_url(const char* json, char* out_url,
+                                    size_t cap);
+
+// Extracts the first station's properties.stationIdentifier from an
+// observation-stations list response. False on malformed input.
+bool weather_nws_parse_station_id(const char* json, char* out_id,
+                                  size_t cap);
+
+// Extracts the current reading from a /observations/latest response:
+//   temperature.value (deg C)  -> *out_temp_f as whole deg F. REQUIRED:
+//     an explicit null (station lagging) or a missing/malformed field
+//     fails the whole parse — never substitute forecast values.
+//   relativeHumidity.value (%) -> *out_humidity_pct, only when present
+//     and non-null (*out_has_humidity); a null humidity is a valid
+//     reading that simply has no humidity to show.
+//   textDescription            -> *out_description (NWS's own words,
+//     e.g. "Partly Cloudy"); optional — absent leaves an empty string.
+bool weather_nws_parse_observation(const char* json, float* out_temp_f,
+                                   int* out_humidity_pct,
+                                   bool* out_has_humidity,
+                                   char* out_description,
+                                   size_t desc_cap);
 
 // Starts the fetch task and registers the provider with the OS weather
 // app. Idempotent. Call once from app_main after aiwatchos_net::net_start().

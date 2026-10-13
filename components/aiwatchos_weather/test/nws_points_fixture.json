@@ -1,0 +1,112 @@
+{
+    "@context": [
+        "https://geojson.org/geojson-ld/geojson-context.jsonld",
+        {
+            "@version": "1.1",
+            "wx": "https://api.weather.gov/ontology#",
+            "s": "https://schema.org/",
+            "geo": "http://www.opengis.net/ont/geosparql#",
+            "unit": "http://codes.wmo.int/common/unit/",
+            "@vocab": "https://api.weather.gov/ontology#",
+            "geometry": {
+                "@id": "s:GeoCoordinates",
+                "@type": "geo:wktLiteral"
+            },
+            "city": "s:addressLocality",
+            "state": "s:addressRegion",
+            "distance": {
+                "@id": "s:Distance",
+                "@type": "s:QuantitativeValue"
+            },
+            "bearing": {
+                "@type": "s:QuantitativeValue"
+            },
+            "value": {
+                "@id": "s:value"
+            },
+            "unitCode": {
+                "@id": "s:unitCode",
+                "@type": "@id"
+            },
+            "forecastOffice": {
+                "@type": "@id"
+            },
+            "forecastGridData": {
+                "@type": "@id"
+            },
+            "publicZone": {
+                "@type": "@id"
+            },
+            "county": {
+                "@type": "@id"
+            }
+        }
+    ],
+    "id": "https://api.weather.gov/points/39.864,-84.132",
+    "type": "Feature",
+    "geometry": {
+        "type": "Point",
+        "coordinates": [
+            -84.132,
+            39.864
+        ]
+    },
+    "properties": {
+        "@id": "https://api.weather.gov/points/39.864,-84.132",
+        "@type": "wx:Point",
+        "cwa": "ILN",
+        "type": "land",
+        "forecastOffice": "https://api.weather.gov/offices/ILN",
+        "gridId": "ILN",
+        "gridX": 46,
+        "gridY": 73,
+        "forecast": "https://api.weather.gov/gridpoints/ILN/46,73/forecast",
+        "forecastHourly": "https://api.weather.gov/gridpoints/ILN/46,73/forecast/hourly",
+        "forecastGridData": "https://api.weather.gov/gridpoints/ILN/46,73",
+        "observationStations": "https://api.weather.gov/gridpoints/ILN/46,73/stations",
+        "relativeLocation": {
+            "type": "Feature",
+            "geometry": {
+                "type": "Point",
+                "coordinates": [
+                    -84.1128933,
+                    39.8588807
+                ]
+            },
+            "properties": {
+                "city": "Huber Heights",
+                "state": "OH",
+                "distance": {
+                    "unitCode": "wmoUnit:m",
+                    "value": 0
+                },
+                "bearing": {
+                    "unitCode": "wmoUnit:degree_(angle)",
+                    "value": 0
+                }
+            }
+        },
+        "forecastZone": "https://api.weather.gov/zones/forecast/OHZ061",
+        "county": "https://api.weather.gov/zones/county/OHC113",
+        "fireWeatherZone": "https://api.weather.gov/zones/fire/OHZ061",
+        "timeZone": "America/New_York",
+        "radarStation": "KILN",
+        "astronomicalData": {
+            "sunrise": "2026-10-13T07:45:03-04:00",
+            "sunset": "2026-10-13T19:00:21-04:00",
+            "transit": "2026-10-13T13:22:42-04:00",
+            "civilTwilightBegin": "2026-10-13T07:17:58-04:00",
+            "civilTwilightEnd": "2026-10-13T19:27:25-04:00",
+            "nauticalTwilightBegin": "2026-10-13T06:46:39-04:00",
+            "nauticalTwilightEnd": "2026-10-13T19:58:44-04:00",
+            "astronomicalTwilightBegin": "2026-10-13T06:15:21-04:00",
+            "astronomicalTwilightEnd": "2026-10-13T20:30:02-04:00"
+        },
+        "nwr": {
+            "transmitter": "WXJ46",
+            "sameCode": "039113",
+            "areaBroadcast": "https://api.weather.gov/radio/WXJ46/broadcast",
+            "pointBroadcast": "https://api.weather.gov/points/39.864,-84.132/radio"
+        }
+    }
+}

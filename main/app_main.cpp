@@ -103,7 +103,7 @@ extern "C" void app_main(void) {
     // today's offline outbox mode, untouched.
     aiwatchos_net::net_start();
 
-    // --- 3c. Weather: Open-Meteo fetch task; publishes real readings
+    // --- 3c. Weather: NWS (api.weather.gov) fetch task; publishes real readings
     // into the weather app via its provider seam. Fails soft the same
     // way: unconfigured WiFi leaves the app in its NO DATA YET state.
     aiwatchos_weather::weather_service_start();
