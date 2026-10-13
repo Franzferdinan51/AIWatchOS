@@ -159,6 +159,38 @@ bool parse_setup_string(const char* text, SetupFields* out) {
     return true;
 }
 
+bool heard_transcript_clean(const char* raw, char* out, size_t cap) {
+    if (!out || cap == 0) return false;
+    out[0] = '\0';
+    if (!raw) return false;
+    // Cut the server's attachment suffix: "\n[file:audio/wav ...]".
+    const char* end = raw + std::strlen(raw);
+    const char* att = std::strstr(raw, "\n[file:");
+    if (att) end = att;
+    // Trim surrounding whitespace (the heard line itself is one line).
+    const char* p = raw;
+    auto is_ws = [](char c) {
+        return c == ' ' || c == '\t' || c == '\r' || c == '\n';
+    };
+    while (p < end && is_ws(*p)) ++p;
+    while (end > p && is_ws(end[-1])) --end;
+    if (p >= end) return false;
+    // The pre-transcription placeholder is not a transcript.
+    if (static_cast<size_t>(end - p) == 12 &&
+        std::strncmp(p, "[Voice note]", 12) == 0) {
+        return false;
+    }
+    size_t n = static_cast<size_t>(end - p);
+    if (n >= cap) {
+        n = cap - 1;
+        // Never split a UTF-8 code point at the cap.
+        while (n > 0 && (static_cast<unsigned char>(p[n]) & 0xC0) == 0x80) --n;
+    }
+    std::memcpy(out, p, n);
+    out[n] = '\0';
+    return n > 0;
+}
+
 bool agent_status_combine(const char* activity_code, const char* status,
                           const char* label, AgentStatus* out) {
     if (!out) return false;

@@ -78,6 +78,19 @@ struct AgentStatus {
 bool agent_status_combine(const char* activity_code, const char* status,
                           const char* label, AgentStatus* out);
 
+// --- Heard transcript (chat subscribe message.user, M5) --------------------
+// The server patches the voice-note message with what STT heard: a
+// message.user event whose text reads "<transcript>\n[file:audio/wav ...]"
+// (attachment suffix added by the server), or exactly "[Voice note]"
+// before transcription lands. The reference gadget firmware
+// (muse_chat_link.c on_row) cuts the suffix at "\n[file:", ignores the
+// placeholder, and only then surfaces the heard text; the companion's
+// _applyHeard does the same replacement on its "Voice note" bubble.
+// Cleans `raw` into `out` (NUL-terminated, capped at cap-1 chars on a
+// UTF-8 boundary). Returns false — and writes "" — when nothing usable
+// remains (null/empty input, whitespace only, or the placeholder).
+bool heard_transcript_clean(const char* raw, char* out, size_t cap);
+
 // --- Provisioning seam -----------------------------------------------------
 // The settings/BLE/serial setup flows all funnel into one string:
 //   aiwatchos://setup?ssid=<..>&pass=<..>&token=<..>&vmtoken=<..>

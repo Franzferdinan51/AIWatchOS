@@ -591,6 +591,7 @@ void muse_render(aiwatchos::Framebuffer& fb) {
     // Falls back to the latest-turn / hint text (host path included).
     char caption[256];
     caption[0] = '\0';
+    const char* heard_text = "";   // M5: "You: <transcript>" (PSRAM, device)
 #ifdef __ESPRESSIF_IDF__
     {
         static char* raw = nullptr;
@@ -616,6 +617,22 @@ void muse_render(aiwatchos::Framebuffer& fb) {
                     std::snprintf(caption, sizeof(caption), "%s", cleaned_buf);
                 }
             }
+        }
+    }
+    {
+        // M5: the latest heard transcript, prefixed for its bubble.
+        static char* tbuf = nullptr;
+        static char* ybuf = nullptr;
+        if (!tbuf) {
+            tbuf = static_cast<char*>(heap_caps_malloc(512, MALLOC_CAP_SPIRAM));
+        }
+        if (!ybuf) {
+            ybuf = static_cast<char*>(heap_caps_malloc(576, MALLOC_CAP_SPIRAM));
+        }
+        if (tbuf && ybuf &&
+            aiwatchos_net::muse_link_last_transcript(tbuf, 512) && tbuf[0]) {
+            std::snprintf(ybuf, 576, "You: %s", tbuf);
+            heard_text = ybuf;
         }
     }
 #endif
@@ -646,6 +663,21 @@ void muse_render(aiwatchos::Framebuffer& fb) {
         const int bh = n * font_line_height(FontFace::kCaption) + 12;
         const int bx = kCx - bw / 2;
         const int by = 374;
+        // M5: heard-transcript bubble — one dim line directly above the
+        // reply bubble ("You: ..." — what STT heard for this turn).
+        if (heard_text[0]) {
+            char tline[1][64];
+            if (caption_wrap(heard_text, 300, tline, 1) > 0 && tline[0][0]) {
+                const int tw = text_width_aa(tline[0], FontFace::kCaption);
+                const int tbh = font_line_height(FontFace::kCaption) + 8;
+                const int tby = by - tbh - 6;
+                BubbleStyle tstyle = bubble_style();
+                fb.draw_bubble(kCx - (tw + 20) / 2, tby, tw + 20, tbh, 12,
+                               tstyle);
+                draw_text_aa(fb, kCx - tw / 2, tby + 4, tline[0],
+                             FontFace::kCaption, colors::kDim);
+            }
+        }
         // No sprite shadow: the baked card shadow is sized for the
         // 392px notification cards; the caption bubble is content-sized.
         BubbleStyle style = bubble_style();

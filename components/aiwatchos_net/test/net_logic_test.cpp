@@ -175,5 +175,35 @@ int main() {
     }
 
     if (g_failures == 0) std::printf("net_logic_test: all checks passed\n");
+    // --- heard transcript cleaning (M5, gadget firmware on_row rules) ---
+    {
+        char out[64];
+        CHECK(heard_transcript_clean("turn on the lights", out, sizeof(out)));
+        CHECK(std::strcmp(out, "turn on the lights") == 0);
+        // The server's attachment suffix is cut.
+        CHECK(heard_transcript_clean("hello world\n[file:audio/wav 42]",
+                                     out, sizeof(out)));
+        CHECK(std::strcmp(out, "hello world") == 0);
+        // The pre-transcription placeholder is not a transcript.
+        CHECK(!heard_transcript_clean("[Voice note]", out, sizeof(out)));
+        CHECK(out[0] == '\0');
+        CHECK(!heard_transcript_clean("[Voice note]\n[file:audio/wav 1]",
+                                      out, sizeof(out)));
+        // Empty / whitespace / null are unusable.
+        CHECK(!heard_transcript_clean("", out, sizeof(out)));
+        CHECK(!heard_transcript_clean("  \n ", out, sizeof(out)));
+        CHECK(!heard_transcript_clean(nullptr, out, sizeof(out)));
+        // Surrounding whitespace is trimmed.
+        CHECK(heard_transcript_clean("  hi there \n", out, sizeof(out)));
+        CHECK(std::strcmp(out, "hi there") == 0);
+        // Cap truncation lands on a UTF-8 boundary (\xC3\xA9 = e-acute).
+        char small[5];
+        CHECK(heard_transcript_clean("ab\xC3\xA9xyz", small, sizeof(small)));
+        CHECK(std::strcmp(small, "ab\xC3\xA9") == 0);
+        char tiny[4];
+        CHECK(heard_transcript_clean("ab\xC3\xA9xyz", tiny, sizeof(tiny)));
+        CHECK(std::strcmp(tiny, "ab") == 0);
+    }
+
     return g_failures ? 1 : 0;
 }

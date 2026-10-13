@@ -96,6 +96,13 @@ bool muse_link_upload_turn(const uint8_t* adpcm, size_t len);
 // reply stream (see the report / muse_link.cpp notes).
 bool muse_link_last_reply(char* out, size_t cap);
 
+// The latest heard transcript (M5): what STT heard for the most recent
+// voice note, retained from the subscribe stream's message.user event
+// and cleaned (attachment suffix cut, "[Voice note]" placeholder
+// suppressed) by proto::heard_transcript_clean. Thread-safe snapshot
+// copy; "" when no transcript has arrived this session.
+bool muse_link_last_transcript(char* out, size_t cap);
+
 // --- Agent status + live reply (companion M1/M2 surfaces) ------------------
 
 // Latest agent/task status retained from the subscribe stream's

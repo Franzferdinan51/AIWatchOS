@@ -360,6 +360,9 @@ TurnRx g_rx;
 
 SemaphoreHandle_t g_reply_mutex = nullptr;
 std::string g_last_reply;
+// M5: latest heard transcript (message.user), published under
+// g_reply_mutex alongside the reply surfaces.
+std::string g_last_transcript;
 
 // M1/M2 surfaces, published under g_reply_mutex for the UI task: the
 // live (in-progress) reply text, and the latest agent/task status —
@@ -393,6 +396,7 @@ void turn_rx_reset() {
         xSemaphoreTake(g_reply_mutex, portMAX_DELAY);
         g_live_reply.clear();
         g_live_streaming = false;
+        g_last_transcript.clear();
         xSemaphoreGive(g_reply_mutex);
     }
 }
@@ -467,6 +471,35 @@ void on_sub_line(const char* line) {
                 g_rx.any_event = true;
                 g_rx.last_event_us = now_us();
                 publish_live_reply();   // M1: caption shows it growing
+            } else if (ev == "message.user") {
+                // M5: the server patches the voice-note message with
+                // what STT heard. Relation follows the reference
+                // firmware (muse_chat_link.c related()): the event's
+                // OWN message id must be our note or its parent — the
+                // two ids the chat ack names; before the ack, every
+                // event relates. display_text_ready gates like the
+                // other finals (absent = ready).
+                g_rx.any_event = true;
+                g_rx.last_event_us = now_us();
+                const cJSON* ready =
+                    cJSON_GetObjectItemCaseSensitive(p, "display_text_ready");
+                bool relates = !g_rx.acked || id_in_user_ids(mid);
+                if (relates && !cJSON_IsFalse(ready)) {
+                    // Field order follows the companion's applyServerEvent:
+                    // transcript, then display_text / content / text.
+                    std::string heard = json_str_field(p, "transcript");
+                    if (heard.empty())
+                        heard = json_str_field(p, "display_text", "content");
+                    if (heard.empty()) heard = json_str_field(p, "text");
+                    char cleaned[1024];
+                    if (proto::heard_transcript_clean(heard.c_str(), cleaned,
+                                                      sizeof(cleaned)) &&
+                        g_reply_mutex) {
+                        xSemaphoreTake(g_reply_mutex, portMAX_DELAY);
+                        g_last_transcript = cleaned;
+                        xSemaphoreGive(g_reply_mutex);
+                    }
+                }
             } else if (ev == "agent.status" || ev == "task.status") {
                 g_rx.any_event = true;  // activity counts for settle timing
                 g_rx.last_event_us = now_us();
@@ -996,6 +1029,16 @@ bool muse_link_last_reply(char* out, size_t cap) {
     xSemaphoreTake(g_reply_mutex, portMAX_DELAY);
     bool have = !g_last_reply.empty();
     std::strncpy(out, g_last_reply.c_str(), cap - 1);
+    out[cap - 1] = 0;
+    xSemaphoreGive(g_reply_mutex);
+    return have;
+}
+
+bool muse_link_last_transcript(char* out, size_t cap) {
+    if (!out || cap == 0 || !g_reply_mutex) return false;
+    xSemaphoreTake(g_reply_mutex, portMAX_DELAY);
+    bool have = !g_last_transcript.empty();
+    std::strncpy(out, g_last_transcript.c_str(), cap - 1);
     out[cap - 1] = 0;
     xSemaphoreGive(g_reply_mutex);
     return have;
