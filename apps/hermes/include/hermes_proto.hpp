@@ -69,6 +69,33 @@ bool hermes_binary_parse(const uint8_t* data, size_t len, uint8_t* channel, uint
                          uint16_t* seq, const uint8_t** payload, size_t* payload_len);
 
 // ---------------------------------------------------------------------------
+// WebSocket message reassembly (pure: shared by the link layer and host
+// tests). Fragmented WS messages accumulate in the caller's buffer until
+// the final fragment; a message that would exceed max_len is dropped
+// WHOLE — later fragments of the same message are ignored until it ends —
+// so a corrupt truncation is never delivered as a valid message.
+// ---------------------------------------------------------------------------
+
+struct HermesReasmState {
+    size_t len = 0;      // bytes accumulated for the in-progress message
+    uint8_t opcode = 0;  // first fragment's opcode (0x1 text, 0x2 binary)
+    bool drop = false;   // set: the in-progress message is oversized, ignore it
+};
+
+enum class HermesReasmOut : uint8_t {
+    Ignored,    // do not copy this fragment, nothing is ready
+    Buffered,   // copy frag_len bytes at *copy_at, message still in progress
+    Complete,   // copy frag_len bytes at *copy_at, then emit *emit_len bytes
+};
+
+// Feed one WS fragment: op is the frame opcode (0x0 = continuation),
+// frag_off/frag_len locate it in the message, msg_len is the full message
+// length, fin is the frame FIN bit. max_len bounds one message.
+HermesReasmOut hermes_reasm_feed(HermesReasmState* st, uint8_t op, size_t frag_off,
+                                 size_t frag_len, size_t msg_len, bool fin,
+                                 size_t max_len, size_t* copy_at, size_t* emit_len);
+
+// ---------------------------------------------------------------------------
 // Hub endpoint failover (away-from-home).
 //
 // The hub is reachable two ways: the home-LAN endpoint (ws://, the
@@ -229,6 +256,16 @@ struct HermesConfig {
 
 class HermesClient {
  public:
+    // Handshake watchdog: a transport that never delivers welcome within
+    // this long after connect is cycled (Offline + reconnect + a link
+    // recycle request) instead of hanging on CONNECTING forever. Generous
+    // on purpose — one default heartbeat interval; a healthy hub answers
+    // in well under a second.
+    static constexpr uint32_t kWelcomeTimeoutMs = 20000;
+    // Image watchdog: an image transfer stalled this long is abandoned
+    // with a user-visible notice (mirrors the 30 s OTA stall rule).
+    static constexpr uint32_t kImageStallMs = 30000;
+
     // sinks/config are copied. Call set_key() before on_transport_open().
     void init(const HermesSinks& sinks, const HermesConfig& cfg);
     void set_key(const uint8_t key[32]);
@@ -279,6 +316,13 @@ class HermesClient {
     HermesLinkState state() const { return view_.link; }
     bool paired() const { return view_.paired; }
     bool wants_reconnect() const { return wants_reconnect_; }
+    // The handshake watchdog asked the link layer to tear down and redial
+    // the live socket (consume-on-read: the link task takes it once).
+    bool take_cycle_request() {
+        bool r = want_cycle_;
+        want_cycle_ = false;
+        return r;
+    }
     bool ota_reboot_pending() const { return ota_reboot_pending_; }
     void ota_reboot_consumed() { ota_reboot_pending_ = false; }
     const HermesView& view() const { return view_; }
@@ -311,7 +355,9 @@ class HermesClient {
     bool welcomed_ = false;
     uint32_t heartbeat_s_ = 20;
     uint64_t last_rx_ms_ = 0;
+    uint64_t connect_ms_ = 0;              // on_transport_open stamp (welcome watchdog)
     bool wants_reconnect_ = false;
+    bool want_cycle_ = false;              // handshake watchdog: link must recycle the socket
 
     int battery_pct_ = -1;
     int battery_sent_ = -2;                  // last value reported via state{}
@@ -352,6 +398,7 @@ class HermesClient {
     int img_stream_ = -1;
     size_t img_received_ = 0;
     size_t img_expected_ = 0;
+    uint64_t img_last_ms_ = 0;             // last image.start/chunk (stall watchdog)
     uint8_t* img_buf_ = nullptr;
 
     // OTA receive (channel 3).

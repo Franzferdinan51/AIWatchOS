@@ -69,7 +69,9 @@ void HermesClient::init(const HermesSinks& sinks, const HermesConfig& cfg) {
     view_ = HermesView{};
     transport_up_ = false;
     welcomed_ = false;
+    connect_ms_ = 0;
     wants_reconnect_ = false;
+    want_cycle_ = false;
     battery_pct_ = -1;
     battery_sent_ = -2;
     charging_ = -1;
@@ -81,6 +83,7 @@ void HermesClient::init(const HermesSinks& sinks, const HermesConfig& cfg) {
     capturing_ = false;
     play_stream_ = -1;
     img_stream_ = -1;
+    img_last_ms_ = 0;
     ota_state_ = OtaState::Idle;
     ota_reboot_pending_ = false;
     if (img_buf_) {
@@ -161,9 +164,12 @@ void HermesClient::on_transport_open(uint64_t now_ms) {
     transport_up_ = true;
     welcomed_ = false;
     wants_reconnect_ = false;
+    want_cycle_ = false;
     last_rx_ms_ = now_ms;
+    connect_ms_ = now_ms;   // the welcome watchdog starts here
     view_.paired = false;
     view_.pairing_code[0] = '\0';
+    view_.error[0] = '\0';   // a fresh attempt clears the last failure
     if (view_.link != HermesLinkState::AuthFailed) set_link(HermesLinkState::Connecting);
     if (!has_key_) {
         copy_capped(view_.error, sizeof(view_.error), "NO DEVICE KEY");
@@ -214,6 +220,7 @@ void HermesClient::on_transport_closed(uint64_t now_ms) {
     (void)now_ms;
     transport_up_ = false;
     welcomed_ = false;
+    want_cycle_ = false;   // the socket is already gone; nothing to recycle
     capturing_ = false;
     if (play_stream_ >= 0) {
         play_stream_ = -1;
@@ -342,6 +349,9 @@ void HermesClient::on_text(const char* json, size_t len, uint64_t now_ms) {
         long stream = -1, rate = 16000;
         json_int(root, "stream", &stream);
         json_int(root, "rate", &rate);
+        // Fail closed on a bogus rate (a negative value would otherwise
+        // wrap to ~4 GHz through the uint32_t cast below).
+        if (rate < 8000 || rate > 48000) rate = 16000;
         if (stream >= 0) {
             if (play_stream_ >= 0 && sinks_.audio_abort) sinks_.audio_abort(sinks_.ctx);
             play_stream_ = static_cast<int>(stream);
@@ -364,7 +374,11 @@ void HermesClient::on_text(const char* json, size_t len, uint64_t now_ms) {
         img_stream_ = -1;
         img_received_ = 0;
         img_expected_ = 0;
-        if (stream >= 0 && w > 0 && h > 0 && w <= cfg_.image_max_w && h <= cfg_.image_max_h) {
+        if (stream < 0 || w <= 0 || h <= 0) {
+            show_notice("IMAGE IGNORED", 8, now_ms);
+        } else if (w > cfg_.image_max_w || h > cfg_.image_max_h) {
+            show_notice("IMAGE TOO LARGE", 8, now_ms);
+        } else {
             size_t need = static_cast<size_t>(w) * static_cast<size_t>(h) * 2;
             if (!img_buf_) {
                 // Big-buffer rule: platform allocator (PSRAM on device,
@@ -379,17 +393,24 @@ void HermesClient::on_text(const char* json, size_t len, uint64_t now_ms) {
             if (img_buf_) {
                 img_stream_ = static_cast<int>(stream);
                 img_expected_ = need;
+                img_last_ms_ = now_ms;
                 view_.image_w = static_cast<int>(w);
                 view_.image_h = static_cast<int>(h);
                 view_.image_until_ms = ttl > 0 ? now_ms + static_cast<uint64_t>(ttl) * 1000ULL : 0;
                 view_.image_active = false;   // shown once complete
+            } else {
+                show_notice("IMAGE DROPPED", 8, now_ms);
             }
         }
     } else if (std::strcmp(type, "image.end") == 0) {
         long stream = -1;
         json_int(root, "stream", &stream);
-        if (img_stream_ >= 0 && stream == img_stream_ && img_received_ >= img_expected_) {
-            view_.image_active = true;
+        if (img_stream_ >= 0 && stream == img_stream_) {
+            if (img_received_ >= img_expected_) {
+                view_.image_active = true;
+            } else {
+                show_notice("IMAGE INCOMPLETE", 8, now_ms);
+            }
         }
         img_stream_ = -1;
     } else if (std::strcmp(type, "action") == 0) {
@@ -531,11 +552,20 @@ void HermesClient::on_binary(const uint8_t* data, size_t len, uint64_t now_ms) {
             size_t take = payload_len < room ? payload_len : room;
             if (take) std::memcpy(img_buf_ + img_received_, payload, take);
             img_received_ += take;
+            img_last_ms_ = now_ms;
         }
     } else if (channel == kHermesChannelFirmware) {
         if (ota_state_ != OtaState::Receiving || stream != ota_stream_) return;
         if (seq != ota_expect_seq_) {
             ota_fail("sequence", "firmware frame gap", now_ms);
+            return;
+        }
+        // The offer-time size cap binds every chunk too: a server that
+        // streams past the offered size must not write past it into the
+        // OTA slot. (ota_received_ <= ota_size_ always holds, so the
+        // subtraction below cannot underflow.)
+        if (payload_len > static_cast<size_t>(ota_size_ - ota_received_)) {
+            ota_fail("size", "firmware exceeds offered size", now_ms);
             return;
         }
         if (!sinks_.ota_write || !sinks_.ota_write(sinks_.ctx, payload, payload_len)) {
@@ -814,6 +844,21 @@ void HermesClient::tick(uint64_t now_ms) {
             wants_reconnect_ = true;
         }
     }
+    // Handshake watchdog: no welcome within kWelcomeTimeoutMs of connect
+    // (a hub that accepts the socket but never completes the handshake)
+    // drops the link and asks the link layer to recycle the socket, so
+    // the UI never hangs on CONNECTING. AuthFailed is latched: a
+    // rejected identity must not be redialled by this path.
+    if (transport_up_ && !welcomed_ && view_.link != HermesLinkState::AuthFailed &&
+        now_ms - connect_ms_ > kWelcomeTimeoutMs) {
+        transport_up_ = false;
+        view_.paired = false;
+        view_.busy = false;
+        set_link(HermesLinkState::Offline);
+        copy_capped(view_.error, sizeof(view_.error), "NO WELCOME - RETRYING");
+        wants_reconnect_ = true;
+        want_cycle_ = true;
+    }
     // TTL expiry.
     if (view_.notice_until_ms && now_ms >= view_.notice_until_ms) {
         view_.notice[0] = '\0';
@@ -835,6 +880,44 @@ void HermesClient::tick(uint64_t now_ms) {
     } else if (ota_state_ == OtaState::Offered && now_ms - ota_last_chunk_ms_ > 60000) {
         ota_reset();
     }
+    // Image stall: same shape as the OTA rule — an image that stops
+    // mid-transfer is abandoned with a notice, not held half-open.
+    if (img_stream_ >= 0 && now_ms - img_last_ms_ > kImageStallMs) {
+        img_stream_ = -1;
+        show_notice("IMAGE STALLED", 8, now_ms);
+    }
+}
+
+HermesReasmOut hermes_reasm_feed(HermesReasmState* st, uint8_t op, size_t frag_off,
+                                 size_t frag_len, size_t msg_len, bool fin,
+                                 size_t max_len, size_t* copy_at, size_t* emit_len) {
+    if (!st) return HermesReasmOut::Ignored;
+    if (op != 0x0) st->opcode = op;
+    if (frag_off == 0 && op != 0x0) {
+        // A fresh message supersedes any in-progress one.
+        st->len = 0;
+        st->drop = false;
+    }
+    const bool end = fin && frag_off + frag_len >= msg_len;
+    if (st->drop) {
+        if (end) st->drop = false;
+        return HermesReasmOut::Ignored;
+    }
+    if (st->len + frag_len > max_len) {
+        // Oversized: shed this message whole. Later fragments are ignored
+        // until the message ends, so no truncation is ever delivered.
+        st->len = 0;
+        st->drop = !end;
+        return HermesReasmOut::Ignored;
+    }
+    if (copy_at) *copy_at = st->len;
+    st->len += frag_len;
+    if (end) {
+        if (emit_len) *emit_len = st->len;
+        st->len = 0;
+        return HermesReasmOut::Complete;
+    }
+    return HermesReasmOut::Buffered;
 }
 
 }  // namespace aiwatchos_hermes

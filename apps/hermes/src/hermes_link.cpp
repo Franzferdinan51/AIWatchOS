@@ -97,9 +97,12 @@ bool g_attempt_made = false;
 bool g_attempt_up = false;
 
 // Reassembly buffer for fragmented WS messages (PSRAM, allocated once).
+// The pure hermes_reasm_feed() machine tracks progress; oversized messages
+// are shed whole (never delivered truncated).
 uint8_t* g_rx = nullptr;
-size_t g_rx_len = 0;
-uint8_t g_rx_opcode = 0;
+HermesReasmState g_reasm{};
+uint32_t g_q_evicted = 0;   // data frames shed from a full pump queue (oldest first)
+uint32_t g_q_dropped = 0;   // inbound frames dropped with nowhere to go
 
 struct Msg {
     enum Kind : uint8_t { Up, Down, Text, Binary } kind;
@@ -124,8 +127,35 @@ void post(Msg::Kind kind, uint8_t* data, size_t len) {
     m->data = data;
     m->len = len;
     if (xQueueSend(g_queue, &m, 0) != pdTRUE) {
+        // Full: shed the oldest DATA frame to make room (a stale audio
+        // chunk is worth less than a fresh one). Up/Down control frames
+        // are never shed — they are re-queued at the front and the
+        // newcomer drops instead, so link-state transitions stay ordered.
+        Msg* oldest = nullptr;
+        if (xQueueReceive(g_queue, &oldest, 0) == pdTRUE && oldest) {
+            if (oldest->kind == Msg::Up || oldest->kind == Msg::Down) {
+                if (xQueueSendToFront(g_queue, &oldest, 0) != pdTRUE) {
+                    // Practically unreachable (this task is the only
+                    // sender and it just freed a slot); free to not leak.
+                    if (oldest->data) heap_caps_free(oldest->data);
+                    heap_caps_free(oldest);
+                }
+                oldest = nullptr;
+            } else {
+                if (oldest->data) heap_caps_free(oldest->data);
+                heap_caps_free(oldest);
+                oldest = nullptr;
+                ++g_q_evicted;
+                if (xQueueSend(g_queue, &m, 0) == pdTRUE) return;
+            }
+        }
         if (data) heap_caps_free(data);
         heap_caps_free(m);
+        ++g_q_dropped;
+        if (g_q_dropped == 1 || g_q_dropped % 64 == 0) {
+            ESP_LOGW(TAG, "pump queue overrun (evicted=%u dropped=%u)",
+                     static_cast<unsigned>(g_q_evicted), static_cast<unsigned>(g_q_dropped));
+        }
     }
 }
 
@@ -164,30 +194,30 @@ void ws_event_handler(void*, esp_event_base_t, int32_t event_id, void* event_dat
                 g_failover.on_link_down();
             }
             g_ws_up = false;
-            g_rx_len = 0;
+            g_reasm = HermesReasmState{};
             break;
         case WEBSOCKET_EVENT_DATA: {
             uint8_t op = d->op_code;
             if (op == 0x8 || op == 0x9 || op == 0xA) break;   // close/ping/pong: client handles
-            if (op != 0x0) g_rx_opcode = op;
-            if (d->payload_offset == 0 && op != 0x0) g_rx_len = 0;
             if (!g_rx) break;
-            if (g_rx_len + static_cast<size_t>(d->data_len) > kMaxMessage) {
-                ESP_LOGW(TAG, "dropping oversized message");
-                g_rx_len = 0;
-                break;
-            }
-            std::memcpy(g_rx + g_rx_len, d->data_ptr, static_cast<size_t>(d->data_len));
-            g_rx_len += static_cast<size_t>(d->data_len);
-            bool done = d->payload_offset + d->data_len >= d->payload_len;
-            if (done && d->fin) {
+            size_t copy_at = 0, msg_len = 0;
+            const HermesReasmOut out =
+                hermes_reasm_feed(&g_reasm, op, static_cast<size_t>(d->payload_offset),
+                                  static_cast<size_t>(d->data_len),
+                                  static_cast<size_t>(d->payload_len), d->fin != 0,
+                                  kMaxMessage, &copy_at, &msg_len);
+            if (out == HermesReasmOut::Ignored) break;
+            std::memcpy(g_rx + copy_at, d->data_ptr, static_cast<size_t>(d->data_len));
+            if (out == HermesReasmOut::Complete) {
                 uint8_t* copy = static_cast<uint8_t*>(
-                    heap_caps_malloc(g_rx_len ? g_rx_len : 1, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+                    heap_caps_malloc(msg_len ? msg_len : 1, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
                 if (copy) {
-                    std::memcpy(copy, g_rx, g_rx_len);
-                    post(g_rx_opcode == 0x2 ? Msg::Binary : Msg::Text, copy, g_rx_len);
+                    std::memcpy(copy, g_rx, msg_len);
+                    post(g_reasm.opcode == 0x2 ? Msg::Binary : Msg::Text, copy, msg_len);
+                } else {
+                    ESP_LOGW(TAG, "dropped %u-byte message (PSRAM exhausted)",
+                             static_cast<unsigned>(msg_len));
                 }
-                g_rx_len = 0;
             }
             break;
         }
@@ -274,6 +304,20 @@ void pump_task(void*) {
             g_wake = false;
             g_next_attempt_ms = 0;
             g_backoff_ms = kBackoffMinMs;
+        }
+
+        // Handshake-watchdog recycle: the client never got its welcome on
+        // the live socket, so tear the socket down and let the normal
+        // redial path below bring it back (on the standing backoff
+        // schedule — no hammering a sick hub).
+        if (hermes_core_wants_cycle()) {
+            if (g_ws) {
+                esp_websocket_client_destroy(g_ws);
+                g_ws = nullptr;
+            }
+            if (g_ws_up) post(Msg::Down, nullptr, 0);
+            g_ws_up = false;
+            g_reasm = HermesReasmState{};
         }
 
         // (Re)connect management with exponential backoff. After an auth
@@ -371,6 +415,12 @@ void hermes_link_save_outbox(const char* const* texts, int count) {
         char key[3] = {'q', static_cast<char>('0' + i), '\0'};
         const char* t = texts[i] ? texts[i] : "";
         nvs_set_blob(h, key, t, std::strlen(t) + 1);
+    }
+    // A shrunken ring must not leave stale qN keys behind (a later bug
+    // that trusts keys over qn would resurrect dead texts).
+    for (int i = count; i < 4; ++i) {
+        char key[3] = {'q', static_cast<char>('0' + i), '\0'};
+        nvs_erase_key(h, key);
     }
     nvs_commit(h);
     nvs_close(h);

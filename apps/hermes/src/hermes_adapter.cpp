@@ -314,7 +314,9 @@ std::string hermes_health_line() {
         std::snprintf(srv, sizeof(srv), "%s", g_client->view().server);
         std::snprintf(ses, sizeof(ses), "%s", g_client->view().session);
     }
-    char line[64] = {};
+    // 96 bytes: the base line tops out near 40 chars and the SRV/SES/VIA
+    // tail near 45 — the old 64-byte buffer silently cut the tail.
+    char line[96] = {};
     if (g_hal) {
         aiwatchos::PowerStatus ps = g_hal->read_power();
         if (ps.battery_percent <= 100) {
@@ -386,12 +388,14 @@ const HermesView& hermes_view() {
     return *g_empty_view;
 }
 
-const char* hermes_pairing_code() {
-    return hermes_view().pairing_code;
+std::string hermes_pairing_code() {
+    LockGuard lock;
+    return std::string(hermes_view().pairing_code);
 }
 
-const char* hermes_pairing_command() {
-    return hermes_view().pairing_cmd;
+std::string hermes_pairing_command() {
+    LockGuard lock;
+    return std::string(hermes_view().pairing_cmd);
 }
 
 bool hermes_send_text(const char* text) {
@@ -608,6 +612,12 @@ bool hermes_core_wants_reconnect() {
     if (!g_client) return false;
     LockGuard lock;
     return g_client->wants_reconnect();
+}
+
+bool hermes_core_wants_cycle() {
+    if (!g_client) return false;
+    LockGuard lock;
+    return g_client->take_cycle_request();
 }
 
 bool hermes_core_talk_active() {
@@ -1047,9 +1057,11 @@ bool hermes_on_touch(const aiwatchos::TouchEvent& event) {
     uint64_t now = now_ms();
 
     if (event.type == aiwatchos::TouchEvent::Press) {
-        // Prompt first (guard: ignore presses in the first 0.6 s so a press
-        // meant for something else doesn't answer — protocol doc rule).
-        if (v.prompt_active && now - v.prompt_since_ms >= 600 && event.y >= 340) {
+        // Prompt first. Guard: presses in the first 0.6 s are swallowed
+        // whole (protocol doc rule) — they must not fall through to
+        // cancel/talk below.
+        if (v.prompt_active && now - v.prompt_since_ms < 600) return true;
+        if (v.prompt_active && event.y >= 340) {
             return g_client->answer_prompt(event.x < aiwatchos::kDisplayWidth / 2);
         }
         // Cards/images dismiss on tap.
@@ -1074,8 +1086,9 @@ bool hermes_on_touch(const aiwatchos::TouchEvent& event) {
         return false;
     }
 
-    if (event.type == aiwatchos::TouchEvent::Release &&
-        event.y > aiwatchos::kDisplayHeight - 100) {
+    // Any release ends an in-progress capture: a finger that slides off
+    // the talk zone before lifting must not wedge the mic open.
+    if (event.type == aiwatchos::TouchEvent::Release) {
         if (g_client->talk_active()) {
             g_client->talk_stop(now);
             return true;
@@ -1138,6 +1151,7 @@ void hermes_test_inject_binary(const uint8_t* data, size_t len) {
 void hermes_test_talk_feed(const int16_t* pcm, size_t frames) {
     hermes_core_talk_feed(pcm, frames);
 }
+bool hermes_test_take_cycle_request() { return hermes_core_wants_cycle(); }
 size_t hermes_test_outbound_count() { return g_outbound.size(); }
 bool hermes_test_outbound_is_binary(size_t i) {
     return i < g_outbound.size() && g_outbound[i].binary;

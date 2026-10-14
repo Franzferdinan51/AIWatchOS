@@ -91,6 +91,7 @@ class TestHal : public Hal {
     uint32_t read_buttons() override { return 0; }
 
     void advance_ms(uint64_t ms) { ms_ += ms; }
+    uint32_t playback_rate() const { return rate_; }
  private:
     uint8_t backlight_ = 100;
     uint8_t volume_ = 70;
@@ -2656,6 +2657,309 @@ static void test_boot_escape() {
     printf("test_boot_escape: PASSED\n");
 }
 
+// --- Hermes handshake watchdog: no welcome -> Offline + link recycle ------
+static void test_hermes_watchdog() {
+    using namespace aiwatchos_hermes;
+    aiwatchos::TestHal hal;
+    aiwatchos::App app = make_hermes_app(hal);
+    app.init();
+    uint8_t key[32];
+    for (int i = 0; i < 32; ++i) key[i] = static_cast<uint8_t>(i);
+    hermes_test_reset(key);
+
+    // A hub that accepts the socket but never welcomes: CONNECTING holds
+    // until the watchdog, then the link drops and asks for one recycle.
+    hermes_test_transport_up();
+    assert(hermes_link_state() == HermesLinkState::Connecting);
+    hal.advance_ms(HermesClient::kWelcomeTimeoutMs - 1);
+    hermes_pump(hal.now_ms());
+    assert(hermes_link_state() == HermesLinkState::Connecting);
+    assert(!hermes_test_take_cycle_request());
+    hal.advance_ms(2);
+    hermes_pump(hal.now_ms());
+    assert(hermes_link_state() == HermesLinkState::Offline);
+    assert(std::string(hermes_view().error) == "NO WELCOME - RETRYING");
+    assert(hermes_test_take_cycle_request());   // the link task takes it once
+    assert(!hermes_test_take_cycle_request());
+
+    // A fresh attempt clears the error and re-arms the watchdog.
+    hermes_test_transport_up();
+    assert(hermes_link_state() == HermesLinkState::Connecting);
+    assert(hermes_view().error[0] == '\0');
+    hal.advance_ms(HermesClient::kWelcomeTimeoutMs + 1);
+    hermes_pump(hal.now_ms());
+    assert(hermes_link_state() == HermesLinkState::Offline);
+    assert(hermes_test_take_cycle_request());
+
+    // AuthFailed stays latched: the watchdog must not redial a rejected
+    // identity.
+    hermes_test_reset(key);
+    hermes_test_transport_up();
+    hermes_test_inject_text("{\"type\":\"error\",\"code\":\"auth_failed\",\"message\":\"bad key\"}");
+    assert(hermes_link_state() == HermesLinkState::AuthFailed);
+    hal.advance_ms(HermesClient::kWelcomeTimeoutMs + 60000);
+    hermes_pump(hal.now_ms());
+    assert(hermes_link_state() == HermesLinkState::AuthFailed);
+    assert(!hermes_test_take_cycle_request());
+
+    // A welcome in time disarms the watchdog entirely.
+    hermes_test_reset(key);
+    hermes_test_transport_up();
+    hermes_test_inject_text("{\"type\":\"challenge\",\"nonce\":\"bm9uY2Utbm9uY2Utbm9uY2U=\",\"enrolled\":false}");
+    hermes_test_inject_text("{\"type\":\"welcome\",\"session\":\"s1\",\"paired\":true,\"heartbeat_s\":20}");
+    assert(hermes_link_state() == HermesLinkState::Linked);
+    hal.advance_ms(HermesClient::kWelcomeTimeoutMs + 5000);   // past it, before heartbeat death
+    hermes_pump(hal.now_ms());
+    assert(hermes_link_state() == HermesLinkState::Linked);
+    assert(!hermes_test_take_cycle_request());
+
+    printf("test_hermes_watchdog: PASSED\n");
+}
+
+// --- Hermes OTA: a stream past the offered size is refused before writing --
+static void test_hermes_ota_oversize() {
+    using namespace aiwatchos_hermes;
+    aiwatchos::TestHal hal;
+    hermes_linked(hal);
+
+    uint8_t key[32];
+    for (int i = 0; i < 32; ++i) key[i] = static_cast<uint8_t>(i);
+    const size_t img_size = 1000;
+    std::vector<uint8_t> img(img_size);
+    for (size_t i = 0; i < img_size; ++i) img[i] = static_cast<uint8_t>(i * 3 + 1);
+    char sha[65];
+    hermes_sha256_hex(img.data(), img_size, sha);
+
+    char offer[256];
+    snprintf(offer, sizeof(offer),
+             "{\"type\":\"ota.offer\",\"stream\":3,\"size\":%zu,\"sha256\":\"%s\",\"version\":\"9.9.9\"}",
+             img_size, sha);
+    hermes_test_inject_text(offer);
+    assert(outbound_has("\"type\":\"ota.ready\""));
+    std::string ready = hermes_test_outbound_text(hermes_test_outbound_count() - 1);
+    size_t np = ready.find("\"nonce\":\"");
+    assert(np != std::string::npos);
+    std::string nonce = ready.substr(np + 9, 24);
+    std::string mac = hermes_ota_mac_b64(key, "hg-630dcd2966c43366", nonce.c_str(), sha, img_size);
+    hermes_test_inject_text(("{\"type\":\"ota.begin\",\"mac\":\"" + mac + "\"}").c_str());
+    assert(outbound_has("\"offset\":0"));
+    hermes_test_clear_outbound();
+
+    // 900 bytes land; the next 200-byte chunk would overrun the offer and
+    // is refused BEFORE any of it reaches flash.
+    {
+        std::vector<uint8_t> f0(4 + 900);
+        hermes_binary_header_pack(f0.data(), kHermesChannelFirmware, 3, 0);
+        memcpy(f0.data() + 4, img.data(), 900);
+        hermes_test_inject_binary(f0.data(), f0.size());
+    }
+    assert(hermes_test_ota_captured(nullptr) == 900);
+    {
+        std::vector<uint8_t> f1(4 + 200);
+        hermes_binary_header_pack(f1.data(), kHermesChannelFirmware, 3, 1);
+        memcpy(f1.data() + 4, img.data() + 800, 200);
+        hermes_test_inject_binary(f1.data(), f1.size());
+    }
+    assert(outbound_has("\"type\":\"ota.error\""));
+    assert(outbound_has("\"code\":\"size\""));
+    assert(hermes_test_ota_captured(nullptr) == 900);   // nothing past the cap
+    // The abandoned transfer ignores further chunks.
+    {
+        std::vector<uint8_t> f2(4 + 100);
+        hermes_binary_header_pack(f2.data(), kHermesChannelFirmware, 3, 2);
+        memset(f2.data() + 4, 0xAA, 100);
+        hermes_test_inject_binary(f2.data(), f2.size());
+    }
+    assert(hermes_test_ota_captured(nullptr) == 900);
+
+    printf("test_hermes_ota_oversize: PASSED\n");
+}
+
+// --- Hermes WS reassembly: fragmented, oversize-shed-whole, supersede -----
+static void test_hermes_reasm() {
+    using namespace aiwatchos_hermes;
+    HermesReasmState st{};
+    size_t at = 99, emit = 99;
+
+    // A single-fragment text message completes at once.
+    assert(hermes_reasm_feed(&st, 0x1, 0, 10, 10, true, 16, &at, &emit) ==
+           HermesReasmOut::Complete);
+    assert(at == 0 && emit == 10 && st.opcode == 0x1);
+
+    // A two-fragment binary message buffers, then completes whole.
+    assert(hermes_reasm_feed(&st, 0x2, 0, 6, 12, false, 16, &at, &emit) ==
+           HermesReasmOut::Buffered);
+    assert(at == 0);
+    assert(hermes_reasm_feed(&st, 0x0, 6, 6, 12, true, 16, &at, &emit) ==
+           HermesReasmOut::Complete);
+    assert(at == 6 && emit == 12 && st.opcode == 0x2);
+
+    // Oversize mid-message: the message is shed WHOLE — its tail is
+    // ignored too — and the next message arrives intact.
+    assert(hermes_reasm_feed(&st, 0x1, 0, 10, 30, false, 16, &at, &emit) ==
+           HermesReasmOut::Buffered);
+    assert(hermes_reasm_feed(&st, 0x0, 10, 10, 30, false, 16, &at, &emit) ==
+           HermesReasmOut::Ignored);
+    assert(st.drop);
+    assert(hermes_reasm_feed(&st, 0x0, 20, 10, 30, true, 16, &at, &emit) ==
+           HermesReasmOut::Ignored);
+    assert(!st.drop);
+    assert(hermes_reasm_feed(&st, 0x1, 0, 5, 5, true, 16, &at, &emit) ==
+           HermesReasmOut::Complete);
+    assert(at == 0 && emit == 5);
+
+    // An oversize single fragment sheds without latching (it already ends).
+    assert(hermes_reasm_feed(&st, 0x1, 0, 20, 20, true, 16, &at, &emit) ==
+           HermesReasmOut::Ignored);
+    assert(!st.drop);
+
+    // A fresh message supersedes a half-buffered one.
+    assert(hermes_reasm_feed(&st, 0x1, 0, 8, 20, false, 64, &at, &emit) ==
+           HermesReasmOut::Buffered);
+    assert(hermes_reasm_feed(&st, 0x1, 0, 4, 4, true, 64, &at, &emit) ==
+           HermesReasmOut::Complete);
+    assert(at == 0 && emit == 4);
+
+    printf("test_hermes_reasm: PASSED\n");
+}
+
+// --- Hermes spoken replies: a bogus rate fails closed to 16 kHz ------------
+static void test_hermes_audio_rate() {
+    using namespace aiwatchos_hermes;
+    aiwatchos::TestHal hal;
+    hermes_linked(hal);
+
+    hermes_test_inject_text("{\"type\":\"audio.start\",\"stream\":7,\"rate\":8000,\"format\":\"pcm16\"}");
+    assert(hal.playback_rate() == 8000);
+    hermes_test_inject_text("{\"type\":\"audio.end\",\"stream\":7}");
+    // Negative (would wrap to ~4 GHz) and absurd rates both clamp.
+    hermes_test_inject_text("{\"type\":\"audio.start\",\"stream\":8,\"rate\":-5,\"format\":\"pcm16\"}");
+    assert(hal.playback_rate() == 16000);
+    hermes_test_inject_text("{\"type\":\"audio.end\",\"stream\":8}");
+    hermes_test_inject_text("{\"type\":\"audio.start\",\"stream\":9,\"rate\":999999,\"format\":\"pcm16\"}");
+    assert(hal.playback_rate() == 16000);
+    hermes_test_inject_text("{\"type\":\"audio.end\",\"stream\":9}");
+    hermes_test_inject_text("{\"type\":\"audio.start\",\"stream\":10,\"rate\":48000,\"format\":\"pcm16\"}");
+    assert(hal.playback_rate() == 48000);
+    hermes_test_inject_text("{\"type\":\"audio.end\",\"stream\":10}");
+
+    printf("test_hermes_audio_rate: PASSED\n");
+}
+
+// --- Hermes images: complete/incomplete/too-large/stalled ------------------
+static void test_hermes_image() {
+    using namespace aiwatchos_hermes;
+    HermesSinks s = bh_sinks();
+    HermesConfig cfg{};
+    HermesClient c;
+    c.init(s, cfg);
+    uint8_t key[32];
+    for (int i = 0; i < 32; ++i) key[i] = static_cast<uint8_t>(i);
+    c.set_key(key);
+    const uint64_t t0 = 100000;
+    c.on_transport_open(t0);
+    bh_inject(c, "{\"type\":\"welcome\",\"session\":\"s1\",\"paired\":true,\"heartbeat_s\":20}", t0);
+
+    // A complete 2x2 image activates with its pixels intact.
+    bh_inject(c, "{\"type\":\"image.start\",\"stream\":5,\"width\":2,\"height\":2,\"ttl_s\":30}", t0);
+    const uint8_t px[8] = {0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88};
+    uint8_t frame[4 + sizeof(px)];
+    hermes_binary_header_pack(frame, kHermesChannelImage, 5, 0);
+    memcpy(frame + 4, px, sizeof(px));
+    c.on_binary(frame, sizeof(frame), t0);
+    assert(!c.view().image_active);
+    bh_inject(c, "{\"type\":\"image.end\",\"stream\":5}", t0);
+    assert(c.view().image_active);
+    assert(c.view().image_w == 2 && c.view().image_h == 2);
+    assert(c.image_pixels() && memcmp(c.image_pixels(), px, sizeof(px)) == 0);
+
+    // A short image ends with a notice, never a half picture.
+    bh_inject(c, "{\"type\":\"image.start\",\"stream\":6,\"width\":2,\"height\":2,\"ttl_s\":30}", t0);
+    uint8_t half[4 + 4];
+    hermes_binary_header_pack(half, kHermesChannelImage, 6, 0);
+    memcpy(half + 4, px, 4);
+    c.on_binary(half, sizeof(half), t0);
+    bh_inject(c, "{\"type\":\"image.end\",\"stream\":6}", t0);
+    assert(!c.view().image_active);
+    assert(std::string(c.view().notice) == "IMAGE INCOMPLETE");
+
+    // An over-cap image is refused up front, visibly.
+    bh_inject(c, "{\"type\":\"image.start\",\"stream\":7,\"width\":500,\"height\":500,\"ttl_s\":30}", t0);
+    assert(!c.view().image_active);
+    assert(std::string(c.view().notice) == "IMAGE TOO LARGE");
+
+    // A stalled image is abandoned with a notice; its late end is inert.
+    bh_inject(c, "{\"type\":\"image.start\",\"stream\":8,\"width\":2,\"height\":2,\"ttl_s\":30}", t0);
+    c.tick(t0 + HermesClient::kImageStallMs + 1);
+    assert(std::string(c.view().notice) == "IMAGE STALLED");
+    bh_inject(c, "{\"type\":\"image.end\",\"stream\":8}", t0 + HermesClient::kImageStallMs + 1);
+    assert(!c.view().image_active);
+
+    printf("test_hermes_image: PASSED\n");
+}
+
+// --- Hermes touch: prompt-guard swallow + release-anywhere ends talk -------
+static void test_hermes_touch_guards() {
+    using namespace aiwatchos_hermes;
+    aiwatchos::TestHal hal;
+    hermes_linked(hal);
+    aiwatchos::App app = make_hermes_app(hal);
+
+    // A press inside the 600 ms prompt guard is swallowed — it must not
+    // fall through to talk (or answer).
+    hermes_test_inject_text(
+        "{\"type\":\"prompt\",\"id\":\"q1\",\"title\":\"Confirm\",\"text\":\"Do it?\",\"ttl_s\":300}");
+    assert(hermes_view().prompt_active);
+    aiwatchos::TouchEvent bottom{205, 450, aiwatchos::TouchEvent::Press};
+    assert(app.on_touch(bottom));
+    assert(!outbound_has("\"type\":\"audio.start\""));
+    assert(hermes_view().prompt_active);
+    hermes_test_clear_outbound();
+
+    // Past the guard the YES/NO zone answers from touch.
+    hal.advance_ms(700);
+    aiwatchos::TouchEvent yes{100, 400, aiwatchos::TouchEvent::Press};
+    assert(app.on_touch(yes));
+    assert(outbound_has("\"type\":\"prompt.reply\""));
+    assert(outbound_has("\"answer\":\"yes\""));
+    assert(!hermes_view().prompt_active);
+    hermes_test_clear_outbound();
+
+    // Releasing outside the talk zone still ends the capture (no wedged
+    // mic when the finger slides off before lifting).
+    assert(app.on_touch(bottom));
+    assert(outbound_has("\"type\":\"audio.start\""));
+    hermes_test_clear_outbound();
+    aiwatchos::TouchEvent slide{205, 100, aiwatchos::TouchEvent::Release};
+    assert(app.on_touch(slide));
+    assert(outbound_has("\"type\":\"audio.cancel\""));   // sub-250 ms blip
+
+    printf("test_hermes_touch_guards: PASSED\n");
+}
+
+// --- Hermes health line: the SRV/SES/VIA tail survives whole ---------------
+static void test_hermes_health_tail() {
+    using namespace aiwatchos_hermes;
+    aiwatchos::TestHal hal;
+    hal.set_power(true, 100, true);
+    aiwatchos::App app = make_hermes_app(hal);
+    app.init();
+    uint8_t key[32];
+    for (int i = 0; i < 32; ++i) key[i] = static_cast<uint8_t>(i);
+    hermes_test_reset(key);
+    hermes_test_transport_up();
+    hermes_test_inject_text("{\"type\":\"challenge\",\"nonce\":\"bm9uY2Utbm9uY2Utbm9uY2U=\",\"enrolled\":false}");
+    hermes_test_inject_text(
+        "{\"type\":\"welcome\",\"session\":\"3f2a9c1b7d4e\",\"paired\":true,\"heartbeat_s\":20,"
+        "\"server\":\"hermes1234567890\"}");
+    const std::string line = hermes_health_line();
+    assert(line.find("BAT 100% CHG") != std::string::npos);
+    assert(line.find("LINK ONLINE") != std::string::npos);
+    assert(line.find("SRV HERMES1234567890 SES 3f2a9c1b VIA LAN") != std::string::npos);
+
+    printf("test_hermes_health_tail: PASSED\n");
+}
+
 int main() {
     test_aa_text();                      // baked Inter AA renderer against real assets
     test_touch_synth();
@@ -2711,6 +3015,13 @@ int main() {
     test_hermes_outbox_persist();        // buddy harvest: outbox ring survives reboot
     test_hermes_conversation_persist();  // buddy harvest: conversation pair survives reboot
     test_hermes_reply_notify();          // buddy harvest: background reply notifications
+    test_hermes_watchdog();              // Hermes handshake watchdog + link recycle
+    test_hermes_ota_oversize();           // Hermes OTA stream past the offer is refused pre-write
+    test_hermes_reasm();                 // Hermes WS reassembly incl. oversize-shed-whole
+    test_hermes_audio_rate();            // Hermes bogus playback rate fails closed
+    test_hermes_image();                 // Hermes image complete/incomplete/large/stalled
+    test_hermes_touch_guards();          // Hermes prompt-guard swallow + release-anywhere talk end
+    test_hermes_health_tail();           // Hermes health SRV/SES/VIA tail survives whole
 
     printf("\nAll AppManager tests PASSED.\n");
     return 0;

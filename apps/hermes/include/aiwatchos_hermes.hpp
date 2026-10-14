@@ -46,8 +46,10 @@ bool hermes_paired();
 
 // The 8-character pairing code while awaiting approval ("" otherwise), and
 // the full approve command the server sent ("hermes pairing approve ...").
-const char* hermes_pairing_code();
-const char* hermes_pairing_command();
+// Returned by value: the bytes are copied under the client lock, so the
+// link task can never mutate them under the caller.
+std::string hermes_pairing_code();
+std::string hermes_pairing_command();
 
 // Queue/send a chat text. When the link is down or pairing is pending the
 // text joins a bounded FIFO outbox (depth 4, oldest evicted) that is
@@ -113,6 +115,9 @@ void hermes_test_transport_down();                // simulate WS disconnect
 void hermes_test_inject_text(const char* json);   // one inbound text frame
 void hermes_test_inject_binary(const uint8_t* data, size_t len);
 void hermes_test_talk_feed(const int16_t* pcm, size_t frames);   // mic pump stand-in
+// Consume the handshake watchdog's link-recycle request (host tests drive
+// the same take-once path the link task uses on device).
+bool hermes_test_take_cycle_request();
 size_t hermes_test_outbound_count();
 bool hermes_test_outbound_is_binary(size_t i);
 std::string hermes_test_outbound_text(size_t i);  // text frame i ("" if binary)

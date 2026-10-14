@@ -47,6 +47,9 @@ void hermes_core_transport_text(const char* json, size_t len);
 void hermes_core_transport_binary(const uint8_t* data, size_t len);
 void hermes_core_pump();                    // client.tick + housekeeping
 bool hermes_core_wants_reconnect();
+// The handshake watchdog fired: the link task must tear down the live
+// socket and redial (consume-on-read — true exactly once per firing).
+bool hermes_core_wants_cycle();
 bool hermes_core_talk_active();
 void hermes_core_talk_feed(const int16_t* pcm, size_t frames);
 void hermes_core_set_battery(int pct, int charging);   // charging: -1/0/1
