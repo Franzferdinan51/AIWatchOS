@@ -8,6 +8,7 @@
 #include "aiwatchos/font.hpp"
 #include "aiwatchos/touch_synth.hpp"
 #include "aiwatchos/clock_face.hpp"
+#include "aiwatchos/status_snapshot.hpp"
 #include "aiwatchos/launcher_ui.hpp"
 #include "aiwatchos/battery_display.hpp"
 #include "aiwatchos/colors.hpp"
@@ -317,6 +318,12 @@ extern "C" void app_main(void) {
     aiwatchos_mdb::detail::g_apps_hook = &g_app_mgr;
     aiwatchos::App clock_app = aiwatchos::ClockFace::make_app();
     g_app_mgr.register_app(&clock_app, true);   // launch the clock face on boot
+    // §3.1: clock complication taps navigate into their apps.
+    aiwatchos::clock_set_navigate_handler(
+        [](const char* app_id, void* ctx) {
+            static_cast<aiwatchos::AppManager*>(ctx)->switch_to(app_id);
+        },
+        &g_app_mgr);
 
     // Launcher app — wraps AppManager switch_next/switch_prev behind touch input.
     // Registered as a regular app so it can be switched to from the clock face.
@@ -597,6 +604,66 @@ extern "C" void app_main(void) {
                 switched_this_frame = true;
             }
             if (current_id) last_app_id = current_id;
+        }
+
+        // R4 status bus: plain values for the clock complications,
+        // refreshed every frame (all reads are cheap/cached; the OS
+        // component never sees net/hermes/weather headers).
+        {
+            aiwatchos::StatusSnapshot snap;
+            snap.wifi_connected = aiwatchos_net::wifi_connected();
+            aiwatchos::WeatherSnapshot wx;
+            if (aiwatchos::weather_last_snapshot(&wx) && wx.has_data) {
+                snap.weather_valid = true;
+                snap.weather_temp_f = wx.temperature_f;
+                snap.weather_icon =
+                    aiwatchos::weather_condition_icon(wx.condition_text);
+                snap.weather_stale = aiwatchos::weather_is_stale(
+                    frame_now_ms, wx.fetched_epoch_ms, 30u * 60000u);
+            }
+            switch (aiwatchos_net::muse_link_state()) {
+                case aiwatchos_net::LinkState::kLinked:
+                    snap.muse = aiwatchos::MuseChipState::kLive;
+                    break;
+                case aiwatchos_net::LinkState::kOff:
+                    snap.muse = aiwatchos::MuseChipState::kOff;
+                    break;
+                default:
+                    snap.muse = aiwatchos::MuseChipState::kIdle;
+                    break;
+            }
+            switch (aiwatchos_hermes::hermes_link_state()) {
+                case aiwatchos_hermes::HermesLinkState::Linked:
+                    snap.hermes = aiwatchos::HermesChipState::kLink;
+                    break;
+                case aiwatchos_hermes::HermesLinkState::Pairing:
+                    snap.hermes = aiwatchos::HermesChipState::kPairing;
+                    break;
+                default:
+                    snap.hermes = aiwatchos::HermesChipState::kDown;
+                    break;
+            }
+            static char s_tz_label[8] = {};
+            static bool s_tz_done = false;
+            if (!s_tz_done) {
+#if defined(__ESPRESSIF_IDF__) && defined(CONFIG_AIWATCHOS_TZ_OFFSET_MIN)
+                const int off = CONFIG_AIWATCHOS_TZ_OFFSET_MIN;
+                const unsigned ah = static_cast<unsigned>(off < 0 ? -off : off) / 60;
+                const unsigned am = static_cast<unsigned>(off < 0 ? -off : off) % 60;
+                if (am) {
+                    snprintf(s_tz_label, sizeof(s_tz_label), "UTC%c%u:%02u",
+                             off < 0 ? '-' : '+', ah, am);
+                } else {
+                    snprintf(s_tz_label, sizeof(s_tz_label), "UTC%c%u",
+                             off < 0 ? '-' : '+', ah);
+                }
+#else
+                snprintf(s_tz_label, sizeof(s_tz_label), "UTC");
+#endif
+                s_tz_done = true;
+            }
+            std::memcpy(snap.tz_label, s_tz_label, sizeof(snap.tz_label));
+            aiwatchos::status_snapshot_set(snap);
         }
 
         // Idle render pacing: input sampling, touch dispatch and app

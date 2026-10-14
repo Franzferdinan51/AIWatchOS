@@ -10,6 +10,7 @@
 #include <cstdint>
 #include "aiwatchos/app.hpp"
 #include "aiwatchos/hal.hpp"   // for kDisplayWidth/kDisplayHeight constants
+#include "aiwatchos/icons.hpp"
 
 namespace aiwatchos {
 
@@ -57,6 +58,13 @@ using WeatherSnapshotFn = bool (*)(WeatherSnapshot* out);
 using WeatherRefreshFn = void (*)(void);
 void weather_set_provider(WeatherSnapshotFn snapshot_fn,
                           WeatherRefreshFn refresh_fn);
+
+// R4 readers (the shell fills StatusSnapshot from these; no service
+// headers leak into clock consumers): the last pulled snapshot
+// (false when no provider ever answered) and the condition-words →
+// icon mapping the app itself renders with.
+bool weather_last_snapshot(WeatherSnapshot* out);
+Icon weather_condition_icon(const char* condition_text);
 
 class WeatherApp {
  public:

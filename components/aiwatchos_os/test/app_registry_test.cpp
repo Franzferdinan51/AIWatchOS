@@ -26,6 +26,8 @@
 #include "aiwatchos/battery_display.hpp"   // for status-bar time rendering verification
 #include "aiwatchos/display_power.hpp"     // for IdleRenderPacer verification
 #include "aiwatchos/weather_app.hpp"       // for weather screen verification
+#include "aiwatchos/clock_face.hpp"         // for clock complication verification
+#include "aiwatchos/status_snapshot.hpp"    // for R4 bus verification
 #include "aiwatchos/notifications.hpp"   // for notification wrap verification
 #include "aiwatchos/color_test.hpp"      // for colour-test pattern verification
 #include "aiwatchos/touch_synth.hpp"
@@ -3344,6 +3346,98 @@ static void test_launcher_badge() {
     printf("test_launcher_badge: PASSED\n");
 }
 
+// --- Clock §3.1: R4 complications render + navigate ----------------------
+namespace {
+const char* g_clock_nav_target = nullptr;
+void clock_nav_capture(const char* app_id, void* ctx) {
+    (void)ctx;
+    g_clock_nav_target = app_id;
+}
+}  // namespace
+
+static void test_clock_chips() {
+    using namespace aiwatchos;
+    if (!assets_ready()) {
+        printf("test_clock_chips: SKIPPED (assets not found from cwd)\n");
+        return;
+    }
+    App app = ClockFace::make_app();
+    app.init();
+    static uint16_t buf[kDisplayWidth * kDisplayHeight];
+    Framebuffer fb{buf, kDisplayWidth, kDisplayHeight};
+    auto clear = [&]() {
+        for (size_t i = 0; i < sizeof(buf) / sizeof(buf[0]); ++i) buf[i] = 0;
+    };
+    auto count_color = [&](uint16_t c, int x0, int y0, int x1, int y1) {
+        int n = 0;
+        for (int y = y0; y < y1; ++y)
+            for (int x = x0; x < x1; ++x)
+                if (buf[y * kDisplayWidth + x] == c) ++n;
+        return n;
+    };
+    auto count_ink = [&](int x0, int y0, int x1, int y1) {
+        int n = 0;
+        for (int y = y0; y < y1; ++y)
+            for (int x = x0; x < x1; ++x)
+                if (buf[y * kDisplayWidth + x] != 0) ++n;
+        return n;
+    };
+    // Chip geometry mirrors the renderer (4×78, gap 12, x0 31, y 344).
+    auto chip_x = [](int i) { return 31 + i * (78 + 12); };
+
+    // Default bus: wifi OFF (dim off-icon), weather "--", links down.
+    status_snapshot_set(StatusSnapshot{});
+    clear();
+    app.render(fb);
+    assert(count_color(colors::kDim, chip_x(0) + 29, 348,
+                       chip_x(0) + 49, 368) > 10);   // wifi-off icon
+    assert(count_ink(chip_x(1), 374, chip_x(1) + 78, 392) > 10);   // "--"
+
+    // Filled bus: every chip lights with its icon + label + TZ tag.
+    StatusSnapshot snap;
+    snap.wifi_connected = true;
+    snap.weather_valid = true;
+    snap.weather_temp_f = 72;
+    snap.weather_icon = Icon::kSun;
+    snap.muse = MuseChipState::kLive;
+    snap.hermes = HermesChipState::kLink;
+    snap.tz_label[0] = 'U';
+    snap.tz_label[1] = 'T';
+    snap.tz_label[2] = 'C';
+    snap.tz_label[3] = '-';
+    snap.tz_label[4] = '5';
+    status_snapshot_set(snap);
+    clear();
+    app.render(fb);
+    assert(count_color(colors::kText, chip_x(0) + 29, 348,
+                       chip_x(0) + 49, 368) > 10);   // wifi icon lit
+    assert(count_color(colors::kText, chip_x(1) + 29, 348,
+                       chip_x(1) + 49, 368) > 10);   // sun icon lit
+    assert(count_ink(chip_x(1), 374, chip_x(1) + 78, 392) > 30);   // "72°"
+    assert(count_color(colors::kOk, chip_x(2) + 29, 348,
+                       chip_x(2) + 49, 368) > 10);   // mic live
+    assert(count_color(colors::kOk, chip_x(3) + 29, 348,
+                       chip_x(3) + 49, 368) > 10);   // feather link
+    assert(count_ink(235, 314, 280, 330) > 10);      // "UTC-5"
+
+    // Chips navigate; misses fall through.
+    clock_set_navigate_handler(clock_nav_capture, nullptr);
+    static const char* kWant[4] = {"settings", "weather", "muse", "hermes"};
+    for (int i = 0; i < 4; ++i) {
+        g_clock_nav_target = nullptr;
+        TouchEvent tap{chip_x(i) + 39, 374, TouchEvent::Press};
+        assert(app.on_touch(tap));
+        assert(g_clock_nav_target && std::string(g_clock_nav_target) == kWant[i]);
+    }
+    g_clock_nav_target = nullptr;
+    assert(!app.on_touch(TouchEvent{200, 200, TouchEvent::Press}));
+    assert(g_clock_nav_target == nullptr);
+    clock_set_navigate_handler(nullptr, nullptr);
+    status_snapshot_set(StatusSnapshot{});
+
+    printf("test_clock_chips: PASSED\n");
+}
+
 int main() {
     test_aa_text();                      // baked Inter AA renderer against real assets
     test_touch_synth();
@@ -3412,6 +3506,7 @@ int main() {
     test_hermes_rebuild();               // Hermes §3.5 states, pill, scroll
     test_weather_screen();               // Weather §3.7 states, pill, tap refresh
     test_launcher_badge();               // Launcher: no self-tile, Alerts badge
+    test_clock_chips();                  // Clock §3.1 complications + navigation
 
     printf("\nAll AppManager tests PASSED.\n");
     return 0;

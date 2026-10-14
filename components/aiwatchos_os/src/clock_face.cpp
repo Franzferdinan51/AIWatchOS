@@ -9,10 +9,19 @@
 #include "aiwatchos/colors.hpp"
 #include "aiwatchos/font.hpp"
 #include "aiwatchos/rtc.hpp"
+#include "aiwatchos/status_snapshot.hpp"
 #include <cmath>
 #include <cstdio>
 
 namespace aiwatchos {
+
+// R4 bus storage (lives here so no CMake churn): the shell overwrites
+// it every frame; complications read it.
+StatusSnapshot g_status_snapshot{};
+void status_snapshot_set(const StatusSnapshot& snap) {
+    g_status_snapshot = snap;
+}
+const StatusSnapshot& status_snapshot() { return g_status_snapshot; }
 
 namespace {
 
@@ -77,6 +86,17 @@ namespace {
     ClockState g_state{12, 0, 0};
     bool g_init = false;
 
+    // Complication geometry (§3.1): 4 × 78 px chips, 12 px gaps,
+    // centred (4*78 + 3*12 = 348; x0 = (410-348)/2).
+    constexpr int kChipW = 78;
+    constexpr int kChipGap = 12;
+    constexpr int kChipX0 = 31;
+    constexpr int kChipY = 344;
+    constexpr int kChipH = 60;
+
+    ClockNavigateFn g_navigate = nullptr;
+    void* g_navigate_ctx = nullptr;
+
     void clock_init() { g_init = true; }
 
     void clock_tick(uint32_t elapsed_ms) {
@@ -129,12 +149,103 @@ namespace {
             power.charging ? colors::kBlue : colors::kFaint;
         fb.fill_circle(kDisplayWidth / 2 - 14, 322, 4, dot_batt);
         fb.fill_circle(kDisplayWidth / 2 + 14, 322, 4, dot_charge);
+        // TZ tag next to the dots (the shell fills the label; the OS
+        // never touches sdkconfig/Kconfig).
+        const StatusSnapshot& snap = status_snapshot();
+        if (snap.tz_label[0]) {
+            draw_text_aa(fb, kDisplayWidth / 2 + 30, 314, snap.tz_label,
+                         FontFace::kMicro, colors::kDim);
+        }
+
+        // Complications (§3.1): four 78px chips fed by the R4 snapshot.
+        // Each chip is a button into its app (wifi→Settings,
+        // weather→Weather, mic→Muse, feather→Hermes).
+        struct Chip {
+            Icon icon;
+            uint16_t tint;
+            char label[8];
+            const char* target;
+        };
+        Chip chips[4];
+        chips[0] = {snap.wifi_connected ? Icon::kWifi : Icon::kWifiOff,
+                    snap.wifi_connected ? colors::kText : colors::kDim,
+                    {0}, "settings"};
+        {
+            const char* s = snap.wifi_connected ? "ON" : "OFF";
+            chips[0].label[0] = s[0];
+            chips[0].label[1] = s[1];
+            chips[0].label[2] = s[2];
+        }
+        chips[1] = {snap.weather_icon,
+                    (snap.weather_valid && !snap.weather_stale)
+                        ? colors::kText
+                        : colors::kDim,
+                    {0}, "weather"};
+        if (snap.weather_valid) {
+            std::snprintf(chips[1].label, sizeof(chips[1].label), "%.0f\xC2\xB0",
+                          static_cast<double>(snap.weather_temp_f));
+        } else {
+            chips[1].label[0] = '-';
+            chips[1].label[1] = '-';
+        }
+        {
+            const char* s = "OFF";
+            uint16_t tint = colors::kDim;
+            if (snap.muse == MuseChipState::kLive) {
+                s = "LIVE";
+                tint = colors::kOk;
+            } else if (snap.muse == MuseChipState::kIdle) {
+                s = "IDLE";
+                tint = colors::kWarn;
+            }
+            chips[2] = {Icon::kMic, tint, {0}, "muse"};
+            chips[2].label[0] = s[0];
+            chips[2].label[1] = s[1];
+            if (s[2]) chips[2].label[2] = s[2];
+            if (s[3]) chips[2].label[3] = s[3];
+        }
+        {
+            const char* s = "DOWN";
+            uint16_t tint = colors::kDim;
+            if (snap.hermes == HermesChipState::kLink) {
+                s = "LINK";
+                tint = colors::kOk;
+            } else if (snap.hermes == HermesChipState::kPairing) {
+                s = "PAIR";
+                tint = colors::kWarn;
+            }
+            chips[3] = {Icon::kFeather, tint, {0}, "hermes"};
+            for (int c = 0; c < 4 && s[c]; ++c) chips[3].label[c] = s[c];
+        }
+        for (int i = 0; i < 4; ++i) {
+            const int cx = kChipX0 + i * (kChipW + kChipGap);
+            draw_icon(fb, cx + (kChipW - 20) / 2, kChipY + 4, chips[i].icon,
+                      FontFace::kIcon20, chips[i].tint);
+            draw_text_aa_centered(fb, cx + kChipW / 2, kChipY + 30,
+                                  chips[i].label, FontFace::kCaption,
+                                  colors::kText);
+        }
     }
 
     bool clock_touch(const TouchEvent& event) {
-        (void)event;
-        return false;  // clock face doesn't handle touches directly
+        if (event.type != TouchEvent::Press || !g_navigate) return false;
+        if (event.y < kChipY || event.y >= kChipY + kChipH) return false;
+        for (int i = 0; i < 4; ++i) {
+            const int cx = kChipX0 + i * (kChipW + kChipGap);
+            if (event.x >= cx && event.x < cx + kChipW) {
+                static const char* kTargets[4] = {"settings", "weather",
+                                                  "muse", "hermes"};
+                g_navigate(kTargets[i], g_navigate_ctx);
+                return true;
+            }
+        }
+        return false;
     }
+}
+
+void clock_set_navigate_handler(ClockNavigateFn fn, void* ctx) {
+    g_navigate = fn;
+    g_navigate_ctx = ctx;
 }
 
 App ClockFace::make_app() {

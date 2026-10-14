@@ -32,6 +32,8 @@ constexpr uint32_t kStaleAfterMs = 30u * 60000u;
 namespace {
     WeatherSnapshotFn g_snapshot_fn = nullptr;
     WeatherRefreshFn g_refresh_fn = nullptr;
+    WeatherSnapshot g_last{};
+    bool g_last_seen = false;
 
     bool contains_ci(const char* text, const char* needle) {
         const size_t n = std::strlen(needle);
@@ -47,27 +49,40 @@ namespace {
         return false;
     }
 
+}  // namespace
+
+// Condition glyph from NWS's own description words (shared by the app
+// hero and the clock's weather chip, so they never disagree).
+Icon weather_condition_icon(const char* text) {
+    if (!text) return Icon::kCloud;
+    if (contains_ci(text, "thunder") || contains_ci(text, "rain") ||
+        contains_ci(text, "shower") || contains_ci(text, "drizzle")) {
+        return Icon::kCloudRain;
+    }
+    if (contains_ci(text, "snow") || contains_ci(text, "flurr") ||
+        contains_ci(text, "blizzard")) {
+        return Icon::kCloudSnow;
+    }
+    if (contains_ci(text, "partly") || contains_ci(text, "mostly")) {
+        return Icon::kCloudSun;
+    }
+    if (contains_ci(text, "sun") || contains_ci(text, "clear") ||
+        contains_ci(text, "fair")) {
+        return Icon::kSun;
+    }
+    return Icon::kCloud;
+}
+
+namespace {
     // Condition glyph + tint from NWS's own description words.
     void condition_visual(const char* text, Icon* icon, uint16_t* tint) {
-        if (contains_ci(text, "thunder") || contains_ci(text, "rain") ||
-            contains_ci(text, "shower") || contains_ci(text, "drizzle")) {
-            *icon = Icon::kCloudRain;
-            *tint = colors::kBlue;
-        } else if (contains_ci(text, "snow") || contains_ci(text, "flurr") ||
-                   contains_ci(text, "blizzard")) {
-            *icon = Icon::kCloudSnow;
-            *tint = colors::kText;
-        } else if (contains_ci(text, "partly") ||
-                   contains_ci(text, "mostly")) {
-            *icon = Icon::kCloudSun;
-            *tint = colors::kWarn;
-        } else if (contains_ci(text, "sun") || contains_ci(text, "clear") ||
-                   contains_ci(text, "fair")) {
-            *icon = Icon::kSun;
-            *tint = colors::kWarn;
-        } else {
-            *icon = Icon::kCloud;
-            *tint = colors::kDim;
+        *icon = weather_condition_icon(text);
+        switch (*icon) {
+            case Icon::kCloudRain: *tint = colors::kBlue; break;
+            case Icon::kCloudSnow: *tint = colors::kText; break;
+            case Icon::kCloudSun:
+            case Icon::kSun:      *tint = colors::kWarn;  break;
+            default:              *tint = colors::kDim;   break;
         }
     }
 }  // namespace
@@ -78,12 +93,20 @@ void weather_set_provider(WeatherSnapshotFn snapshot_fn,
     g_refresh_fn = refresh_fn;
 }
 
+bool weather_last_snapshot(WeatherSnapshot* out) {
+    if (!g_last_seen || !out) return false;
+    *out = g_last;
+    return true;
+}
+
 void WeatherApp::pull_snapshot() {
     if (!g_snapshot_fn) return;
     WeatherSnapshot snap;
     if (g_snapshot_fn(&snap)) {
         snapshot_ = snap;
         provider_seen_ = true;
+        g_last = snap;   // R4: the shell's complication feed
+        g_last_seen = true;
     }
 }
 

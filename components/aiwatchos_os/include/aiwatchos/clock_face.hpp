@@ -23,4 +23,9 @@ class ClockFace {
     static App make_app();
 };
 
+// Complication navigation (§3.1): chip taps call this (app_main wires
+// it to AppManager::switch_to). Null handler = taps fall through.
+using ClockNavigateFn = void (*)(const char* app_id, void* ctx);
+void clock_set_navigate_handler(ClockNavigateFn fn, void* ctx);
+
 }  // namespace aiwatchos
