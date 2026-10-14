@@ -20,90 +20,6 @@ constexpr int kCardGap = 12;
 constexpr int kBodyX = 64;              // text starts right of the bell chip
 constexpr int kBodyW = 294;             // kCardW - kBodyX - 12
 
-// Pixel-width greedy wrap into at most max_lines lines (a negative
-// max_lines means unbounded). When the text needs more lines than
-// allowed, the last line is truncated with an ellipsis.
-std::vector<std::string> wrap_px(const std::string& text, FontFace face,
-                                 int max_w, int max_lines) {
-    std::vector<std::string> lines;
-    std::string cur;
-    size_t i = 0;
-    auto flush = [&]() {
-        lines.push_back(cur);
-        cur.clear();
-    };
-    auto fits = [&](const std::string& s) {
-        return text_width_aa(s, face) <= max_w;
-    };
-    while (i < text.size()) {
-        if (text[i] == '\n') {
-            flush();
-            ++i;
-            continue;
-        }
-        if (text[i] == ' ') {
-            ++i;
-            continue;
-        }
-        size_t j = i;
-        while (j < text.size() && text[j] != ' ' && text[j] != '\n') ++j;
-        std::string word = text.substr(i, j - i);
-        i = j;
-        // Hard-break a word that alone exceeds the line.
-        while (!fits(word)) {
-            if (!cur.empty()) {
-                flush();
-                if (max_lines >= 0 &&
-                    static_cast<int>(lines.size()) >= max_lines) {
-                    return lines;
-                }
-            }
-            // Longest prefix that fits.
-            size_t cut = word.size();
-            while (cut > 1 && !fits(word.substr(0, cut))) --cut;
-            lines.push_back(word.substr(0, cut));
-            word = word.substr(cut);
-            if (max_lines >= 0 &&
-                static_cast<int>(lines.size()) >= max_lines) {
-                return lines;
-            }
-        }
-        if (cur.empty()) {
-            cur = word;
-        } else if (fits(cur + " " + word)) {
-            cur += " " + word;
-        } else {
-            flush();
-            if (max_lines >= 0 &&
-                static_cast<int>(lines.size()) >= max_lines) {
-                return lines;
-            }
-            cur = word;
-        }
-    }
-    if (!cur.empty() || lines.empty()) flush();
-    // Ellipsis when content was cut off by the line cap.
-    if (max_lines >= 0 && static_cast<int>(lines.size()) >= max_lines &&
-        i < text.size()) {
-        std::string& last = lines.back();
-        while (!last.empty() && !fits(last + "...")) {
-            last.pop_back();
-        }
-        last += "...";
-    }
-    return lines;
-}
-
-// Truncate a single line to max_w px with a trailing ellipsis.
-std::string truncate_px(const std::string& text, FontFace face, int max_w) {
-    if (text_width_aa(text, face) <= max_w) return text;
-    std::string out = text;
-    while (!out.empty() && text_width_aa(out + "...", face) > max_w) {
-        out.pop_back();
-    }
-    return out + "...";
-}
-
 // Card height for a given number of body lines.
 int card_height(int body_line_count) {
     return 36 + body_line_count * font_line_height(FontFace::kCaption) + 10;
@@ -181,9 +97,9 @@ bool NotificationManager::has_action(const std::string& action_app,
 
 int NotificationManager::body_lines(const Notification& n, bool expanded) const {
     if (expanded) {
-        return static_cast<int>(wrap_px(n.body, FontFace::kCaption, kBodyW, -1).size());
+        return static_cast<int>(wrap_text_aa(n.body, FontFace::kCaption, kBodyW, -1).size());
     }
-    return static_cast<int>(wrap_px(n.body, FontFace::kCaption, kBodyW, 2).size());
+    return static_cast<int>(wrap_text_aa(n.body, FontFace::kCaption, kBodyW, 2).size());
 }
 
 void NotificationManager::render(Framebuffer& fb) {
@@ -207,7 +123,7 @@ void NotificationManager::render(Framebuffer& fb) {
         const Notification& n = notifications_[idx];
         const bool expanded = (idx == expanded_);
         const auto lines =
-            wrap_px(n.body, FontFace::kCaption, kBodyW, expanded ? -1 : 2);
+            wrap_text_aa(n.body, FontFace::kCaption, kBodyW, expanded ? -1 : 2);
         const int h = card_height(static_cast<int>(lines.size()));
         if (y + h >= kStatusZoneBottom && y < kDisplayHeight) {
             // Card shadow: the baked card sprite stretched vertically
@@ -233,7 +149,7 @@ void NotificationManager::render(Framebuffer& fb) {
 
             // Title (ellipsis-truncated) + receipt time, right.
             const std::string title =
-                truncate_px(n.title, FontFace::kBodySemibold, 218);
+                truncate_text_aa(n.title, FontFace::kBodySemibold, 218);
             draw_text_aa(fb, kCardX + kBodyX, y + 10, title,
                          FontFace::kBodySemibold, colors::kText);
             const uint64_t shown_ms = local_display_ms(n.timestamp_ms);

@@ -155,6 +155,12 @@ constexpr uint16_t kOnline   = 0x3EB1;   // #3DD68C link online / listening
 constexpr uint16_t kThinking = 0x5D5E;   // #5AA9F2
 constexpr uint16_t kError    = 0xF2EB;   // #F25F5C
 constexpr uint16_t kWarn     = 0xF649;   // #F2C94C link net-pending
+// Slate user-turn bubble ramp (ui-overhaul DESIGN §2.3): one step lifted
+// from the bar ramp so user turns read as "same room, different
+// speaker". Top stop intentionally equals kBarTop (#3D434C).
+constexpr uint16_t kSlateTop = kBarTop;
+constexpr uint16_t kSlateMid = rgb565_hex(0x272E36);
+constexpr uint16_t kSlateBot = rgb565_hex(0x1B2129);
 }  // namespace hcolors
 
 }  // namespace aiwatchos

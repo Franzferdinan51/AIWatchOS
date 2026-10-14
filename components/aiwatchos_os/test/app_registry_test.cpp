@@ -1087,31 +1087,42 @@ static void test_hermes_vitals() {
     aiwatchos_hermes::hermes_uptime_str(754000, tiny, sizeof(tiny));
     assert(tiny[3] == '\0');
 
-    // Rendered battery bar tracks the level: 85% fills deep into the bar,
-    // 0% leaves only the outline.
+    // Rendered sub-row: the duplicate battery bar is deleted (§3.5d) —
+    // battery is text-only ("85%", warm white 0xEF7E) at the sub-row
+    // right, and the old bar footprint stays empty backdrop.
     static uint16_t buf[aiwatchos::kDisplayWidth * aiwatchos::kDisplayHeight];
     aiwatchos::Framebuffer fb{buf, aiwatchos::kDisplayWidth, aiwatchos::kDisplayHeight};
     hal.set_power(true, 85, true);
     fb.fill(0x0000);
     app.render(fb);
-    // Fill carries the state colour now: charging = kOk green.
-    assert(buf[159 * aiwatchos::kDisplayWidth + 150] == 0x6F97);   // deep fill
-    // The white charging square is deleted; the percent readout (Body,
-    // warm white 0xEF7E) sits right of the bar instead.
     {
         int pct_ink = 0;
-        for (int y = 148; y <= 172; ++y) {
-            for (int x = 226; x <= 300; ++x) {
+        for (int y = 108; y <= 132; ++y) {
+            for (int x = 330; x <= 390; ++x) {
                 if (buf[y * aiwatchos::kDisplayWidth + x] == 0xEF7E) ++pct_ink;
             }
         }
         assert(pct_ink > 15);
+        int bar_ghost = 0;
+        for (int y = 150; y <= 170; ++y) {
+            for (int x = 16; x <= 216; ++x) {
+                if (buf[y * aiwatchos::kDisplayWidth + x] != 0) ++bar_ghost;
+            }
+        }
+        assert(bar_ghost == 0);   // the bar is gone, not restyled
     }
     hal.set_power(true, 0, false);
     fb.fill(0x0000);
     app.render(fb);
-    assert(buf[159 * aiwatchos::kDisplayWidth + 150] == 0x18E5);   // empty bar surface
-    assert(buf[159 * aiwatchos::kDisplayWidth + 230] != 0xFFFF);  // no marker
+    {
+        int pct_ink = 0;
+        for (int y = 108; y <= 132; ++y) {
+            for (int x = 330; x <= 390; ++x) {
+                if (buf[y * aiwatchos::kDisplayWidth + x] == 0xEF7E) ++pct_ink;
+            }
+        }
+        assert(pct_ink > 5);   // "0%" still reads at empty
+    }
 
     printf("test_hermes_vitals: PASSED\n");
 }
@@ -1612,11 +1623,13 @@ static void test_hermes_conversation() {
     assert(!hermes_view().busy);
     assert(hermes_view().status[0] == '\0');
 
-    // Render smoke: header band survives the conversation screen.
+    // Render smoke: no flat fill — the shell backdrop shows through,
+    // so untouched margins stay zero on a zeroed framebuffer.
     static uint16_t buf[aiwatchos::kDisplayWidth * aiwatchos::kDisplayHeight];
+    for (size_t i = 0; i < sizeof(buf) / sizeof(buf[0]); ++i) buf[i] = 0;
     aiwatchos::Framebuffer fb{buf, aiwatchos::kDisplayWidth, aiwatchos::kDisplayHeight};
     app.render(fb);
-    assert(buf[10 * aiwatchos::kDisplayWidth + 10] == 0x0862);   // bg: header band deleted
+    assert(buf[100 * aiwatchos::kDisplayWidth + 5] == 0x0000);   // margin: no fill
 
     // A prompt is answered exactly once.
     hermes_test_inject_text("{\"type\":\"prompt\",\"id\":\"q1\",\"title\":\"Confirm\",\"text\":\"Do it?\",\"ttl_s\":300}");
@@ -1821,7 +1834,7 @@ static void test_gloss_color_math() {
     assert(rgb565(0x18, 0x77, 0xF2) == 0x1BBE);
     assert(rgb565_hex(0x1877F2) == colors::kBlue);
     assert(rgb565_hex(0x14305A) == colors::kBubble);
-    assert(rgb565_hex(0xF2B33D) == hcolors::kGold);
+    assert(rgb565_hex(0xF2B33D) == aiwatchos::hcolors::kGold);
 
     // Blend endpoints are exact.
     assert(blend565(0x1234, 0xABCD, 0) == 0x1234);
@@ -3007,6 +3020,143 @@ static void test_backdrop_bake() {
     printf("test_backdrop_bake: PASSED\n");
 }
 
+// --- Hermes §3.5 rebuild: header pill, states, PTT pill, scroll ---------
+static void test_hermes_rebuild() {
+    using namespace aiwatchos_hermes;
+    namespace hc = aiwatchos::hcolors;
+    if (!aiwatchos::assets_ready()) {
+        printf("test_hermes_rebuild: SKIPPED (assets not found from cwd)\n");
+        return;
+    }
+    aiwatchos::TestHal hal;
+    hermes_linked(hal);
+    aiwatchos::App app = make_hermes_app(hal);
+    static uint16_t buf[aiwatchos::kDisplayWidth * aiwatchos::kDisplayHeight];
+    aiwatchos::Framebuffer fb{buf, aiwatchos::kDisplayWidth, aiwatchos::kDisplayHeight};
+    auto clear = [&]() {
+        for (size_t i = 0; i < sizeof(buf) / sizeof(buf[0]); ++i) buf[i] = 0;
+    };
+    auto count_color = [&](uint16_t c, int x0, int y0, int x1, int y1) {
+        int n = 0;
+        for (int y = y0; y < y1; ++y)
+            for (int x = x0; x < x1; ++x)
+                if (buf[y * aiwatchos::kDisplayWidth + x] == c) ++n;
+        return n;
+    };
+    auto count_ink = [&](int x0, int y0, int x1, int y1) {
+        int n = 0;
+        for (int y = y0; y < y1; ++y)
+            for (int x = x0; x < x1; ++x)
+                if (buf[y * aiwatchos::kDisplayWidth + x] != 0) ++n;
+        return n;
+    };
+
+    // Header: gold title ink + pill bar fill + online dot.
+    clear();
+    app.render(fb);
+    assert(count_color(hc::kGold, 20, 76, 130, 112) > 30);   // "Hermes"
+    assert(count_color(hc::kBar, 290, 80, 390, 108) > 100);  // pill fill
+    assert(count_color(hc::kOnline, 290, 80, 390, 108) > 10);   // dot
+
+    // Empty state: feather + invitation + SAY HELLO pill.
+    assert(count_ink(185, 216, 225, 256) > 50);      // feather icon40
+    assert(count_ink(105, 300, 305, 348) > 2000);    // hello pill body
+
+    // PTT pill idle: gold stroke at the left edge, bar body inside.
+    assert(count_color(hc::kGold, 20, 440, 26, 464) > 5);
+    assert(buf[452 * aiwatchos::kDisplayWidth + 60] != 0);
+
+    // PTT pill recording: solid gold (sampled left of the label).
+    aiwatchos::TouchEvent press{205, 450, aiwatchos::TouchEvent::Press};
+    assert(app.on_touch(press));
+    clear();
+    app.render(fb);
+    assert(buf[452 * aiwatchos::kDisplayWidth + 60] == hc::kGold);
+    aiwatchos::TouchEvent release{205, 450, aiwatchos::TouchEvent::Release};
+    assert(app.on_touch(release));
+
+    // Prompt expiry countdown.
+    hermes_test_inject_text(
+        "{\"type\":\"prompt\",\"id\":\"q9\",\"title\":\"Confirm\",\"text\":\"Do it?\",\"ttl_s\":300}");
+    clear();
+    app.render(fb);
+    assert(count_ink(20, 348, 220, 366) > 20);   // "EXPIRES IN 5:00"
+    assert(aiwatchos_hermes::hermes_answer_prompt(true));
+
+    // Pairing card: Pair40 gold code.
+    hermes_test_inject_text("{\"type\":\"unpaired\"}");
+    hermes_test_inject_text(
+        "{\"type\":\"pairing\",\"code\":\"ABCD2345\",\"command\":\"hermes pairing approve gadget ABCD2345\"}");
+    clear();
+    app.render(fb);
+    assert(count_color(hc::kGold, 100, 180, 310, 240) > 100);
+    hermes_test_inject_text("{\"type\":\"paired\"}");
+
+    // Offline empty state.
+    hermes_test_transport_down();
+    clear();
+    app.render(fb);
+    assert(count_ink(185, 190, 225, 230) > 50);    // wifi-off icon
+    assert(count_ink(100, 250, 310, 285) > 200);   // "NO LINK" title
+    hermes_test_transport_up();
+    hermes_test_inject_text("{\"type\":\"welcome\",\"session\":\"s9\",\"paired\":true,\"heartbeat_s\":20}");
+
+    // Scroll: overflow the list, drag up, clamp, follow.
+    for (int t = 0; t < 7; ++t) {
+        char js[128];
+        std::snprintf(js, sizeof(js), "{\"type\":\"turn.start\",\"turn\":\"t%d\"}", t);
+        hermes_test_inject_text(js);
+        std::snprintf(js, sizeof(js), "{\"type\":\"transcript\",\"text\":\"question number %d here\"}", t);
+        hermes_test_inject_text(js);
+        std::snprintf(js, sizeof(js),
+                      "{\"type\":\"reply\",\"turn\":\"t%d\",\"text\":\"answer number %d with enough words to wrap\"}",
+                      t, t);
+        hermes_test_inject_text(js);
+        std::snprintf(js, sizeof(js), "{\"type\":\"turn.end\",\"turn\":\"t%d\",\"outcome\":\"success\"}", t);
+        hermes_test_inject_text(js);
+        hal.advance_ms(30000);
+    }
+    clear();
+    app.render(fb);
+    const int max0 = hermes_test_scroll_max();
+    assert(max0 > 0);                        // the list overflows the window
+    assert(hermes_test_scroll() == max0);    // fresh content pins to bottom
+    static uint16_t before[aiwatchos::kDisplayWidth * aiwatchos::kDisplayHeight];
+    std::memcpy(before, buf, sizeof(buf));
+    // Drag down 100 px: the list shows older turns, pixels change.
+    assert(app.on_touch(aiwatchos::TouchEvent{200, 200, aiwatchos::TouchEvent::Press}));
+    for (int y = 220; y <= 300; y += 20) {
+        assert(app.on_touch(aiwatchos::TouchEvent{200, y, aiwatchos::TouchEvent::Move}));
+    }
+    assert(hermes_test_scroll() == max0 - 100);
+    clear();
+    app.render(fb);
+    assert(std::memcmp(before, buf, sizeof(buf)) != 0);
+    app.on_touch(aiwatchos::TouchEvent{200, 300, aiwatchos::TouchEvent::Release});
+    // New content while scrolled up: the reader stays put...
+    const int held = hermes_test_scroll();
+    hermes_test_inject_text("{\"type\":\"turn.start\",\"turn\":\"t8\"}");
+    hermes_test_inject_text("{\"type\":\"transcript\",\"text\":\"one more question\"}");
+    hermes_test_inject_text("{\"type\":\"reply\",\"turn\":\"t8\",\"text\":\"one more answer\"}");
+    hermes_test_inject_text("{\"type\":\"turn.end\",\"turn\":\"t8\",\"outcome\":\"success\"}");
+    app.render(fb);
+    assert(hermes_test_scroll() == held);
+    // ...while a reader at the bottom follows: drag up to the end.
+    assert(app.on_touch(aiwatchos::TouchEvent{200, 400, aiwatchos::TouchEvent::Press}));
+    for (int y = 400; y > 100; y -= 20) {
+        assert(app.on_touch(aiwatchos::TouchEvent{200, y, aiwatchos::TouchEvent::Move}));
+    }
+    app.on_touch(aiwatchos::TouchEvent{200, 100, aiwatchos::TouchEvent::Release});
+    assert(hermes_test_scroll() == hermes_test_scroll_max());
+    hermes_test_inject_text("{\"type\":\"turn.start\",\"turn\":\"t9\"}");
+    hermes_test_inject_text("{\"type\":\"reply\",\"turn\":\"t9\",\"text\":\"final answer here\"}");
+    hermes_test_inject_text("{\"type\":\"turn.end\",\"turn\":\"t9\",\"outcome\":\"success\"}");
+    app.render(fb);
+    assert(hermes_test_scroll() == hermes_test_scroll_max());
+
+    printf("test_hermes_rebuild: PASSED\n");
+}
+
 // --- Glyph cache: repeated + missing glyphs draw identically --------------
 static void test_glyph_cache() {
     using namespace aiwatchos;
@@ -3102,6 +3252,7 @@ int main() {
     test_idle_pacer();                   // Idle render pacing: full rate, then 1-in-3
     test_backdrop_bake();                // Q2 bake-and-blit is pixel-identical to painting
     test_glyph_cache();                  // Glyph cache transparency incl. missing glyphs
+    test_hermes_rebuild();               // Hermes §3.5 states, pill, scroll
 
     printf("\nAll AppManager tests PASSED.\n");
     return 0;

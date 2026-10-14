@@ -38,7 +38,6 @@ namespace hc = aiwatchos::hcolors;
 constexpr uint16_t kHermesBg = hc::kBg;         // deep blue-black
 constexpr uint16_t kTextColor = hc::kText;      // warm white
 constexpr uint16_t kDimColor = hc::kDim;        // slate body text
-constexpr uint16_t kStatusColor = hc::kDim;     // status lines
 constexpr uint16_t kAmberColor = hc::kGold;     // notices / pairing
 constexpr uint16_t kGreenColor = hc::kYes;      // YES / online accents
 constexpr uint16_t kRedColor = hc::kNo;         // NO / errors
@@ -196,88 +195,37 @@ int text_w(const char* s, int scale) {
     return aiwatchos::text_width_aa(s, face_for_scale(scale));
 }
 
-// Word-wrapped text block (pixel-measured); returns the y just past
-// the last drawn line.
-int draw_wrapped(aiwatchos::Framebuffer& fb, int x, int y, int max_w,
-                 const char* s, int scale, uint16_t color, int max_lines) {
-    if (!s) return y;
-    const aiwatchos::FontFace face = face_for_scale(scale);
+// Draw pre-wrapped lines; returns the y just past the last drawn line.
+int draw_lines(aiwatchos::Framebuffer& fb, int x, int y,
+               const std::vector<std::string>& lines,
+               aiwatchos::FontFace face, uint16_t color) {
     const int line_step = aiwatchos::font_line_height(face) + 2;
-    int lines = 0;
-    const char* p = s;
-    while (*p && lines < max_lines) {
-        // Greedy word wrap measured in pixels.
-        int best = 0;        // chars that fit (at a word boundary)
-        int len = 0;         // scan cursor
-        int last_space = -1;
-        while (p[len]) {
-            if (p[len] == '\n') break;
-            if (p[len] == ' ') last_space = len;
-            char probe[176];
-            const int n = len + 1;
-            if (n >= static_cast<int>(sizeof(probe))) break;
-            std::memcpy(probe, p, static_cast<size_t>(n));
-            probe[n] = '\0';
-            if (aiwatchos::text_width_aa(probe, face) > max_w) break;
-            ++len;
-            if (last_space == len - 1) best = len - 1;
-        }
-        int take;
-        if (!p[len]) {
-            take = len;                     // the rest fits / end of text
-        } else if (p[len] == '\n') {
-            take = len;
-        } else if (last_space > 0) {
-            take = last_space;              // break at the last space
-        } else {
-            take = len > 0 ? len : 1;       // one overlong word: hard cut
-        }
-        if (take <= 0) break;
-        char line[176];
-        if (take >= static_cast<int>(sizeof(line))) {
-            take = static_cast<int>(sizeof(line)) - 1;
-        }
-        std::memcpy(line, p, static_cast<size_t>(take));
-        line[take] = '\0';
+    for (const std::string& line : lines) {
         aiwatchos::draw_text_aa(fb, x, y, line, face, color);
         y += line_step;
-        ++lines;
-        p += take;
-        while (*p == ' ' || *p == '\n') ++p;
     }
     return y;
 }
 
-// Count the lines draw_wrapped would produce (for sizing bubbles).
-int wrapped_line_count(const char* s, int max_w, int scale, int max_lines) {
-    if (!s) return 0;
+// Word-wrapped text block via the shared R1 helper; returns the y just
+// past the last drawn line.
+int draw_wrapped(aiwatchos::Framebuffer& fb, int x, int y, int max_w,
+                 const char* s, int scale, uint16_t color, int max_lines) {
+    if (!s || !s[0]) return y;
     const aiwatchos::FontFace face = face_for_scale(scale);
-    int lines = 0;
-    const char* p = s;
-    while (*p && lines < max_lines) {
-        int len = 0, last_space = -1;
-        while (p[len]) {
-            if (p[len] == '\n') break;
-            if (p[len] == ' ') last_space = len;
-            char probe[176];
-            const int n = len + 1;
-            if (n >= static_cast<int>(sizeof(probe))) break;
-            std::memcpy(probe, p, static_cast<size_t>(n));
-            probe[n] = '\0';
-            if (aiwatchos::text_width_aa(probe, face) > max_w) break;
-            ++len;
-        }
-        int take;
-        if (!p[len] || p[len] == '\n') take = len;
-        else if (last_space > 0) take = last_space;
-        else take = len > 0 ? len : 1;
-        if (take <= 0) break;
-        ++lines;
-        p += take;
-        while (*p == ' ' || *p == '\n') ++p;
-    }
-    return lines;
+    return draw_lines(fb, x, y,
+                      aiwatchos::wrap_text_aa(s, face, max_w, max_lines),
+                      face, color);
 }
+
+// --- Conversation scroll state (§3.5): drag scroll over the y124–404
+// window, same gesture shape as Notifications (8 px slop, clamped).
+// Touched only under the client lock (render + on_touch).
+int g_h_scroll = 0;         // px scrolled off the top of the list
+int g_h_max_prev = 0;       // list overflow at the last render (follow rule)
+int g_h_press_x = 0, g_h_press_y = 0, g_h_last_y = 0;
+bool g_h_drag = false;      // a drag is in progress (thumb shows)
+bool g_h_in_list = false;   // the active press started in the list window
 
 }  // namespace
 
@@ -749,12 +697,9 @@ void hermes_tick(uint32_t elapsed_ms) {
 }
 
 void hermes_render(aiwatchos::Framebuffer& fb) {
-    fb.fill(kHermesBg);
-    // Gold identity title (tokens section 9). No header band — the OS
-    // status zone lives above and is repainted by the shell.
-    draw_text(fb, 16, aiwatchos::kStatusZoneBottom + 2, "Hermes", 3,
-              kAmberColor);
-
+    // No background fill: the shell backdrop shows through (§3.5c). The
+    // shell repaints it every frame before the app renders.
+    //
     // The view is read in place under the client lock — never copied. It
     // is ~35 KB of text buffers and this runs on the OS main task's stack.
     LockGuard lock;
@@ -766,45 +711,35 @@ void hermes_render(aiwatchos::Framebuffer& fb) {
         image_w = v.image_w;
         image_h = v.image_h;
     }
+    const uint64_t now = now_ms();
 
-    // State headline.
-    char headline[48];
-    std::snprintf(headline, sizeof(headline), "LINK %s", link_word(v.link));
-    draw_text(fb, 16, 118, headline, 2,
-              v.link == HermesLinkState::Linked ? hc::kOnline
-              : v.link == HermesLinkState::AuthFailed
-                    ? aiwatchos::colors::kDanger
-                    : kAmberColor);
+    // HEADER (§3.5, shifted below the real 74 px status zone): gold
+    // Title left + pill-status right (bar fill, 8 px state dot +
+    // Caption word).
+    aiwatchos::draw_text_aa(fb, 20, 76, "Hermes",
+                            aiwatchos::FontFace::kTitle, kAmberColor);
+    {
+        const char* word = link_word(v.link);
+        uint16_t dot = kDimColor;
+        if (v.link == HermesLinkState::Linked) dot = hc::kOnline;
+        else if (v.link == HermesLinkState::AuthFailed) dot = aiwatchos::colors::kDanger;
+        else if (v.link != HermesLinkState::Offline) dot = kAmberColor;
+        const int word_w = aiwatchos::text_width_aa(word, aiwatchos::FontFace::kCaption);
+        const int pill_w = 12 + 8 + 6 + word_w + 12;
+        const int pill_x = 390 - pill_w;
+        const int pill_y = 80;
+        fb.fill_round_rect(pill_x, pill_y, pill_w, 28, 14, hc::kBar);
+        fb.fill_circle(pill_x + 12 + 4, pill_y + 14, 4, dot);
+        aiwatchos::draw_text_aa(fb, pill_x + 12 + 8 + 6, pill_y + 6, word,
+                                aiwatchos::FontFace::kCaption, kTextColor);
+    }
 
-    // Device-health battery bar (tokens section 8 geometry, gold
-    // dialect): r-pill outline faint, state-coloured fill, percent in
-    // Body at the right. The old white charging square is gone — the
-    // fill colour carries the charging state (kOk), red under 20%.
-    if (g_hal) {
-        aiwatchos::PowerStatus ps = g_hal->read_power();
-        constexpr int kBarX = 16, kBarY = 150, kBarW = 200, kBarH = 20;
-        fb.fill_round_rect(kBarX, kBarY, kBarW, kBarH, 10, hc::kFaint);
-        fb.fill_round_rect(kBarX + 2, kBarY + 2, kBarW - 4, kBarH - 4, 8,
-                           hc::kBar);
-        if (ps.battery_percent <= 100) {
-            const uint16_t fill_color =
-                ps.charging ? aiwatchos::colors::kOk
-                : ps.battery_percent < 20 ? aiwatchos::colors::kDanger
-                                           : kAmberColor;
-            const int fill = (kBarW - 4) * ps.battery_percent / 100;
-            if (fill > 0) {
-                fb.fill_round_rect(kBarX + 2, kBarY + 2, fill, kBarH - 4, 8,
-                                   fill_color);
-            }
-            char pct_buf[8];
-            std::snprintf(pct_buf, sizeof(pct_buf), "%u%%",
-                          static_cast<unsigned>(ps.battery_percent));
-            draw_text(fb, kBarX + kBarW + 12, kBarY - 1, pct_buf, 2,
-                      kTextColor);
-        }
-        // Micro row: uptime left, device id right.
+    // SUB-ROW: uptime (+ queue depth) left, battery % text right. The
+    // duplicate battery bar is gone (the shell status zone owns it);
+    // the device id moved to Settings → About.
+    {
         char up_buf[16];
-        hermes_uptime_str(now_ms(), up_buf, sizeof(up_buf));
+        hermes_uptime_str(now, up_buf, sizeof(up_buf));
         char up_line[48];
         if (v.queued) {
             std::snprintf(up_line, sizeof(up_line), "UP %s - %u QUEUED",
@@ -812,27 +747,72 @@ void hermes_render(aiwatchos::Framebuffer& fb) {
         } else {
             std::snprintf(up_line, sizeof(up_line), "UP %s", up_buf);
         }
-        aiwatchos::draw_text_aa(fb, 16, 176, up_line,
+        aiwatchos::draw_text_aa(fb, 20, 112, up_line,
                                 aiwatchos::FontFace::kMicro, kDimColor);
-        if (g_client) {
-            aiwatchos::draw_text_aa_right(
-                fb, aiwatchos::kDisplayWidth - 16, 176,
-                g_client->device_id(), aiwatchos::FontFace::kMicro,
-                kDimColor);
+        if (g_hal) {
+            aiwatchos::PowerStatus ps = g_hal->read_power();
+            if (ps.battery_percent <= 100) {
+                char pct_buf[8];
+                std::snprintf(pct_buf, sizeof(pct_buf), "%u%%",
+                              static_cast<unsigned>(ps.battery_percent));
+                aiwatchos::draw_text_aa_right(fb, 390, 110, pct_buf,
+                                              aiwatchos::FontFace::kCaption,
+                                              kTextColor);
+            }
         }
     }
 
-    const int kContentY = 200;
+    const int kContentY = 136;   // conversation window top (§3.5, shifted)
+    const int kContentH = 268;   // ... y136–404
     const int kContentW = aiwatchos::kDisplayWidth - 32;
 
+    aiwatchos::BubbleStyle bar_style = aiwatchos::bubble_style();
+    bar_style.top = hc::kBarTop;
+    bar_style.mid = hc::kBar;
+    bar_style.bot = hc::kBarBot;
+    bar_style.shadow = nullptr;
+
     if (v.link == HermesLinkState::AuthFailed) {
-        draw_wrapped(fb, 16, kContentY, kContentW, v.error, 2, aiwatchos::colors::kDanger, 3);
-        draw_wrapped(fb, 16, kContentY + 60, kContentW,
-                     "HOLD BOOT 2S TO FORGET THIS DEVICE AND RE-ENROLL WITH A FRESH KEY. (OR RUN HERMES GADGET FORGET ON THE HOST.)",
-                     2, kDimColor, 8);
+        // Danger card: the error, the recovery, the hold instruction.
+        fb.draw_bubble(20, 140, 370, 240, 18, bar_style);
+        draw_wrapped(fb, 32, 156, 346, v.error, 2,
+                     aiwatchos::colors::kDanger, 3);
+        draw_wrapped(fb, 32, 230, 346,
+                     "THIS KEY WAS REJECTED. FORGET IT AND RE-ENROLL WITH A FRESH KEY.",
+                     2, kDimColor, 4);
+        if (g_boot_hint_ms >= 600 && !g_boot_fired) {
+            const uint32_t left_ms = 2000 - g_boot_hint_ms;
+            char hold[48];
+            std::snprintf(hold, sizeof(hold), "KEEP HOLDING: %u.%uS",
+                          static_cast<unsigned>(left_ms / 1000),
+                          static_cast<unsigned>((left_ms % 1000) / 100));
+            aiwatchos::draw_text_aa(fb, 32, 330, hold,
+                                    aiwatchos::FontFace::kMicro, kAmberColor);
+        } else {
+            aiwatchos::draw_text_aa(fb, 32, 330, "HOLD BOOT 2S TO FORGET + RE-ENROLL",
+                                    aiwatchos::FontFace::kMicro, kAmberColor);
+        }
     } else if (v.prompt_active) {
-        draw_wrapped(fb, 16, kContentY, kContentW, v.prompt_title, 3, kAmberColor, 2);
-        draw_wrapped(fb, 16, kContentY + 48, kContentW, v.prompt_text, 2, kTextColor, 8);
+        aiwatchos::draw_text_aa(fb, 20, 170, v.prompt_title,
+                                aiwatchos::FontFace::kHeadline, kAmberColor);
+        draw_wrapped(fb, 20, 200, 370, v.prompt_text, 2, kTextColor, 6);
+        // Expiry countdown when the prompt carries a TTL.
+        if (v.prompt_ttl_s > 0) {
+            const uint64_t elapsed = now >= v.prompt_since_ms ? now - v.prompt_since_ms : 0;
+            const uint64_t ttl_ms = static_cast<uint64_t>(v.prompt_ttl_s) * 1000ULL;
+            char exp[32];
+            if (elapsed >= ttl_ms) {
+                std::snprintf(exp, sizeof(exp), "EXPIRED");
+            } else {
+                const unsigned left_s = static_cast<unsigned>((ttl_ms - elapsed) / 1000);
+                std::snprintf(exp, sizeof(exp), "EXPIRES IN %u:%02u",
+                              left_s / 60, left_s % 60);
+            }
+            aiwatchos::draw_text_aa(fb, 20, 348, exp,
+                                    aiwatchos::FontFace::kMicro,
+                                    elapsed >= ttl_ms ? aiwatchos::colors::kWarn
+                                                      : kDimColor);
+        }
         // YES / NO targets: gloss bubbles (state colours are allowed
         // here — they ARE the state). Touch zones unchanged.
         aiwatchos::BubbleStyle yes_style;
@@ -852,12 +832,15 @@ void hermes_render(aiwatchos::Framebuffer& fb) {
         draw_text(fb, 16 + (181 - yes_w) / 2, 380 + 10, "YES", 4, kHermesBg);
         draw_text(fb, 213 + (181 - no_w) / 2, 380 + 10, "NO", 4, kHermesBg);
     } else if (v.link == HermesLinkState::Pairing && v.pairing_code[0]) {
-        draw_text(fb, 16, kContentY, "PAIRING CODE", 2, kStatusColor);
-        int code_w = text_w(v.pairing_code, 6);
-        draw_text(fb, (aiwatchos::kDisplayWidth - code_w) / 2, kContentY + 24,
-                  v.pairing_code, 6, kAmberColor);
-        draw_wrapped(fb, 16, kContentY + 76, kContentW,
-                     "APPROVE ON THE HERMES HOST:", 2, kDimColor, 2);
+        // P1 pairing card: code in Pair 40 (the face exists for this),
+        // approve command in an input chip, spinner + wait line.
+        fb.draw_bubble(20, 140, 370, 300, 18, bar_style);
+        aiwatchos::draw_text_aa_centered(fb, 205, 158, "PAIRING CODE",
+                                         aiwatchos::FontFace::kMicro, kDimColor);
+        aiwatchos::draw_text_aa_centered(fb, 205, 180, v.pairing_code,
+                                         aiwatchos::FontFace::kPair, kAmberColor);
+        aiwatchos::draw_text_aa_centered(fb, 205, 248, "APPROVE ON THE HERMES HOST:",
+                                         aiwatchos::FontFace::kCaption, kDimColor);
         char fallback_cmd[64];
         const char* cmd = v.pairing_cmd;
         if (!cmd[0]) {
@@ -865,28 +848,48 @@ void hermes_render(aiwatchos::Framebuffer& fb) {
                           "HERMES PAIRING APPROVE GADGET %s", v.pairing_code);
             cmd = fallback_cmd;
         }
-        draw_wrapped(fb, 16, kContentY + 104, kContentW, cmd,
-                     2, kTextColor, 6);
+        {
+            const auto lines = aiwatchos::wrap_text_aa(cmd, aiwatchos::FontFace::kCaption,
+                                                       330, 2);
+            const int lh = aiwatchos::font_line_height(aiwatchos::FontFace::kCaption) + 2;
+            const int chip_h = 8 + static_cast<int>(lines.size()) * lh + 8;
+            fb.fill_round_rect(28, 272, 354, chip_h, 10, aiwatchos::colors::kInput);
+            int ly = 272 + 8;
+            for (const std::string& line : lines) {
+                aiwatchos::draw_text_aa_centered(fb, 205, ly, line,
+                                                 aiwatchos::FontFace::kCaption,
+                                                 kTextColor);
+                ly += lh;
+            }
+        }
+        const float spin = static_cast<float>((now * 300 / 1000) % 360);
+        fb.arc(205, 396, 12, 4, spin, 270, kAmberColor);
+        aiwatchos::draw_text_aa_centered(fb, 205, 414, "WAITING FOR APPROVAL...",
+                                         aiwatchos::FontFace::kMicro, kDimColor);
     } else if (v.card_active) {
         // Card surface: a gold-dialect dialogue bubble sized to the
-        // wrapped title + body.
-        const int title_lines = wrapped_line_count(v.card_title, kContentW, 3, 2);
-        const int body_lines = wrapped_line_count(v.card_body, kContentW, 2, 12);
-        const int card_h = 16 + title_lines * 36 + 8 + body_lines * 24 + 12;
-        aiwatchos::BubbleStyle card_style = aiwatchos::bubble_style();
-        card_style.top = hc::kBarTop;
-        card_style.mid = hc::kBar;
-        card_style.bot = hc::kBarBot;
-        card_style.shadow = nullptr;
+        // wrapped title + body (shared wrap metrics).
+        const auto title_lines = aiwatchos::wrap_text_aa(
+            v.card_title, aiwatchos::FontFace::kTitle, kContentW - 16, 2);
+        const auto body_lines = aiwatchos::wrap_text_aa(
+            v.card_body, aiwatchos::FontFace::kBody, kContentW - 16, 12);
+        const int title_step =
+            aiwatchos::font_line_height(aiwatchos::FontFace::kTitle) + 2;
+        const int body_step =
+            aiwatchos::font_line_height(aiwatchos::FontFace::kBody) + 2;
+        const int card_h = 12 + static_cast<int>(title_lines.size()) * title_step +
+                           6 + static_cast<int>(body_lines.size()) * body_step + 12;
         fb.draw_bubble(aiwatchos::kSafeLeft, kContentY - 8,
                        aiwatchos::kDisplayWidth - aiwatchos::kSafeLeft -
                            aiwatchos::kSafeRight,
-                       card_h, 16, card_style);
-        draw_wrapped(fb, 16, kContentY, kContentW, v.card_title, 3, kTextColor, 2);
-        draw_wrapped(fb, 16, kContentY + 48, kContentW, v.card_body, 2, kDimColor, 12);
+                       card_h, 16, bar_style);
+        int cy = draw_lines(fb, 20, kContentY, title_lines,
+                            aiwatchos::FontFace::kTitle, kTextColor);
+        draw_lines(fb, 20, cy + 6, body_lines,
+                   aiwatchos::FontFace::kBody, kDimColor);
     } else if (v.image_active && image_px && image_w > 0 && image_h > 0) {
         // Nearest-neighbour fit into the content area, aspect preserved.
-        int max_w = kContentW, max_h = 280;
+        int max_w = kContentW, max_h = kContentH;
         int dw = max_w, dh = image_h * max_w / image_w;
         if (dh > max_h) { dh = max_h; dw = image_w * max_h / image_h; }
         int ox = (aiwatchos::kDisplayWidth - dw) / 2, oy = kContentY;
@@ -899,155 +902,234 @@ void hermes_render(aiwatchos::Framebuffer& fb) {
                 fb.put_pixel(ox + x, oy + y, px);
             }
         }
+    } else if (v.link == HermesLinkState::Offline) {
+        // OFFLINE: empty-state recipe — wifi-off icon, headline, reason.
+        aiwatchos::draw_icon(fb, 185, 190, aiwatchos::Icon::kWifiOff,
+                             aiwatchos::FontFace::kIcon40, kDimColor);
+        aiwatchos::draw_text_aa_centered(fb, 205, 250, "NO LINK",
+                                         aiwatchos::FontFace::kTitle, kTextColor);
+        draw_wrapped(fb, 55, 292, 300,
+                     "THE WATCH JOINS WI-FI AND CONNECTS TO THE HERMES HUB AUTOMATICALLY.",
+                     2, kDimColor, 2);
+        if (v.error[0]) {
+            draw_wrapped(fb, 55, 348, 300, v.error, 2,
+                         aiwatchos::colors::kDanger, 2);
+        }
+    } else if (v.link == HermesLinkState::Pairing) {
+        // Pairing without a code yet (the coded card is the arm above).
+        const int phase = static_cast<int>((now / 300) % 3);
+        for (int i = 0; i < 3; ++i) {
+            fb.fill_circle(188 + i * 17, 250, 3,
+                           i == phase ? kAmberColor : hc::kGoldDim);
+        }
+        aiwatchos::draw_text_aa_centered(fb, 205, 266, "WAITING FOR PAIRING CODE...",
+                                         aiwatchos::FontFace::kCaption, kDimColor);
+    } else if (v.link == HermesLinkState::Connecting) {
+        const int phase = static_cast<int>((now / 300) % 3);
+        for (int i = 0; i < 3; ++i) {
+            fb.fill_circle(188 + i * 17, 250, 3,
+                           i == phase ? kAmberColor : hc::kGoldDim);
+        }
+        aiwatchos::draw_text_aa_centered(fb, 205, 266, "CONNECTING...",
+                                         aiwatchos::FontFace::kCaption, kDimColor);
+    } else if (!v.busy && !v.ota_active && v.history_count == 0 &&
+               !v.transcript[0] && !v.reply[0]) {
+        // EMPTY (linked, no turns): feather + invitation + SAY HELLO pill.
+        aiwatchos::draw_icon(fb, 185, 216, aiwatchos::Icon::kFeather,
+                             aiwatchos::FontFace::kIcon40, hc::kGoldDim);
+        aiwatchos::draw_text_aa_centered(fb, 205, 264, "SAY HELLO TO HERMES",
+                                         aiwatchos::FontFace::kCaption, kTextColor);
+        aiwatchos::BubbleStyle hello_style;
+        hello_style.top = aiwatchos::blend565(kAmberColor, aiwatchos::colors::kWhite, 90);
+        hello_style.mid = kAmberColor;
+        hello_style.bot = aiwatchos::blend565(kAmberColor, aiwatchos::colors::kBlack, 60);
+        hello_style.border_alpha = 100;
+        hello_style.shadow = nullptr;
+        fb.draw_bubble(105, 300, 200, 48, 16, hello_style);
+        const int hello_w = text_w("SAY HELLO", 3);
+        draw_text(fb, 105 + (200 - hello_w) / 2, 300 + 7, "SAY HELLO", 3,
+                  kHermesBg);
     } else {
-        // Conversation.
-        int y = kContentY;
-        if (v.ota_active) {
-            char ota_line[48];
-            unsigned pct = v.ota_size ? v.ota_received * 100 / v.ota_size : 0;
-            std::snprintf(ota_line, sizeof(ota_line), "UPDATING %u%%", pct);
-            draw_text(fb, 16, y, ota_line, 2, kAmberColor);
-            y += 28;
+        // Conversation: turns oldest→newest in a drag-scrolled window.
+        // Two passes: measure heights (wraps are transient), then draw
+        // the items fully inside the window (partials culled — no text
+        // ever bleeds into the header or the PTT pill).
+        struct Item { char kind; int8_t hist; int h; int y; };   // hist: ring idx, -1 live
+        Item items[16];
+        int n_items = 0;
+        const int micro_step =
+            aiwatchos::font_line_height(aiwatchos::FontFace::kMicro) + 2;
+        const int cap_step =
+            aiwatchos::font_line_height(aiwatchos::FontFace::kCaption) + 2;
+        const int body_step =
+            aiwatchos::font_line_height(aiwatchos::FontFace::kBody) + 2;
+        auto push_user = [&](const char* transcript, int hist) {
+            if (!transcript[0] || n_items >= 16) return;
+            const size_t nl = aiwatchos::wrap_text_aa(
+                transcript, aiwatchos::FontFace::kCaption, 248, 3).size();
+            items[n_items++] = Item{'U', static_cast<int8_t>(hist),
+                                    7 + micro_step + static_cast<int>(nl) * cap_step + 7, 0};
+        };
+        auto push_hermes = [&](const char* reply, uint64_t end_ms, int hist) {
+            if (!reply[0] || n_items >= 16) return;
+            const size_t nl = aiwatchos::wrap_text_aa(
+                reply, aiwatchos::FontFace::kBody, 362, -1).size();
+            items[n_items++] = Item{'H', static_cast<int8_t>(hist),
+                                    7 + (end_ms ? micro_step + 2 : 0) +
+                                        static_cast<int>(nl) * body_step + 7, 0};
+        };
+        for (int i = 0; i < v.history_count; ++i) {
+            push_user(v.history[i].transcript, i);
+            push_hermes(v.history[i].reply, v.history[i].end_ms, i);
         }
-        if (v.busy || v.status[0]) {
-            char status_line[176];
-            std::snprintf(status_line, sizeof(status_line), "%s",
-                          v.status[0] ? v.status : "THINKING");
-            y = draw_wrapped(fb, 16, y, kContentW, status_line, 2, kAmberColor, 2);
-            y += 6;
+        push_user(v.transcript, -1);
+        push_hermes(v.reply, 0, -1);
+        if (v.busy && n_items < 16) items[n_items++] = Item{'S', -2, 26, 0};
+        if (v.ota_active && n_items < 16) items[n_items++] = Item{'O', -2, 48, 0};
+        int total = 0;
+        for (int i = 0; i < n_items; ++i) {
+            items[i].y = kContentY + total;
+            total += items[i].h + 8;
         }
-        // H1: completed exchanges as Hermes-dialect bubbles above the
-        // current pair (gold bar surface, like the display card). Each
-        // bubble: an HH:MM stamp (Micro, gold) from the turn end, the
-        // heard transcript as one dim "YOU: ..." line, and the reply in
-        // up to 2 lines. Only the newest bubbles that fit above y=318
-        // draw; the current pair keeps the rest of the screen.
-        if (v.history_count > 0) {
-            const int kHistBottom = 318;
-            int first = v.history_count;
-            {
-                int yy = y;
-                for (int i = v.history_count - 1; i >= 0; --i) {
-                    const HermesExchange& ex = v.history[i];
-                    int h = 14 + (ex.end_ms ? 14 : 0) +
-                            (ex.transcript[0] ? 26 : 0) +
-                            26 * wrapped_line_count(ex.reply, kContentW - 16, 2, 2);
-                    if (yy + h > kHistBottom) break;
-                    yy += h + 6;
-                    first = i;
+        if (total > 0) total -= 8;
+        // Follow rule: content that grew while the user sat at (near)
+        // the bottom pins to the new bottom; a scrolled-up reader stays.
+        const int max_now = total > kContentH ? total - kContentH : 0;
+        if (max_now != g_h_max_prev) {
+            if (g_h_scroll >= g_h_max_prev - 24) g_h_scroll = max_now;
+            g_h_max_prev = max_now;
+        }
+        if (g_h_scroll < 0) g_h_scroll = 0;
+        if (g_h_scroll > max_now) g_h_scroll = max_now;
+
+        aiwatchos::BubbleStyle slate_style = aiwatchos::bubble_style();
+        slate_style.top = hc::kSlateTop;
+        slate_style.mid = hc::kSlateMid;
+        slate_style.bot = hc::kSlateBot;
+        slate_style.shadow = nullptr;
+        for (int i = 0; i < n_items; ++i) {
+            const int sy = items[i].y - g_h_scroll;
+            if (sy < kContentY || sy + items[i].h > kContentY + kContentH) continue;
+            if (items[i].kind == 'U') {
+                const char* t = items[i].hist >= 0 ? v.history[items[i].hist].transcript
+                                                   : v.transcript;
+                const auto lines = aiwatchos::wrap_text_aa(
+                    t, aiwatchos::FontFace::kCaption, 248, 3);
+                int widest = 0;
+                for (const std::string& ln : lines) {
+                    const int w = aiwatchos::text_width_aa(ln, aiwatchos::FontFace::kCaption);
+                    if (w > widest) widest = w;
                 }
+                int bw = widest + 32;
+                if (bw < 120) bw = 120;
+                if (bw > 280) bw = 280;
+                const int bx = 390 - bw;
+                fb.draw_bubble(bx, sy, bw, items[i].h, 14, slate_style);
+                aiwatchos::draw_text_aa(fb, bx + 12, sy + 7, "YOU:",
+                                        aiwatchos::FontFace::kMicro, kDimColor);
+                draw_lines(fb, bx + 12, sy + 7 + micro_step, lines,
+                           aiwatchos::FontFace::kCaption, kTextColor);
+            } else if (items[i].kind == 'H') {
+                const char* r;
+                uint64_t end_ms = 0;
+                if (items[i].hist >= 0) {
+                    r = v.history[items[i].hist].reply;
+                    end_ms = v.history[items[i].hist].end_ms;
+                } else {
+                    r = v.reply;
+                }
+                fb.draw_bubble(8, sy, 394, items[i].h, 14, bar_style);
+                int iy = sy + 7;
+                if (end_ms) {
+                    const uint64_t disp = aiwatchos::local_display_ms(end_ms);
+                    const unsigned h24 = static_cast<unsigned>((disp / 3600000) % 24);
+                    const unsigned h12 = (h24 % 12 == 0) ? 12u : (h24 % 12);
+                    char stamp[12];
+                    std::snprintf(stamp, sizeof(stamp), "%u:%02u %s", h12,
+                                  static_cast<unsigned>((disp / 60000) % 60),
+                                  h24 < 12 ? "AM" : "PM");
+                    aiwatchos::draw_text_aa(fb, 20, iy, stamp,
+                                            aiwatchos::FontFace::kMicro, kAmberColor);
+                    iy += micro_step + 2;
+                }
+                draw_lines(fb, 20, iy,
+                           aiwatchos::wrap_text_aa(r, aiwatchos::FontFace::kBody, 362, -1),
+                           aiwatchos::FontFace::kBody, kTextColor);
+            } else if (items[i].kind == 'S') {
+                const int phase = static_cast<int>((now / 300) % 3);
+                for (int d = 0; d < 3; ++d) {
+                    fb.fill_circle(28 + d * 17, sy + 13, 3,
+                                   d == phase ? kAmberColor : hc::kGoldDim);
+                }
+                aiwatchos::draw_text_aa(fb, 72, sy + 4,
+                                        v.status[0] ? v.status : "THINKING",
+                                        aiwatchos::FontFace::kCaption, kAmberColor);
+            } else {  // 'O': OTA progress row.
+                char ota_line[48];
+                const unsigned pct = v.ota_size ? v.ota_received * 100 / v.ota_size : 0;
+                std::snprintf(ota_line, sizeof(ota_line), "UPDATING %u%%", pct);
+                aiwatchos::draw_text_aa(fb, 20, sy, ota_line,
+                                        aiwatchos::FontFace::kCaption, kAmberColor);
+                fb.fill_round_rect(20, sy + 24, 370, 12, 6, hc::kFaint);
+                const int fill = 370 * static_cast<int>(pct) / 100;
+                if (fill > 0) fb.fill_round_rect(20, sy + 24, fill, 12, 6, kAmberColor);
             }
-            for (int i = first; i < v.history_count; ++i) {
-                const HermesExchange& ex = v.history[i];
-                const int r_lines =
-                    wrapped_line_count(ex.reply, kContentW - 16, 2, 2);
-                const int bh = 14 + (ex.end_ms ? 14 : 0) +
-                               (ex.transcript[0] ? 26 : 0) + 26 * r_lines;
-                aiwatchos::BubbleStyle hist = aiwatchos::bubble_style();
-                hist.top = hc::kBarTop;
-                hist.mid = hc::kBar;
-                hist.bot = hc::kBarBot;
-                hist.shadow = nullptr;
-                fb.draw_bubble(aiwatchos::kSafeLeft, y,
-                               aiwatchos::kDisplayWidth -
-                                   aiwatchos::kSafeLeft -
-                                   aiwatchos::kSafeRight,
-                               bh, 14,
-                               hist);
-                int iy = y + 7;
-                if (ex.end_ms) {
-                    const uint64_t disp =
-                        aiwatchos::local_display_ms(ex.end_ms);
-                    char stamp[8];
-                    std::snprintf(stamp, sizeof(stamp), "%02u:%02u",
-                                  static_cast<unsigned>((disp / 3600000) % 24),
-                                  static_cast<unsigned>((disp / 60000) % 60));
-                    aiwatchos::draw_text_aa(fb, 24, iy, stamp,
-                                            aiwatchos::FontFace::kMicro,
-                                            kAmberColor);
-                    iy += 14;
-                }
-                if (ex.transcript[0]) {
-                    char you[528];
-                    std::snprintf(you, sizeof(you), "YOU: %s", ex.transcript);
-                    iy = draw_wrapped(fb, 24, iy, kContentW - 16, you, 2,
-                                      kDimColor, 1);
-                }
-                if (ex.reply[0]) {
-                    draw_wrapped(fb, 24, iy, kContentW - 16, ex.reply, 2,
-                                 kTextColor, 2);
-                }
-                y += bh + 6;
-            }
         }
-        if (v.transcript[0]) {
-            y = draw_wrapped(fb, 16, y, kContentW, "YOU:", 2, kStatusColor, 1);
-            y = draw_wrapped(fb, 16, y, kContentW, v.transcript, 2, kDimColor, 3);
-            y += 6;
-        }
-        if (v.reply[0]) {
-            draw_wrapped(fb, 16, y, kContentW, v.reply, 2, kTextColor, 12);
-        } else if (v.link == HermesLinkState::Linked && !v.busy) {
-            // One-tap smoke message + push-to-talk affordance.
-            aiwatchos::BubbleStyle hello_style;
-            hello_style.top = aiwatchos::blend565(kAmberColor, aiwatchos::colors::kWhite, 90);
-            hello_style.mid = kAmberColor;
-            hello_style.bot = aiwatchos::blend565(kAmberColor, aiwatchos::colors::kBlack, 60);
-            hello_style.border_alpha = 100;
-            hello_style.shadow = nullptr;
-            fb.draw_bubble(105, 300, 200, 48, 16, hello_style);
-            const int hello_w = text_w("SAY HELLO", 3);
-            draw_text(fb, 105 + (200 - hello_w) / 2, 300 + 7, "SAY HELLO", 3,
-                      kHermesBg);
-            draw_text(fb, 16, 364, "OR HOLD BOTTOM TO TALK", 2, kStatusColor);
-        } else if (v.link == HermesLinkState::Offline) {
-            draw_wrapped(fb, 16, y, kContentW,
-                         "NO LINK. THE WATCH JOINS WIFI AND CONNECTS TO THE HERMES HUB AUTOMATICALLY.",
-                         2, kDimColor, 6);
-            if (v.error[0]) {
-                draw_wrapped(fb, 16, y + 92, kContentW, v.error, 2, aiwatchos::colors::kDanger, 2);
-            }
-        } else if (v.link == HermesLinkState::Connecting) {
-            draw_text(fb, 16, y, "CONNECTING...", 2, kDimColor);
-        } else if (v.link == HermesLinkState::Pairing) {
-            draw_text(fb, 16, y, "WAITING FOR PAIRING CODE...", 2, kDimColor);
-        }
-        if (v.notice[0] && now_ms() < v.notice_until_ms) {
-            draw_wrapped(fb, 16, 424, kContentW, v.notice, 2, kAmberColor, 1);
+        // Scroll thumb while dragging (v1.0 token: 4 px, min 24 long).
+        if (g_h_drag && max_now > 0) {
+            const int th = kContentH * kContentH / total > 24
+                               ? kContentH * kContentH / total
+                               : 24;
+            const int ty = kContentY + (kContentH - th) * g_h_scroll / max_now;
+            fb.fill_round_rect(402, ty, 4, th, 2, hc::kGoldDim);
         }
     }
 
-    // Hint floats over the background (no band — the shell owns the
-    // only chrome at the top; the bottom stays clean). Both bottom
-    // lines anchor to the AA Body face's real line height: the hint's
-    // line box ENDS exactly at the safe-area bottom line. (The old
-    // -14 offset assumed the pre-AA 5x7 scale-2 height of 14 px; the
-    // Body face is 23 px tall, so the glyphs ran past the safe line
-    // and the shell's safe-area clip half-erased them.)
-    const int kHintY = aiwatchos::kDisplayHeight - aiwatchos::kSafeBottom -
-                       aiwatchos::font_line_height(
-                           aiwatchos::FontFace::kBody);
-    // H5: while BOOT is held past the hint threshold, count the hold
-    // down over the bottom hint line.
-    if (g_boot_hint_ms >= 600 && !g_boot_fired) {
-        const uint32_t left_ms = 2000 - g_boot_hint_ms;
-        char hold[48];
-        std::snprintf(hold, sizeof(hold), "KEEP HOLDING: %s IN %u.%us",
-                      v.link == HermesLinkState::AuthFailed
-                          ? "FORGET + RE-ENROLL"
-                          : "NEW SESSION",
-                      static_cast<unsigned>(left_ms / 1000),
-                      static_cast<unsigned>((left_ms % 1000) / 100));
-        draw_text(fb, 16,
-                  kHintY - aiwatchos::font_line_height(
-                               aiwatchos::FontFace::kBody) - 4,
-                  hold, 2, kAmberColor);
+    // Notice line (conversation layout only).
+    if (v.notice[0] && now < v.notice_until_ms &&
+        !v.prompt_active && v.link != HermesLinkState::AuthFailed &&
+        !(v.link == HermesLinkState::Pairing && v.pairing_code[0]) &&
+        !v.card_active && !(v.image_active && image_px)) {
+        aiwatchos::draw_text_aa(fb, 20, 410,
+                                aiwatchos::truncate_text_aa(v.notice,
+                                                            aiwatchos::FontFace::kMicro, 370),
+                                aiwatchos::FontFace::kMicro, kAmberColor);
     }
-    const char* hint = "HOLD BOTTOM: TALK";
-    if (v.prompt_active) hint = "TAP YES OR NO";
-    else if (v.card_active || v.image_active) hint = "TAP: DISMISS";
-    else if (v.link != HermesLinkState::Linked) hint = "HERMES GADGET";
-    draw_text(fb, 16, kHintY, hint, 2, kDimColor);
+
+    // PTT pill (linked only): idle = bar + gold stroke; recording =
+    // solid gold; a BOOT hold repurposes the label as its countdown.
+    if (v.link == HermesLinkState::Linked) {
+        const bool rec = g_client && g_client->talk_active();
+        char label[48];
+        if (g_boot_hint_ms >= 600 && !g_boot_fired) {
+            const uint32_t left_ms = 2000 - g_boot_hint_ms;
+            std::snprintf(label, sizeof(label), "%s IN %u.%uS",
+                          v.link == HermesLinkState::AuthFailed
+                              ? "FORGET + RE-ENROLL"
+                              : "NEW SESSION",
+                          static_cast<unsigned>(left_ms / 1000),
+                          static_cast<unsigned>((left_ms % 1000) / 100));
+        } else if (rec) {
+            std::snprintf(label, sizeof(label), "LISTENING...");
+        } else {
+            std::snprintf(label, sizeof(label), "HOLD TO TALK");
+        }
+        if (rec) {
+            fb.fill_round_rect(20, 420, 370, 64, 32, kAmberColor);
+        } else {
+            fb.draw_bubble(20, 420, 370, 64, 32, bar_style);
+            fb.stroke_round_rect(20, 420, 370, 64, 32, kAmberColor, 255);
+            fb.stroke_round_rect(21, 421, 368, 62, 31, kAmberColor, 255);
+        }
+        const uint16_t fg = rec ? kHermesBg : kAmberColor;
+        const int label_w = aiwatchos::text_width_aa(label, aiwatchos::FontFace::kHeadline);
+        const int x0 = 205 - (20 + 8 + label_w) / 2;
+        aiwatchos::draw_icon(fb, x0, 442, aiwatchos::Icon::kMic,
+                             aiwatchos::FontFace::kIcon20, fg);
+        aiwatchos::draw_text_aa(fb, x0 + 28, 438, label,
+                                aiwatchos::FontFace::kHeadline, fg);
+    }
+
 }
 
 bool hermes_on_touch(const aiwatchos::TouchEvent& event) {
@@ -1055,6 +1137,9 @@ bool hermes_on_touch(const aiwatchos::TouchEvent& event) {
     LockGuard lock;
     const HermesView& v = g_client->view();
     uint64_t now = now_ms();
+    // Conversation window (render geometry): drags here scroll the list.
+    constexpr int kListY0 = 136;
+    constexpr int kListY1 = 404;
 
     if (event.type == aiwatchos::TouchEvent::Press) {
         // Prompt first. Guard: presses in the first 0.6 s are swallowed
@@ -1074,21 +1159,49 @@ bool hermes_on_touch(const aiwatchos::TouchEvent& event) {
             g_client->cancel(now);
             return true;
         }
-        // SAY HELLO button (only drawn in the linked+idle state).
+        // SAY HELLO pill (empty state only: linked, idle, no turns).
         if (v.link == HermesLinkState::Linked && !v.busy && !v.reply[0] &&
+            !v.transcript[0] && v.history_count == 0 && !v.ota_active &&
             event.x >= 105 && event.x <= 305 && event.y >= 300 && event.y <= 348) {
             return g_client->send_chat_text("Hello from my watch");
         }
-        // Bottom-center hold: push-to-talk.
-        if (event.y > aiwatchos::kDisplayHeight - 100) {
+        // PTT pill: push-to-talk.
+        if (v.link == HermesLinkState::Linked && event.y >= 412) {
             return g_client->talk_start(now);
         }
+        // Conversation list: arm a potential drag (Move scrolls).
+        if (event.y >= kListY0 && event.y <= kListY1) {
+            g_h_press_x = event.x;
+            g_h_press_y = event.y;
+            g_h_last_y = event.y;
+            g_h_drag = false;
+            g_h_in_list = true;
+            return true;
+        }
         return false;
+    }
+
+    if (event.type == aiwatchos::TouchEvent::Move) {
+        if (!g_h_in_list) return false;
+        const int dy = g_h_last_y - event.y;
+        g_h_last_y = event.y;
+        if (event.y - g_h_press_y > 8 || g_h_press_y - event.y > 8 ||
+            event.x - g_h_press_x > 8 || g_h_press_x - event.x > 8) {
+            g_h_drag = true;
+        }
+        // Clamp against the last measured overflow (render refreshes it
+        // every frame, so the bound is at most one frame stale).
+        g_h_scroll += dy;
+        if (g_h_scroll < 0) g_h_scroll = 0;
+        if (g_h_scroll > g_h_max_prev) g_h_scroll = g_h_max_prev;
+        return true;
     }
 
     // Any release ends an in-progress capture: a finger that slides off
     // the talk zone before lifting must not wedge the mic open.
     if (event.type == aiwatchos::TouchEvent::Release) {
+        g_h_in_list = false;
+        g_h_drag = false;
         if (g_client->talk_active()) {
             g_client->talk_stop(now);
             return true;
@@ -1137,6 +1250,10 @@ void hermes_test_reset(const uint8_t key[32]) {
     g_client->init(sinks, cfg);
     g_client->set_key(key);
     g_outbound.clear();
+    g_h_scroll = 0;
+    g_h_max_prev = 0;
+    g_h_drag = false;
+    g_h_in_list = false;
     hermes_link_test_ota_reset();
 }
 
@@ -1152,6 +1269,14 @@ void hermes_test_talk_feed(const int16_t* pcm, size_t frames) {
     hermes_core_talk_feed(pcm, frames);
 }
 bool hermes_test_take_cycle_request() { return hermes_core_wants_cycle(); }
+int hermes_test_scroll() {
+    LockGuard lock;
+    return g_h_scroll;
+}
+int hermes_test_scroll_max() {
+    LockGuard lock;
+    return g_h_max_prev;
+}
 size_t hermes_test_outbound_count() { return g_outbound.size(); }
 bool hermes_test_outbound_is_binary(size_t i) {
     return i < g_outbound.size() && g_outbound[i].binary;

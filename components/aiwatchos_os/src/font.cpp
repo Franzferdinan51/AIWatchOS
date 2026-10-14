@@ -424,6 +424,80 @@ void draw_text_aa_right(Framebuffer& fb, int x_right, int y,
                  color);
 }
 
+std::vector<std::string> wrap_text_aa(std::string_view text, FontFace face,
+                                      int max_w, int max_lines) {
+    std::vector<std::string> lines;
+    std::string cur;
+    size_t i = 0;
+    auto flush = [&]() {
+        lines.push_back(cur);
+        cur.clear();
+    };
+    auto fits = [&](const std::string& s) {
+        return text_width_aa(s, face) <= max_w;
+    };
+    auto capped = [&]() {
+        return max_lines >= 0 &&
+               static_cast<int>(lines.size()) >= max_lines;
+    };
+    while (i < text.size()) {
+        if (text[i] == '\n') {
+            flush();
+            ++i;
+            continue;
+        }
+        if (text[i] == ' ') {
+            ++i;
+            continue;
+        }
+        size_t j = i;
+        while (j < text.size() && text[j] != ' ' && text[j] != '\n') ++j;
+        std::string word(text.substr(i, j - i));
+        i = j;
+        // Hard-break a word that alone exceeds the line.
+        while (!fits(word)) {
+            if (!cur.empty()) {
+                flush();
+                if (capped()) return lines;
+            }
+            // Longest prefix that fits.
+            size_t cut = word.size();
+            while (cut > 1 && !fits(word.substr(0, cut))) --cut;
+            lines.push_back(word.substr(0, cut));
+            word = word.substr(cut);
+            if (capped()) return lines;
+        }
+        if (cur.empty()) {
+            cur = word;
+        } else if (fits(cur + " " + word)) {
+            cur += " " + word;
+        } else {
+            flush();
+            if (capped()) return lines;
+            cur = word;
+        }
+    }
+    if (!cur.empty() || lines.empty()) flush();
+    // Ellipsis when content was cut off by the line cap.
+    if (capped() && i < text.size()) {
+        std::string& last = lines.back();
+        while (!last.empty() && !fits(last + "...")) {
+            last.pop_back();
+        }
+        last += "...";
+    }
+    return lines;
+}
+
+std::string truncate_text_aa(std::string_view text, FontFace face, int max_w) {
+    if (text_width_aa(text, face) <= max_w) return std::string(text);
+    std::string out(text);
+    while (!out.empty() && text_width_aa(out + "...", face) > max_w) {
+        out.pop_back();
+    }
+    return out + "...";
+}
+
 void draw_icon(Framebuffer& fb, int x, int y, Icon icon, FontFace face,
                uint16_t color) {
     ensure_loaded();

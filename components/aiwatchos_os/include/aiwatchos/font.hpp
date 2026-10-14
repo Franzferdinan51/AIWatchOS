@@ -3,11 +3,11 @@
 //
 // The assets live in the aiwatchos_assets FAT partition on device and
 // in the repo's assets/ directory on host; assets_load() reads them
-// ONCE into PSRAM. This renderer is the "glyph cache" the budget
-// speaks of, and it is deliberately cache-free: glyphs are blitted
-// straight from the PSRAM-resident baked data (coverage blits are
-// span-bounded and measured in microseconds), so the cache occupies
-// 0 KB — far under the <=64 KB PSRAM cap — and SRAM cost is zero.
+// ONCE into PSRAM. Glyphs are blitted straight from the PSRAM-resident
+// baked data (coverage blits are span-bounded and measured in
+// microseconds); a 32-entry codepoint->record lookup cache (256 B
+// static) keeps repeat lookups off the record walk. Far under the
+// <=64 KB PSRAM cap and the UI SRAM budget.
 //
 // If the assets are unavailable (mount failure), every entry point
 // falls back to the 5x7 debug font so the watch always has text; the
@@ -81,6 +81,15 @@ void draw_text_aa_right(Framebuffer& fb, int x_right, int y,
 // tiles, card chips), kIconWx64 (weather hero; weather glyphs only).
 void draw_icon(Framebuffer& fb, int x, int y, Icon icon, FontFace face,
                uint16_t color);
+
+// R1 shared pixel wrap: greedy word wrap into at most max_lines lines
+// (negative = unbounded). Overlong words hard-break; content cut by the
+// line cap ends the last line with "...". Single source for every app —
+// no bespoke wrap loops.
+std::vector<std::string> wrap_text_aa(std::string_view text, FontFace face,
+                                      int max_w, int max_lines);
+// Truncate one line to max_w px with a trailing "..." (no-op when it fits).
+std::string truncate_text_aa(std::string_view text, FontFace face, int max_w);
 
 // Shadow sprites for the bubble recipe (G4), or nullptr when assets
 // are not loaded. Tile = 96x96 tiles; pill = small pills/chips; card =

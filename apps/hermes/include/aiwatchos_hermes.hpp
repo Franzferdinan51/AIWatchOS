@@ -118,6 +118,9 @@ void hermes_test_talk_feed(const int16_t* pcm, size_t frames);   // mic pump sta
 // Consume the handshake watchdog's link-recycle request (host tests drive
 // the same take-once path the link task uses on device).
 bool hermes_test_take_cycle_request();
+// Conversation scroll offset + last measured overflow (px).
+int hermes_test_scroll();
+int hermes_test_scroll_max();
 size_t hermes_test_outbound_count();
 bool hermes_test_outbound_is_binary(size_t i);
 std::string hermes_test_outbound_text(size_t i);  // text frame i ("" if binary)
