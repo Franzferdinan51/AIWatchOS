@@ -109,22 +109,47 @@ void WeatherApp::on_resume() {
 void WeatherApp::render(Framebuffer& fb) {
     // The shell paints backdrop + status zone; content starts below.
     if (!snapshot_.has_data) {
-        // Honest empty state — no invented numbers, and the reason why.
-        draw_icon(fb, kDisplayWidth / 2 - 20, 176, Icon::kWifiOff,
-                  FontFace::kIcon40, colors::kDim);
-        draw_text_aa_centered(fb, kDisplayWidth / 2, 240, "NO DATA YET",
-                              FontFace::kTitle, colors::kText);
-        const char* why = "Offline";
+        // Split empty states (§3.7): the icon + title name the regime,
+        // the caption names the remedy. No invented numbers, ever.
+        Icon icon = Icon::kWifiOff;
+        uint16_t icon_tint = colors::kDim;
+        const char* title = "OFFLINE";
+        const char* why = "JOIN WI-FI TO FETCH";
         if (provider_seen_) {
             switch (snapshot_.status) {
-                case WeatherServiceStatus::kConnecting:  why = "Connecting";   break;
-                case WeatherServiceStatus::kFetchFailed: why = "Fetch failed"; break;
-                case WeatherServiceStatus::kOk:          why = "No data yet";  break;
-                case WeatherServiceStatus::kUnconfigured: why = "Offline";     break;
+                case WeatherServiceStatus::kConnecting:
+                    title = "CONNECTING...";
+                    why = "FIRST FETCH IN FLIGHT";
+                    break;
+                case WeatherServiceStatus::kFetchFailed:
+                    title = "FETCH FAILED";
+                    why = "TAP TO RETRY";
+                    icon_tint = colors::kWarn;
+                    break;
+                case WeatherServiceStatus::kOk:
+                    title = "NO DATA YET";
+                    why = "FIRST FETCH IN FLIGHT";
+                    break;
+                case WeatherServiceStatus::kUnconfigured:
+                    icon = Icon::kGear;
+                    title = "NOT CONFIGURED";
+                    why = "SET A LOCATION IN MDB";
+                    break;
             }
         }
+        draw_icon(fb, kDisplayWidth / 2 - 20, 176, icon,
+                  FontFace::kIcon40, icon_tint);
+        draw_text_aa_centered(fb, kDisplayWidth / 2, 240, title,
+                              FontFace::kTitle, colors::kText);
         draw_text_aa_centered(fb, kDisplayWidth / 2, 286, why,
                               FontFace::kCaption, colors::kDim);
+        // Retry hint only where a tap does something (failed + provider).
+        if (provider_seen_ &&
+            snapshot_.status == WeatherServiceStatus::kFetchFailed &&
+            g_refresh_fn) {
+            draw_text_aa_centered(fb, kDisplayWidth / 2, 472, "TAP: RETRY",
+                                  FontFace::kMicro, colors::kDim);
+        }
         return;
     }
 
@@ -143,17 +168,20 @@ void WeatherApp::render(Framebuffer& fb) {
     draw_text_aa_centered(fb, kDisplayWidth / 2, 150, temp_str,
                           FontFace::kDisplay, colors::kTextNum);
 
-    // Condition in Title, NWS's own words, pixel-truncated to the row.
-    char cond[WeatherSnapshot::kConditionTextCap];
-    std::strncpy(cond, snapshot_.condition_text, sizeof(cond) - 1);
-    cond[sizeof(cond) - 1] = '\0';
-    while (cond[0] &&
-           text_width_aa(cond, FontFace::kTitle) > kDisplayWidth - 32) {
-        cond[std::strlen(cond) - 1] = '\0';
+    // Condition in Title, NWS's own words, wrapped to ≤2 lines with
+    // an ellipsis (shared R1 metrics — no byte-chopping UTF-8).
+    {
+        const auto lines = wrap_text_aa(
+            snapshot_.condition_text[0] ? snapshot_.condition_text : "Unknown",
+            FontFace::kTitle, 300, 2);
+        const int step = font_line_height(FontFace::kTitle) + 2;
+        int cy = 262;
+        for (const std::string& line : lines) {
+            draw_text_aa_centered(fb, kDisplayWidth / 2, cy, line,
+                                  FontFace::kTitle, colors::kText);
+            cy += step;
+        }
     }
-    draw_text_aa_centered(fb, kDisplayWidth / 2, 262,
-                          cond[0] ? cond : "Unknown", FontFace::kTitle,
-                          colors::kText);
 
     // Info cells: the two facts the NWS snapshot actually carries.
     // (Hi/lo, wind and location are NOT in the snapshot — plan 3.6
@@ -186,18 +214,45 @@ void WeatherApp::render(Framebuffer& fb) {
                               colors::kText);
     }
 
-    // Freshness line: LIVE, or STALE once the reading is older than
-    // one refresh interval.
+    // Freshness pill (§3.7): regime dot + UPDATED HH:MM. The dot
+    // carries the regime — ok live, warn stale, blue while a refresh
+    // is in flight — so the line reads at a glance.
     const bool stale = weather_is_stale(hal().now_ms(),
                                         snapshot_.fetched_epoch_ms,
                                         kStaleAfterMs);
-    draw_text_aa_centered(fb, kDisplayWidth / 2, 428,
-                          stale ? "STALE" : "LIVE", FontFace::kCaption,
-                          stale ? colors::kWarn : colors::kOk);
+    {
+        char pill_text[24];
+        std::snprintf(pill_text, sizeof(pill_text), "UPDATED %s", upd_val);
+        const int text_w = text_width_aa(pill_text, FontFace::kCaption);
+        const int pill_w = 10 + 8 + 6 + text_w + 10;
+        const int pill_x = kDisplayWidth / 2 - pill_w / 2;
+        const uint16_t dot =
+            snapshot_.status == WeatherServiceStatus::kConnecting
+                ? colors::kBlue
+            : stale ? colors::kWarn
+                    : colors::kOk;
+        fb.fill_round_rect(pill_x, 426, pill_w, 24, 12, colors::kInput);
+        fb.fill_circle(pill_x + 10 + 4, 426 + 12, 4, dot);
+        draw_text_aa(fb, pill_x + 10 + 8 + 6, 426 + 4, pill_text,
+                     FontFace::kCaption, colors::kText);
+    }
+    if (g_refresh_fn) {
+        draw_text_aa_centered(fb, kDisplayWidth / 2, 472, "TAP: REFRESH",
+                              FontFace::kMicro, colors::kDim);
+    }
 }
 
 bool WeatherApp::on_touch(const TouchEvent& event) {
-    (void)event;   // weather is a read-only display in this version
+    if (event.type != TouchEvent::Press || !g_refresh_fn) return false;
+    // Tap anywhere refreshes live data; a failed fetch retries from its
+    // empty state. Anything else falls through (shell home strip keeps
+    // working from the un-failed empty states).
+    if (snapshot_.has_data ||
+        (provider_seen_ &&
+         snapshot_.status == WeatherServiceStatus::kFetchFailed)) {
+        g_refresh_fn();
+        return true;
+    }
     return false;
 }
 

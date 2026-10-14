@@ -25,6 +25,7 @@
 #include "aiwatchos/settings_page.hpp"   // for Settings volume wiring verification
 #include "aiwatchos/battery_display.hpp"   // for status-bar time rendering verification
 #include "aiwatchos/display_power.hpp"     // for IdleRenderPacer verification
+#include "aiwatchos/weather_app.hpp"       // for weather screen verification
 #include "aiwatchos/notifications.hpp"   // for notification wrap verification
 #include "aiwatchos/color_test.hpp"      // for colour-test pattern verification
 #include "aiwatchos/touch_synth.hpp"
@@ -3187,6 +3188,162 @@ static void test_glyph_cache() {
     printf("test_glyph_cache: PASSED\n");
 }
 
+// --- Weather §3.7: split empties, freshness pill, tap refresh -----------
+namespace {
+aiwatchos::WeatherSnapshot g_wx_snap{};
+int g_wx_refreshes = 0;
+bool wx_fake_snapshot(aiwatchos::WeatherSnapshot* out) {
+    *out = g_wx_snap;
+    return true;
+}
+void wx_fake_refresh() { ++g_wx_refreshes; }
+}  // namespace
+
+static void test_weather_screen() {
+    using namespace aiwatchos;
+    if (!assets_ready()) {
+        printf("test_weather_screen: SKIPPED (assets not found from cwd)\n");
+        return;
+    }
+    weather_set_provider(wx_fake_snapshot, wx_fake_refresh);
+    WeatherApp app;
+    static uint16_t buf[kDisplayWidth * kDisplayHeight];
+    Framebuffer fb{buf, kDisplayWidth, kDisplayHeight};
+    auto clear = [&]() {
+        for (size_t i = 0; i < sizeof(buf) / sizeof(buf[0]); ++i) buf[i] = 0;
+    };
+    auto count_color = [&](uint16_t c, int x0, int y0, int x1, int y1) {
+        int n = 0;
+        for (int y = y0; y < y1; ++y)
+            for (int x = x0; x < x1; ++x)
+                if (buf[y * kDisplayWidth + x] == c) ++n;
+        return n;
+    };
+    auto count_ink = [&](int x0, int y0, int x1, int y1) {
+        int n = 0;
+        for (int y = y0; y < y1; ++y)
+            for (int x = x0; x < x1; ++x)
+                if (buf[y * kDisplayWidth + x] != 0) ++n;
+        return n;
+    };
+    const uint64_t now = hal().now_ms();
+
+    // Failed empty: title + retry remedy; tap retries, resume refetches.
+    g_wx_snap = WeatherSnapshot{};
+    g_wx_snap.status = WeatherServiceStatus::kFetchFailed;
+    g_wx_refreshes = 0;
+    app.tick(0);
+    clear();
+    app.render(fb);
+    assert(count_ink(80, 240, 330, 278) > 100);      // "FETCH FAILED"
+    assert(count_ink(120, 286, 290, 304) > 20);      // "TAP TO RETRY"
+    assert(app.on_touch(TouchEvent{200, 300, TouchEvent::Press}));
+    assert(g_wx_refreshes == 1);
+    app.on_resume();
+    assert(g_wx_refreshes == 2);                     // fetch on open
+
+    // Unconfigured empty: tap does nothing (falls to the shell strip).
+    g_wx_snap.status = WeatherServiceStatus::kUnconfigured;
+    app.tick(0);
+    clear();
+    app.render(fb);
+    assert(count_ink(60, 240, 350, 278) > 100);      // "NOT CONFIGURED"
+    assert(!app.on_touch(TouchEvent{200, 480, TouchEvent::Press}));
+    assert(g_wx_refreshes == 2);
+
+    // Live data: hero temp + ok-dot pill; tap refreshes.
+    g_wx_snap.has_data = true;
+    g_wx_snap.temperature_f = 72;
+    g_wx_snap.has_humidity = true;
+    g_wx_snap.humidity_pct = 45;
+    std::snprintf(g_wx_snap.condition_text, sizeof(g_wx_snap.condition_text),
+                  "Partly Cloudy");
+    g_wx_snap.fetched_epoch_ms = now;
+    g_wx_snap.status = WeatherServiceStatus::kOk;
+    app.tick(0);
+    clear();
+    app.render(fb);
+    assert(count_ink(130, 150, 280, 250) > 200);     // hero "72°"
+    assert(count_color(colors::kOk, 120, 430, 290, 446) > 5);   // live dot
+    assert(app.on_touch(TouchEvent{200, 200, TouchEvent::Press}));
+    assert(g_wx_refreshes == 3);
+
+    // Stale data: the dot warns; connecting: the dot goes blue.
+    g_wx_snap.fetched_epoch_ms = now - 31u * 60000u;
+    app.tick(0);
+    clear();
+    app.render(fb);
+    assert(count_color(colors::kWarn, 120, 430, 290, 446) > 5);
+    g_wx_snap.fetched_epoch_ms = now;
+    g_wx_snap.status = WeatherServiceStatus::kConnecting;
+    app.tick(0);
+    clear();
+    app.render(fb);
+    assert(count_color(colors::kBlue, 120, 430, 290, 446) > 5);
+
+    weather_set_provider(nullptr, nullptr);
+    printf("test_weather_screen: PASSED\n");
+}
+
+// --- Launcher §3.2-lite: the launcher takes no tile; Alerts badges ----
+static void test_launcher_badge() {
+    using namespace aiwatchos;
+    TestHal hal;
+    AppManager mgr(hal);
+    App app_clock = make_app("clock");
+    App app_self = make_app("launcher");
+    App app_alerts = make_app("notifications");
+    assert(mgr.register_app(&app_clock, true));
+    mgr.register_app(&app_self);
+    mgr.register_app(&app_alerts);
+    LauncherUI launcher(mgr);
+
+    // Tiles pack by visible index: clock at 0, Alerts at 1 — the
+    // self-tile's old slot now belongs to Alerts.
+    TouchEvent alerts{200, 100, TouchEvent::Press};
+    assert(launcher.on_touch(alerts) == true);
+    assert(std::string(mgr.current_app_id()) == "notifications");
+    // The third column holds no tile: taps there launch nothing.
+    TouchEvent ghost{320, 100, TouchEvent::Press};
+    assert(launcher.on_touch(ghost) == false);
+    assert(std::string(mgr.current_app_id()) == "notifications");
+
+    // Badge: unread count in a red dot on the Alerts tile corner.
+    NotificationManager notes(hal);
+    notes.add_notification("A", "first");
+    notes.add_notification("B", "second");
+    notes.add_notification("C", "third");
+    set_active_notifications(&notes);
+    static uint16_t buf[kDisplayWidth * kDisplayHeight];
+    Framebuffer fb{buf, kDisplayWidth, kDisplayHeight};
+    fb.fill(0x0000);
+    launcher.render(fb);
+    int tile_x, tile_y;
+    tile_origin(1, tile_x, tile_y);   // Alerts' visible slot
+    int danger = 0;
+    for (int y = tile_y - 8; y <= tile_y + 16; ++y) {
+        for (int x = tile_x + kTileSize - 16; x <= tile_x + kTileSize + 8; ++x) {
+            if (buf[y * kDisplayWidth + x] == colors::kDanger) ++danger;
+        }
+    }
+    assert(danger > 20);
+    // Nothing unread: no dot.
+    NotificationManager empty(hal);
+    set_active_notifications(&empty);
+    fb.fill(0x0000);
+    launcher.render(fb);
+    danger = 0;
+    for (int y = tile_y - 8; y <= tile_y + 16; ++y) {
+        for (int x = tile_x + kTileSize - 16; x <= tile_x + kTileSize + 8; ++x) {
+            if (buf[y * kDisplayWidth + x] == colors::kDanger) ++danger;
+        }
+    }
+    assert(danger == 0);
+    set_active_notifications(nullptr);
+
+    printf("test_launcher_badge: PASSED\n");
+}
+
 int main() {
     test_aa_text();                      // baked Inter AA renderer against real assets
     test_touch_synth();
@@ -3253,6 +3410,8 @@ int main() {
     test_backdrop_bake();                // Q2 bake-and-blit is pixel-identical to painting
     test_glyph_cache();                  // Glyph cache transparency incl. missing glyphs
     test_hermes_rebuild();               // Hermes §3.5 states, pill, scroll
+    test_weather_screen();               // Weather §3.7 states, pill, tap refresh
+    test_launcher_badge();               // Launcher: no self-tile, Alerts badge
 
     printf("\nAll AppManager tests PASSED.\n");
     return 0;
