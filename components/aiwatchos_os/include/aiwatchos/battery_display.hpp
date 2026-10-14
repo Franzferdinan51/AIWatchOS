@@ -68,6 +68,16 @@ inline void draw_shell_backdrop(Framebuffer& fb) {
     draw_shell_backdrop(fb, 0, fb.height);
 }
 
+// Q2 bake-and-blit: the backdrop never changes at runtime, so the shell
+// paints it ONCE into a PSRAM buffer at boot (backdrop_bake) and restores
+// it per frame with a single memcpy (backdrop_restore) instead of
+// recomputing 502 rows ~25x/s. Pixel-identical to painting: the bake
+// runs the same painter. `baked` must hold kDisplayWidth*kDisplayHeight
+// pixels; a nullptr `baked` falls back to painting (PSRAM-exhausted
+// boot), so the shell needs no second code path.
+void backdrop_bake(uint16_t* baked);
+void backdrop_restore(Framebuffer& fb, const uint16_t* baked);
+
 // Renders the status bar (time + battery) into the top rows of `fb`.
 // Called by the OS shell on every frame, after the foreground app.
 class BatteryDisplay {

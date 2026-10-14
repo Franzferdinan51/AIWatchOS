@@ -24,6 +24,7 @@
 #include "aiwatchos/launcher_ui.hpp"   // for LauncherUI tap-to-launch verification
 #include "aiwatchos/settings_page.hpp"   // for Settings volume wiring verification
 #include "aiwatchos/battery_display.hpp"   // for status-bar time rendering verification
+#include "aiwatchos/display_power.hpp"     // for IdleRenderPacer verification
 #include "aiwatchos/notifications.hpp"   // for notification wrap verification
 #include "aiwatchos/color_test.hpp"      // for colour-test pattern verification
 #include "aiwatchos/touch_synth.hpp"
@@ -2960,6 +2961,82 @@ static void test_hermes_health_tail() {
     printf("test_hermes_health_tail: PASSED\n");
 }
 
+// --- Idle render pacing: full rate while fresh, 1-in-3 when idle -------
+static void test_idle_pacer() {
+    using namespace aiwatchos;
+    IdleRenderPacer p;
+    // Fresh frames always render.
+    for (uint32_t i = 0; i < IdleRenderPacer::kIdleAfterFrames - 1; ++i) {
+        assert(p.frame(false));
+    }
+    // Past the threshold: exactly every 3rd idle frame renders.
+    int rendered = 0;
+    for (int i = 0; i < 9; ++i) {
+        if (p.frame(false)) ++rendered;
+    }
+    assert(rendered == 3);
+    // Any input frame renders and restarts the idle count.
+    assert(p.frame(true));
+    for (uint32_t i = 0; i < IdleRenderPacer::kIdleAfterFrames - 1; ++i) {
+        assert(p.frame(false));
+    }
+    printf("test_idle_pacer: PASSED\n");
+}
+
+// --- Q2: the baked backdrop restores pixel-identical ----------------------
+static void test_backdrop_bake() {
+    using namespace aiwatchos;
+    static uint16_t baked[kDisplayWidth * kDisplayHeight];
+    static uint16_t painted[kDisplayWidth * kDisplayHeight];
+    static uint16_t restored[kDisplayWidth * kDisplayHeight];
+    static uint16_t fallback[kDisplayWidth * kDisplayHeight];
+    Framebuffer f_painted{painted, kDisplayWidth, kDisplayHeight};
+    Framebuffer f_restored{restored, kDisplayWidth, kDisplayHeight};
+    Framebuffer f_fallback{fallback, kDisplayWidth, kDisplayHeight};
+    draw_shell_backdrop(f_painted);
+    backdrop_bake(baked);
+    // The bake buffer itself equals a direct paint.
+    assert(memcmp(baked, painted, sizeof(painted)) == 0);
+    // Restore-from-bake equals a direct paint over any prior content.
+    f_restored.fill(0x1234);
+    backdrop_restore(f_restored, baked);
+    assert(memcmp(restored, painted, sizeof(painted)) == 0);
+    // Null bake (PSRAM-exhausted boot) falls back to painting.
+    backdrop_restore(f_fallback, nullptr);
+    assert(memcmp(fallback, painted, sizeof(painted)) == 0);
+    printf("test_backdrop_bake: PASSED\n");
+}
+
+// --- Glyph cache: repeated + missing glyphs draw identically --------------
+static void test_glyph_cache() {
+    using namespace aiwatchos;
+    if (!assets_ready()) {
+        printf("test_glyph_cache: SKIPPED (assets not found from cwd)\n");
+        return;
+    }
+    static uint16_t first[kDisplayWidth * kDisplayHeight];
+    static uint16_t second[kDisplayWidth * kDisplayHeight];
+    Framebuffer f1{first, kDisplayWidth, kDisplayHeight};
+    Framebuffer f2{second, kDisplayWidth, kDisplayHeight};
+    // Missing glyphs (CJK, emoji) contribute no width and no ink — and the
+    // cached-miss path must agree with the first scan exactly.
+    assert(text_width_aa("AB", FontFace::kBody) > 0);
+    assert(text_width_aa("A\xE4\xB8\xAD" "B", FontFace::kBody) ==
+           text_width_aa("AB", FontFace::kBody));
+    const char* para =
+        "Hermes heard every word, twice. 1234567890 …°·— "
+        "Pack my box with five dozen liquor jugs! \xF0\x9F\x94\x94";
+    f1.fill(0x0000);
+    draw_text_aa(f1, 20, 60, para, FontFace::kBody, 0xFFFF);
+    const int w1 = text_width_aa(para, FontFace::kBody);
+    f2.fill(0x0000);
+    draw_text_aa(f2, 20, 60, para, FontFace::kBody, 0xFFFF);
+    const int w2 = text_width_aa(para, FontFace::kBody);
+    assert(w1 == w2 && w1 > 100);
+    assert(memcmp(first, second, sizeof(first)) == 0);
+    printf("test_glyph_cache: PASSED\n");
+}
+
 int main() {
     test_aa_text();                      // baked Inter AA renderer against real assets
     test_touch_synth();
@@ -3022,6 +3099,9 @@ int main() {
     test_hermes_image();                 // Hermes image complete/incomplete/large/stalled
     test_hermes_touch_guards();          // Hermes prompt-guard swallow + release-anywhere talk end
     test_hermes_health_tail();           // Hermes health SRV/SES/VIA tail survives whole
+    test_idle_pacer();                   // Idle render pacing: full rate, then 1-in-3
+    test_backdrop_bake();                // Q2 bake-and-blit is pixel-identical to painting
+    test_glyph_cache();                  // Glyph cache transparency incl. missing glyphs
 
     printf("\nAll AppManager tests PASSED.\n");
     return 0;

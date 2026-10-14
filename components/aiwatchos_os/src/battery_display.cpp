@@ -2,6 +2,7 @@
 #include "aiwatchos/battery_display.hpp"
 
 #include <cstdio>
+#include <cstring>
 
 #include "aiwatchos/colors.hpp"
 #include "aiwatchos/font.hpp"
@@ -26,6 +27,22 @@ void draw_shell_backdrop(Framebuffer& fb, int y0, int y1) {
             fb.fill_rect(0, y + i, fb.width - 1, y + i, c);
         }
     }
+}
+
+void backdrop_bake(uint16_t* baked) {
+    if (!baked) return;
+    Framebuffer view{baked, kDisplayWidth, kDisplayHeight};
+    draw_shell_backdrop(view);
+}
+
+void backdrop_restore(Framebuffer& fb, const uint16_t* baked) {
+    if (!baked || fb.width != kDisplayWidth || fb.height != kDisplayHeight) {
+        draw_shell_backdrop(fb);   // degraded boot or odd-sized view: paint
+        return;
+    }
+    std::memcpy(fb.pixels, baked,
+                static_cast<size_t>(kDisplayWidth) * kDisplayHeight *
+                    sizeof(uint16_t));
 }
 
 void BatteryDisplay::render(Framebuffer& fb, const char* time_str) {

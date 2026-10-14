@@ -103,4 +103,35 @@ class DisplayPower {
     uint64_t pwr_down_ms_ = 0;
 };
 
+// Idle render pacing (pure, like DisplayPower): while the watch is awake
+// but untouched, full render+hash+flush frames are decimated to 1-in-3.
+// Input sampling, touch dispatch and app ticks stay at full rate, so the
+// first touch still lands within one frame and every input frame renders
+// immediately; content that changes without input (streaming text, the
+// clock minute, notice TTLs) lands on the next paced frame (~80 ms worst
+// case). Cosmetic animation inherits the decimation (the Q6 decoupling,
+// applied uniformly). The band-hash flush gate is unaffected: a skipped
+// frame leaves the framebuffer untouched, so there is nothing to flush.
+class IdleRenderPacer {
+ public:
+    static constexpr uint32_t kIdleAfterFrames = 125;  // ~5 s at 40 ms
+    static constexpr uint32_t kIdleRenderEvery = 3;    // idle renders ~8 fps
+
+    // input: anything happened this frame (touch points/buttons/synth
+    // events, MDB injection, an app switch, the frame card). Returns
+    // true when this frame must render.
+    bool frame(bool input) {
+        if (input) {
+            idle_ = 0;
+            return true;
+        }
+        ++idle_;
+        if (idle_ < kIdleAfterFrames) return true;
+        return idle_ % kIdleRenderEvery == 0;
+    }
+
+ private:
+    uint32_t idle_ = 0;
+};
+
 }  // namespace aiwatchos

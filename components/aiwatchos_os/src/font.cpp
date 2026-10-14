@@ -136,12 +136,36 @@ bool parse_sprites(const uint8_t* buf, size_t size) {
     return true;
 }
 
-const uint8_t* find_glyph(const LoadedFont& f, uint32_t cp) {
+const uint8_t* find_glyph_scan(const LoadedFont& f, uint32_t cp) {
     for (int i = 0; i < f.glyph_count; ++i) {
         const uint8_t* r = f.records + i * 14;
         if (rd32(r) == cp) return r;
     }
     return nullptr;
+}
+
+// Direct-mapped glyph cache (256 B static): UI text re-renders the same
+// small character set every frame, and every lookup above walks ~100
+// PSRAM records. Misses (nullptr — e.g. CJK/emoji absent from the baked
+// set) are cached too, so an undrawable character costs one scan total,
+// not one per frame. Fonts load exactly once and record pointers never
+// move, so entries never go stale.
+struct GlyphCacheEntry {
+    uint32_t tag = 0xFFFFFFFFu;   // face in the top 5 bits, codepoint below
+    const uint8_t* rec = nullptr;
+};
+GlyphCacheEntry g_glyph_cache[32];
+
+const uint8_t* find_glyph(const LoadedFont& f, int face_idx, uint32_t cp) {
+    const uint32_t tag =
+        (static_cast<uint32_t>(face_idx) << 24) | (cp & 0x00FFFFFFu);
+    const size_t slot = (cp ^ (cp >> 7) ^ static_cast<uint32_t>(face_idx)) & 31u;
+    GlyphCacheEntry& e = g_glyph_cache[slot];
+    if (e.tag == tag) return e.rec;
+    const uint8_t* rec = find_glyph_scan(f, cp);
+    e.tag = tag;
+    e.rec = rec;
+    return rec;
 }
 
 uint32_t decode_utf8(const char*& p, const char* end) {
@@ -342,11 +366,12 @@ int text_width_aa(std::string_view utf8, FontFace face) {
                fallback_scale(face);
     }
     int width = 0;
+    const int face_idx = static_cast<int>(face);
     const char* p = utf8.data();
     const char* end = p + utf8.size();
     while (p < end) {
         const uint32_t cp = decode_utf8(p, end);
-        const uint8_t* rec = find_glyph(f, cp);
+        const uint8_t* rec = find_glyph(f, face_idx, cp);
         if (rec) width += rec[8];
     }
     return width;
@@ -373,11 +398,12 @@ void draw_text_aa(Framebuffer& fb, int x, int y, std::string_view utf8,
     }
     const int baseline = y + f.ascent;
     int pen = x;
+    const int face_idx = static_cast<int>(face);
     const char* p = utf8.data();
     const char* end = p + utf8.size();
     while (p < end) {
         const uint32_t cp = decode_utf8(p, end);
-        const uint8_t* rec = find_glyph(f, cp);
+        const uint8_t* rec = find_glyph(f, face_idx, cp);
         if (!rec) continue;
         draw_glyph(fb, f, rec, pen, baseline, color);
         pen += rec[8];
@@ -407,7 +433,8 @@ void draw_icon(Framebuffer& fb, int x, int y, Icon icon, FontFace face,
         fb.stroke_round_rect(x + 2, y + 2, em - 4, em - 4, 4, color, 128);
         return;
     }
-    const uint8_t* rec = find_glyph(f, static_cast<uint32_t>(icon));
+    const uint8_t* rec =
+        find_glyph(f, static_cast<int>(face), static_cast<uint32_t>(icon));
     if (!rec) return;
     // Icon glyphs are baked with the baseline at the em bottom, so the
     // ink lands in the em box whose top-left is (x, y).

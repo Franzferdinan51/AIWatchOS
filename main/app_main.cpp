@@ -296,6 +296,18 @@ extern "C" void app_main(void) {
         while (true) { vTaskDelay(pdMS_TO_TICKS(1000)); }
     }
 #endif
+    // Q2 backdrop bake: one more PSRAM frame for the static shell
+    // gradient (412 KB of 8 MB). A null buffer is a valid degraded boot:
+    // backdrop_restore() falls back to painting, frame by frame.
+#ifdef __ESPRESSIF_IDF__
+    uint16_t* s_backdrop = static_cast<uint16_t*>(heap_caps_malloc(
+        aiwatchos::kDisplayWidth * aiwatchos::kDisplayHeight * sizeof(uint16_t),
+        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+#else
+    static uint16_t s_host_backdrop[aiwatchos::kDisplayWidth * aiwatchos::kDisplayHeight];
+    uint16_t* s_backdrop = s_host_backdrop;
+#endif
+    aiwatchos::backdrop_bake(s_backdrop);
     aiwatchos::Framebuffer fb{s_framebuffer, aiwatchos::kDisplayWidth, aiwatchos::kDisplayHeight};
 
     // --- 2. Create the AppManager and register apps ---
@@ -450,6 +462,7 @@ extern "C" void app_main(void) {
     static aiwatchos::BootEscape g_boot_escape;
     static aiwatchos::TouchSynth g_touch_synth;
     static aiwatchos::BandFlush g_band_flush;
+    static aiwatchos::IdleRenderPacer g_pacer;
     // App-switch tracking (transition timing only — see the switch
     // block below; the panel itself is never brightness-masked).
     const char* last_app_id = nullptr;
@@ -467,8 +480,9 @@ extern "C" void app_main(void) {
         // MDB input injection (docs/mdb.md): applied here, before the
         // power policy samples the frame, so synthetic input is
         // indistinguishable from physical input downstream.
-        aiwatchos_mdb::detail::apply_frame(&n_points, touch_xs, touch_ys,
-                                           &buttons);
+        const bool mdb_applied =
+            aiwatchos_mdb::detail::apply_frame(&n_points, touch_xs, touch_ys,
+                                              &buttons);
 
         // BOOT-hold escape (shell gesture, above app dispatch): BOOT
         // is also an app key (PTT / barge-in) and a capture-mode app
@@ -574,117 +588,133 @@ extern "C" void app_main(void) {
         // (owner report 2026-10-13), so the dip is gone entirely:
         // brightness is never touched on a switch. All this block does
         // now is timestamp the switch for the perf readout.
+        bool switched_this_frame = false;
         {
             const char* current_id = g_app_mgr.current_app_id();
             if (!switch_t0_us && last_app_id && current_id &&
                 std::strcmp(last_app_id, current_id) != 0) {
                 switch_t0_us = perf_now_us();
+                switched_this_frame = true;
             }
             if (current_id) last_app_id = current_id;
         }
 
-        // Render (plan 3.0 order): G5 backdrop -> app -> shell status
-        // zone LAST, so the status bar is present and identical on
-        // every screen and no app can paint over it (audit X3).
-        const uint64_t t_render0 = perf_now_us();
+        // Idle render pacing: input sampling, touch dispatch and app
+        // ticks above all ran at full rate; the expensive half of the
+        // frame (render + band hash + flush) is decimated while the
+        // watch sits untouched. A skipped frame leaves the framebuffer
+        // exactly as the last render left it, so the flush gate has
+        // nothing to do and the glass keeps showing the last frame.
+        const bool frame_input =
+            n_points > 0 || buttons != 0 || n_events > 0 || mdb_applied ||
+            switched_this_frame ||
+            aiwatchos_mdb::detail::frame_card_requested();
+        if (g_pacer.frame(frame_input)) {
+            // Render (plan 3.0 order): G5 backdrop -> app -> shell status
+            // zone LAST, so the status bar is present and identical on
+            // every screen and no app can paint over it (audit X3).
+            const uint64_t t_render0 = perf_now_us();
 #ifdef __ESPRESSIF_IDF__
-        aiwatchos_mdb::detail::g_perf.renders++;
+            aiwatchos_mdb::detail::g_perf.renders++;
 #endif
-        aiwatchos::draw_shell_backdrop(fb);
-        g_app_mgr.render(fb);
+            aiwatchos::backdrop_restore(fb, s_backdrop);
+            g_app_mgr.render(fb);
 
-        uint64_t now_ms = aiwatchos::local_display_ms(frame_now_ms);  // display-only TZ shift
-        char time_str[16];
-        // 12-hour, matching the clock face (stage-2 made the face
-        // 12-hour per the design; the status-zone mini-clock kept
-        // formatting 24-hour — same conversion as clock_face.cpp).
-        const unsigned hour24 =
-            static_cast<unsigned>((now_ms / 3600000) % 24);
-        const unsigned hour12 = (hour24 % 12 == 0) ? 12u : (hour24 % 12);
-        unsigned minutes = static_cast<unsigned>((now_ms / 60000) % 60);
-        snprintf(time_str, sizeof(time_str), "%u:%02u", hour12, minutes);
-        g_status_bar.render(fb, time_str);
+            uint64_t now_ms = aiwatchos::local_display_ms(frame_now_ms);  // display-only TZ shift
+            char time_str[16];
+            // 12-hour, matching the clock face (stage-2 made the face
+            // 12-hour per the design; the status-zone mini-clock kept
+            // formatting 24-hour — same conversion as clock_face.cpp).
+            const unsigned hour24 =
+                static_cast<unsigned>((now_ms / 3600000) % 24);
+            const unsigned hour12 = (hour24 % 12 == 0) ? 12u : (hour24 % 12);
+            unsigned minutes = static_cast<unsigned>((now_ms / 60000) % 60);
+            snprintf(time_str, sizeof(time_str), "%u:%02u", hour12, minutes);
+            g_status_bar.render(fb, time_str);
 
 #ifdef __ESPRESSIF_IDF__
-        // Link-state strip: the bottom 3px INSIDE the status zone
-        // (tokens section 8 position), state-coloured: ok = linked,
-        // warn = connecting/retrying, faint = off/unconfigured.
-        {
-            uint16_t link_color = aiwatchos::colors::kFaint;
-            switch (aiwatchos_net::muse_link_state()) {
-                case aiwatchos_net::LinkState::kLinked:
-                    link_color = aiwatchos::colors::kOk;
-                    break;
-                case aiwatchos_net::LinkState::kConnecting:
-                case aiwatchos_net::LinkState::kWaitingWifi:
-                case aiwatchos_net::LinkState::kBackoff:
-                    link_color = aiwatchos::colors::kWarn;
-                    break;
-                case aiwatchos_net::LinkState::kOff:
-                    break;
-            }
-            fb.fill_rect(aiwatchos::kSafeCornerEnd,
-                         aiwatchos::kStatusZoneBottom - 3,
-                         aiwatchos::kDisplayWidth - 1 -
-                             aiwatchos::kSafeCornerEnd,
-                         aiwatchos::kStatusZoneBottom - 1, link_color);
-        }
-#endif
-
-        // MDB safe-area calibration card (`mdb frame`): while latched,
-        // overdraw the finished frame — app + status zone and all — so
-        // the glass shows the card instead of the app. Drawn here, after
-        // every other render and before the band scan, the card is part
-        // of the flushed frame like anything else.
-        if (aiwatchos_mdb::detail::frame_card_requested()) {
-            draw_frame_card(fb);
-        }
-
-        // Flush only the changed bands to the CO5300 (plan 1.6): hash
-        // the frame in 4 horizontal bands and flush the dirty ones via
-        // the HAL row-range flush. A static screen costs zero QSPI
-        // traffic; changed bands commit their hashes only on success.
-        {
-            const uint64_t t_hash0 = perf_now_us();
-            perf_accum(aiwatchos_mdb::detail::g_perf.render_us_sum,
-                       aiwatchos_mdb::detail::g_perf.render_us_max,
-                       t_hash0 - t_render0);
-            const uint8_t dirty = g_band_flush.scan(fb.pixels, fb.width, fb.height);
-            const uint64_t t_flush0 = perf_now_us();
-            perf_accum(aiwatchos_mdb::detail::g_perf.hash_us_sum,
-                       aiwatchos_mdb::detail::g_perf.hash_us_max,
-                       t_flush0 - t_hash0);
-            uint8_t flushed = 0;
-            for (int b = 0; b < aiwatchos::BandFlush::kBands; ++b) {
-                if (!(dirty & (1u << b))) continue;
-                int y0, y1;
-                aiwatchos::BandFlush::band_range(b, fb.height, y0, y1);
-                if (board.display_flush_rows(y0, y1)) {
-                    flushed |= static_cast<uint8_t>(1u << b);
+            // Link-state strip: the bottom 3px INSIDE the status zone
+            // (tokens section 8 position), state-coloured: ok = linked,
+            // warn = connecting/retrying, faint = off/unconfigured.
+            {
+                uint16_t link_color = aiwatchos::colors::kFaint;
+                switch (aiwatchos_net::muse_link_state()) {
+                    case aiwatchos_net::LinkState::kLinked:
+                        link_color = aiwatchos::colors::kOk;
+                        break;
+                    case aiwatchos_net::LinkState::kConnecting:
+                    case aiwatchos_net::LinkState::kWaitingWifi:
+                    case aiwatchos_net::LinkState::kBackoff:
+                        link_color = aiwatchos::colors::kWarn;
+                        break;
+                    case aiwatchos_net::LinkState::kOff:
+                        break;
                 }
+                fb.fill_rect(aiwatchos::kSafeCornerEnd,
+                             aiwatchos::kStatusZoneBottom - 3,
+                             aiwatchos::kDisplayWidth - 1 -
+                                 aiwatchos::kSafeCornerEnd,
+                             aiwatchos::kStatusZoneBottom - 1, link_color);
             }
-            g_band_flush.commit(flushed);
-            if (dirty) {
-                perf_accum(aiwatchos_mdb::detail::g_perf.flush_us_sum,
-                           aiwatchos_mdb::detail::g_perf.flush_us_max,
-                           perf_now_us() - t_flush0);
-#ifdef __ESPRESSIF_IDF__
-                aiwatchos_mdb::detail::g_perf.flush_frames++;
 #endif
+
+            // MDB safe-area calibration card (`mdb frame`): while latched,
+            // overdraw the finished frame — app + status zone and all — so
+            // the glass shows the card instead of the app. Drawn here, after
+            // every other render and before the band scan, the card is part
+            // of the flushed frame like anything else.
+            if (aiwatchos_mdb::detail::frame_card_requested()) {
+                draw_frame_card(fb);
             }
-            // Perf readout: a switch's transition completes when the
-            // incoming app's first composed frame has been flushed
-            // (same iteration as detection — composition and flush are
-            // synchronous in this loop, so this is the glass-visible
-            // switch latency from the shell's point of view).
-            if (switch_t0_us) {
-                const uint32_t ms = static_cast<uint32_t>(
-                    (perf_now_us() - switch_t0_us) / 1000);
-                aiwatchos_mdb::detail::g_perf.switch_ms_last = ms;
-                if (ms > aiwatchos_mdb::detail::g_perf.switch_ms_max) {
-                    aiwatchos_mdb::detail::g_perf.switch_ms_max = ms;
+
+            // Flush only the changed bands to the CO5300 (plan 1.6): hash
+            // the frame in 4 horizontal bands and flush the dirty ones via
+            // the HAL row-range flush. A static screen costs zero QSPI
+            // traffic; changed bands commit their hashes only on success.
+            {
+                const uint64_t t_hash0 = perf_now_us();
+                perf_accum(aiwatchos_mdb::detail::g_perf.render_us_sum,
+                           aiwatchos_mdb::detail::g_perf.render_us_max,
+                           t_hash0 - t_render0);
+                const uint8_t dirty = g_band_flush.scan(fb.pixels, fb.width, fb.height);
+                const uint64_t t_flush0 = perf_now_us();
+                perf_accum(aiwatchos_mdb::detail::g_perf.hash_us_sum,
+                           aiwatchos_mdb::detail::g_perf.hash_us_max,
+                           t_flush0 - t_hash0);
+                uint8_t flushed = 0;
+                for (int b = 0; b < aiwatchos::BandFlush::kBands; ++b) {
+                    if (!(dirty & (1u << b))) continue;
+                    int y0, y1;
+                    aiwatchos::BandFlush::band_range(b, fb.height, y0, y1);
+                    if (board.display_flush_rows(y0, y1)) {
+                        flushed |= static_cast<uint8_t>(1u << b);
+                    }
                 }
-                switch_t0_us = 0;
+                g_band_flush.commit(flushed);
+                if (dirty) {
+                    perf_accum(aiwatchos_mdb::detail::g_perf.flush_us_sum,
+                               aiwatchos_mdb::detail::g_perf.flush_us_max,
+                               perf_now_us() - t_flush0);
+#ifdef __ESPRESSIF_IDF__
+                    aiwatchos_mdb::detail::g_perf.flush_frames++;
+#endif
+                }
+                // Perf readout: a switch's transition completes when the
+                // incoming app's first composed frame has been flushed
+                // (same iteration as detection — composition and flush are
+                // synchronous in this loop, so this is the glass-visible
+                // switch latency from the shell's point of view; a switch
+                // always forces this frame to render, so pacing never
+                // stretches the measurement).
+                if (switch_t0_us) {
+                    const uint32_t ms = static_cast<uint32_t>(
+                        (perf_now_us() - switch_t0_us) / 1000);
+                    aiwatchos_mdb::detail::g_perf.switch_ms_last = ms;
+                    if (ms > aiwatchos_mdb::detail::g_perf.switch_ms_max) {
+                        aiwatchos_mdb::detail::g_perf.switch_ms_max = ms;
+                    }
+                    switch_t0_us = 0;
+                }
             }
         }
 
