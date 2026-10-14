@@ -18,6 +18,7 @@ set(COMPONENT_SRCS
     src/touch_synth.cpp
     src/band_flush.cpp
     src/font.cpp
+    src/boot_anim.cpp
 )
 
 set(COMPONENT_ADD_INCLUDEDIRS include)

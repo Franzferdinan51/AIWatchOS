@@ -16,6 +16,7 @@
 #include "aiwatchos/hal.hpp"
 #include "aiwatchos/display_power.hpp"
 #include "aiwatchos/boot_escape.hpp"
+#include "aiwatchos/boot_anim.hpp"
 
 #include "aiwatchos/settings_page.hpp"
 #include "aiwatchos/notifications.hpp"
@@ -310,6 +311,11 @@ extern "C" void app_main(void) {
 #endif
     aiwatchos::backdrop_bake(s_backdrop);
     aiwatchos::Framebuffer fb{s_framebuffer, aiwatchos::kDisplayWidth, aiwatchos::kDisplayHeight};
+
+    // Muse boot animation (~2.2 s, any touch skips). Runs before the
+    // loop so the glass shows brand + progress instead of black while
+    // the network stacks come up below.
+    aiwatchos::boot_anim_play(board, fb);
 
     // --- 2. Create the AppManager and register apps ---
     static aiwatchos::AppManager g_app_mgr(board);

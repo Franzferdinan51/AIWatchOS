@@ -28,6 +28,7 @@
 #include "aiwatchos/weather_app.hpp"       // for weather screen verification
 #include "aiwatchos/clock_face.hpp"         // for clock complication verification
 #include "aiwatchos/status_snapshot.hpp"    // for R4 bus verification
+#include "aiwatchos/boot_anim.hpp"          // for boot animation verification
 #include "aiwatchos/notifications.hpp"   // for notification wrap verification
 #include "aiwatchos/color_test.hpp"      // for colour-test pattern verification
 #include "aiwatchos/touch_synth.hpp"
@@ -3438,6 +3439,68 @@ static void test_clock_chips() {
     printf("test_clock_chips: PASSED\n");
 }
 
+// --- Muse boot animation: staged reveal, deterministic, fallback -----
+static void test_boot_anim() {
+    using namespace aiwatchos;
+    if (!assets_ready()) {
+        printf("test_boot_anim: SKIPPED (assets not found from cwd)\n");
+        return;
+    }
+    assert(boot_anim_begin());   // the baked mark ships in assets/
+    static uint16_t buf[kDisplayWidth * kDisplayHeight];
+    static uint16_t again[kDisplayWidth * kDisplayHeight];
+    Framebuffer fb{buf, kDisplayWidth, kDisplayHeight};
+    Framebuffer fb2{again, kDisplayWidth, kDisplayHeight};
+    auto ink = [&]() {
+        int n = 0;
+        for (int i = 0; i < kDisplayWidth * kDisplayHeight; ++i) {
+            if (buf[i] != 0) ++n;
+        }
+        return n;
+    };
+
+    // Staged reveal: ink grows as elements fade in.
+    boot_anim_render(fb, 100);
+    const int early = ink();
+    boot_anim_render(fb, 1000);
+    const int mid = ink();
+    boot_anim_render(fb, kBootAnimMs);
+    const int full = ink();
+    assert(early > 100 && mid > early && full > mid);
+
+    // Deterministic: same t renders identical pixels; past-the-end
+    // clamps to the final frame.
+    boot_anim_render(fb2, kBootAnimMs);
+    assert(std::memcmp(buf, again, sizeof(buf)) == 0);
+    boot_anim_render(fb2, kBootAnimMs + 5000);
+    assert(std::memcmp(buf, again, sizeof(buf)) == 0);
+
+    // Final frame composition: blue mark, white wordmark, Meta row,
+    // progress dots, credit line — each in its own band.
+    auto band_ink = [&](int y0, int y1) {
+        int n = 0;
+        for (int y = y0; y < y1; ++y) {
+            for (int x = 0; x < kDisplayWidth; ++x) {
+                if (buf[y * kDisplayWidth + x] != 0) ++n;
+            }
+        }
+        return n;
+    };
+    assert(band_ink(70, 282) > 5000);     // the M mark
+    assert(band_ink(300, 336) > 200);     // "Muse"
+    assert(band_ink(384, 408) > 200);     // Meta row
+    assert(band_ink(432, 440) > 20);      // dots
+    assert(band_ink(466, 484) > 20);      // credit
+
+    // Text-only fallback (no sprite): still branded, never blank.
+    boot_anim_end();
+    boot_anim_render(fb, kBootAnimMs);
+    assert(band_ink(120, 220) > 200);     // fallback "M"
+    assert(band_ink(300, 336) > 200);     // "Muse" survives
+
+    printf("test_boot_anim: PASSED\n");
+}
+
 int main() {
     test_aa_text();                      // baked Inter AA renderer against real assets
     test_touch_synth();
@@ -3507,6 +3570,7 @@ int main() {
     test_weather_screen();               // Weather §3.7 states, pill, tap refresh
     test_launcher_badge();               // Launcher: no self-tile, Alerts badge
     test_clock_chips();                  // Clock §3.1 complications + navigation
+    test_boot_anim();                    // Muse boot animation staging + fallback
 
     printf("\nAll AppManager tests PASSED.\n");
     return 0;
